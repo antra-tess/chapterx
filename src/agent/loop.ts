@@ -235,17 +235,24 @@ export class AgentLoop {
       const toolCache = toolCacheWithResults.map(e => e.call)
       const state = await this.stateManager.getOrInitialize(this.botId, channelId, toolCache)
 
-      // 2. Load configuration (need this for recencyWindow)
-      // First fetch with minimal depth just to get pinned configs
-      const configFetch = await this.connector.fetchContext({
+      // 2. Calculate fetch depth BEFORE fetching (need big enough depth for config too)
+      // Fetch enough messages to include our current context + some buffer
+      let fetchDepth = 500  // Default with buffer for config + context
+      
+      // We'll get config from this same fetch, so no need for separate config fetch
+      
+      // 3. Fetch context ONCE with calculated depth (gets messages + pinned configs + images)
+      const discordContext = await this.connector.fetchContext({
         channelId,
-        depth: 50,  // Just enough to get pinned messages
+        depth: fetchDepth,
+        authorizedRoles: [],  // Will apply after loading config
       })
       
+      // 4. Load configuration from the fetched pinned messages
       const config = this.configSystem.loadConfig({
         botName: this.botId,
-        guildId: configFetch.guildId,
-        channelConfigs: configFetch.pinnedConfigs,
+        guildId: discordContext.guildId,
+        channelConfigs: discordContext.pinnedConfigs,
       })
 
       // Initialize MCP servers from config (once per bot)
@@ -254,36 +261,6 @@ export class AgentLoop {
         await this.toolSystem.initializeServers(config.mcpServers)
         this.mcpInitialized = true
       }
-
-      // 3. Now fetch full context with proper depth
-      // Fetch enough messages to include our current context + some buffer
-      // This ensures we don't lose messages when temporarily exceeding limits
-      let fetchDepth = 400  // Start with minimum
-      
-      // If message limit specified, use it + threshold + buffer
-      if (config.recencyWindowMessages !== undefined) {
-        fetchDepth = Math.max(fetchDepth, config.recencyWindowMessages + config.rollingThreshold + 50)
-      }
-      
-      // If character limit specified, estimate messages needed
-      if (config.recencyWindowCharacters !== undefined) {
-        // Estimate average chars per message (conservative estimate)
-        const estimatedMessages = Math.ceil(config.recencyWindowCharacters / 50)  // 50 chars/msg average
-        const charBasedDepth = estimatedMessages + config.rollingThreshold + 100
-        fetchDepth = Math.max(fetchDepth, charBasedDepth)
-      }
-      
-      // If neither limit specified, use default
-      if (config.recencyWindowMessages === undefined && config.recencyWindowCharacters === undefined) {
-        logger.warn('No context limits specified, using default depth')
-        fetchDepth = 400
-      }
-      
-      const discordContext = await this.connector.fetchContext({
-        channelId,
-        depth: fetchDepth,
-        authorizedRoles: config.authorizedRoles,
-      })
 
       // Filter out "m " command messages from context (they should be deleted but might still be fetched)
       const originalCount = discordContext.messages.length
