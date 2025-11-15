@@ -166,7 +166,7 @@ export class ConfigSystem {
 
       // Misc
       systemPrompt: config.systemPrompt,
-      replyOnRandom: config.replyOnRandom || 0,
+      replyOnRandom: config.replyOnRandom ?? 500,
       replyOnName: config.replyOnName ?? false,
       maxQueuedReplies: config.maxQueuedReplies || 1,
     }

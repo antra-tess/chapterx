@@ -78,14 +78,16 @@ export class AgentLoop {
   private async processBatch(events: Event[]): Promise<void> {
     logger.debug({ count: events.length, types: events.map((e) => e.type) }, 'Processing batch')
 
+    // Get first event to access channel for config (for random check)
+    const firstEvent = events[0]
+    if (!firstEvent) return
+
     // Check if activation is needed
-    if (!this.shouldActivate(events)) {
+    if (!await this.shouldActivate(events, firstEvent.channelId, firstEvent.guildId)) {
       logger.debug('No activation needed')
       return
     }
 
-    // Get first event (they're all from same channel in a batch)
-    const firstEvent = events[0]!
     const { channelId, guildId } = firstEvent
 
     // Get triggering message ID for tool tracking
@@ -143,7 +145,10 @@ export class AgentLoop {
     return result
   }
 
-  private shouldActivate(events: Event[]): boolean {
+  private async shouldActivate(events: Event[], channelId: string, guildId: string): Promise<boolean> {
+    // Load config for random chance check
+    let config: any = null
+    
     // Check each message event for activation triggers
     for (const event of events) {
       if (event.type !== 'message') {
@@ -176,6 +181,30 @@ export class AgentLoop {
         // Store m command event for deletion
         event.data._isMCommand = true
         return true
+      }
+
+      // 4. Random chance activation
+      if (!config) {
+        // Load config once for this batch
+        try {
+          const configFetch = await this.connector.fetchContext({ channelId, depth: 10 })
+          config = this.configSystem.loadConfig({
+            botName: this.botId,
+            guildId,
+            channelConfigs: configFetch.pinnedConfigs,
+          })
+        } catch (error) {
+          logger.warn({ error }, 'Failed to load config for random check')
+          return false
+        }
+      }
+      
+      if (config.replyOnRandom > 0) {
+        const chance = Math.random()
+        if (chance < 1 / config.replyOnRandom) {
+          logger.debug({ messageId: message.id, chance, threshold: 1 / config.replyOnRandom }, 'Activated by random chance')
+          return true
+        }
       }
     }
 
