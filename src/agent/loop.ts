@@ -175,12 +175,21 @@ export class AgentLoop {
 
       // 1. Check for m command FIRST (before mention check)
       // This ensures "m continue <@bot>" gets flagged for deletion
+      // Only trigger/delete if addressed to THIS bot (mention or reply)
       const content = message.content?.trim()
       if (content?.startsWith('m ')) {
-        logger.debug({ messageId: message.id, command: content }, 'Activated by m command')
-        // Store m command event for deletion
-        event.data._isMCommand = true
-        return true
+        const mentionsUs = this.botUserId && message.mentions?.has(this.botUserId)
+        const repliesTo = message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)
+        
+        if (mentionsUs || repliesTo) {
+          logger.debug({ messageId: message.id, command: content, mentionsUs, repliesTo }, 'Activated by m command addressed to us')
+          // Store m command event for deletion (only if addressed to us)
+          event.data._isMCommand = true
+          return true
+        }
+        // m command not addressed to us - ignore
+        logger.debug({ messageId: message.id, command: content }, 'm command not addressed to us - ignoring')
+        return false
       }
 
       // 2. Check for bot mention
