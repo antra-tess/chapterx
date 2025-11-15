@@ -381,11 +381,24 @@ export class DiscordConnector {
         
         // First chunk replies to the triggering message
         if (i === 0 && replyToMessageId) {
-          options.reply = { messageReference: replyToMessageId }
+          try {
+            options.reply = { messageReference: replyToMessageId }
+            const sent = await channel.send({ content: chunk, ...options })
+            messageIds.push(sent.id)
+          } catch (error: any) {
+            // If reply fails (message deleted), send without reply
+            if (error.code === 10008 || error.message?.includes('Unknown message')) {
+              logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
+              const sent = await channel.send({ content: chunk })
+              messageIds.push(sent.id)
+            } else {
+              throw error
+            }
+          }
+        } else {
+          const sent = await channel.send({ content: chunk, ...options })
+          messageIds.push(sent.id)
         }
-        
-        const sent = await channel.send({ content: chunk, ...options })
-        messageIds.push(sent.id)
       }
 
       logger.debug({ channelId, chunks: chunks.length, messageIds, replyTo: replyToMessageId }, 'Sent message')
