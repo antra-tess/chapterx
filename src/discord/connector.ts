@@ -848,6 +848,106 @@ export class DiscordConnector {
   }
 
   /**
+   * Get the bot reply chain depth for a message.
+   * Counts consecutive bot messages in the reply chain.
+   * Consecutive messages from the same bot author count as one logical message.
+   * Returns the number of logical bot message groups leading up to this message.
+   */
+  async getBotReplyChainDepth(channelId: string, message: any): Promise<number> {
+    let depth = 0
+    let currentMessage = message
+    let lastBotAuthorId: string | null = null
+
+    const channel = await this.client.channels.fetch(channelId) as TextChannel
+    if (!channel || !channel.isTextBased()) {
+      return 0
+    }
+
+    logger.debug({ 
+      messageId: message.id, 
+      authorId: message.author?.id,
+      authorBot: message.author?.bot,
+      hasReference: !!message.reference?.messageId
+    }, 'Starting bot reply chain depth calculation')
+
+    while (currentMessage) {
+      const isBot = currentMessage.author?.bot
+
+      if (isBot) {
+        const currentBotId = currentMessage.author?.id
+        // Only increment depth if this is a different bot than the previous one
+        // (consecutive messages from the same bot count as one logical message)
+        if (currentBotId !== lastBotAuthorId) {
+          depth++
+          lastBotAuthorId = currentBotId
+          logger.debug({ 
+            messageId: currentMessage.id, 
+            botId: currentBotId,
+            depth 
+          }, 'Bot message found, incremented depth')
+        } else {
+          logger.debug({ 
+            messageId: currentMessage.id, 
+            botId: currentBotId 
+          }, 'Same bot consecutive message, not incrementing depth')
+        }
+      } else {
+        // Hit a non-bot message, stop counting
+        logger.debug({ 
+          messageId: currentMessage.id, 
+          authorId: currentMessage.author?.id,
+          finalDepth: depth 
+        }, 'Non-bot message found, stopping chain')
+        break
+      }
+
+      // Follow the reply chain
+      if (currentMessage.reference?.messageId) {
+        try {
+          currentMessage = await channel.messages.fetch(currentMessage.reference.messageId)
+          logger.debug({ 
+            nextMessageId: currentMessage.id 
+          }, 'Following reply reference')
+        } catch (error) {
+          // Referenced message not found, stop the chain
+          logger.debug({ 
+            error, 
+            finalDepth: depth 
+          }, 'Referenced message not found, stopping chain')
+          break
+        }
+      } else {
+        // No more references, end of chain
+        logger.debug({ finalDepth: depth }, 'No more references, chain ended')
+        break
+      }
+    }
+
+    logger.debug({ 
+      messageId: message.id, 
+      finalDepth: depth 
+    }, 'Bot reply chain depth calculation complete')
+    return depth
+  }
+
+  /**
+   * Add a reaction to a message
+   */
+  async addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+    try {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+      if (!channel || !channel.isTextBased()) {
+        return
+      }
+      const message = await channel.messages.fetch(messageId)
+      await message.react(emoji)
+      logger.debug({ channelId, messageId, emoji }, 'Added reaction')
+    } catch (error) {
+      logger.warn({ error, channelId, messageId, emoji }, 'Failed to add reaction')
+    }
+  }
+
+  /**
    * Close the Discord client
    */
   async close(): Promise<void> {

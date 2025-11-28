@@ -177,6 +177,10 @@ export interface BotConfig {
   reply_on_random: number
   reply_on_name: boolean
   max_queued_replies: number
+  
+  // Loop prevention
+  max_bot_reply_chain_depth: number  // Max consecutive bot messages in reply chain (prevents bot loops)
+  bot_reply_chain_depth_emote: string  // Emote to show when bot reply chain depth limit is reached
 }
 
 /**

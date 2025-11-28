@@ -193,6 +193,10 @@ export class ConfigSystem {
       reply_on_random: config.reply_on_random ?? 500,
       reply_on_name: config.reply_on_name ?? false,
       max_queued_replies: config.max_queued_replies || 1,
+      
+      // Loop prevention
+      max_bot_reply_chain_depth: config.max_bot_reply_chain_depth ?? 2,
+      bot_reply_chain_depth_emote: config.bot_reply_chain_depth_emote || '🔁',
     }
   }
 

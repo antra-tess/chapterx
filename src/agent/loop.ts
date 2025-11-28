@@ -373,7 +373,37 @@ export class AgentLoop {
 
       // 2. Check for bot mention
       if (this.botUserId && message.mentions?.has(this.botUserId)) {
-        logger.debug({ messageId: message.id }, 'Activated by mention')
+        // Check bot reply chain depth to prevent bot loops
+        const chainDepth = await this.connector.getBotReplyChainDepth(channelId, message)
+        
+        // Load config if not already loaded
+        if (!config) {
+          try {
+            const configFetch = await this.connector.fetchContext({ channelId, depth: 10 })
+            config = this.configSystem.loadConfig({
+              botName: this.botId,
+              guildId,
+              channelConfigs: configFetch.pinnedConfigs,
+            })
+          } catch (error) {
+            logger.warn({ error }, 'Failed to load config for chain depth check')
+            return false
+          }
+        }
+        
+        if (chainDepth >= config.max_bot_reply_chain_depth) {
+          logger.info({ 
+            messageId: message.id, 
+            chainDepth, 
+            limit: config.max_bot_reply_chain_depth 
+          }, 'Bot reply chain depth limit reached, blocking activation')
+          
+          // Add reaction to indicate chain depth limit reached
+          await this.connector.addReaction(channelId, message.id, config.bot_reply_chain_depth_emote)
+          continue  // Check next event instead of returning false (might be random activation)
+        }
+        
+        logger.debug({ messageId: message.id, chainDepth }, 'Activated by mention')
         return true
       }
 
