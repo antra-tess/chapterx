@@ -183,6 +183,49 @@ maxTokens: 2000
 **M Commands**:
 - `m continue` - Activate bot without mention
 
+## Debugging & Tracing
+
+The bot includes a comprehensive tracing system that captures every activation, including Discord context, LLM requests/responses, tool executions, and console logs.
+
+### Trace Web Viewer
+
+Start the local web viewer to browse and search traces:
+
+```bash
+./trace serve
+# Opens at http://localhost:3847
+```
+
+Features:
+- **Search by Discord URL**: Paste any Discord message URL to find related traces
+- **Full LLM request/response viewer**: See exactly what was sent to the API
+- **Context transformation details**: Understand how Discord messages became LLM context
+- **Console log filtering**: Filter logs by level (debug, info, warn, error)
+- **Token usage & cost info**: Track API usage per activation
+
+### Trace CLI
+
+```bash
+# List recent traces
+./trace list --limit 10
+
+# Show trace summary
+./trace explain <trace-id>
+
+# View full LLM request
+./trace request <trace-id>
+
+# View full LLM response  
+./trace response <trace-id>
+
+# View console logs
+./trace logs <trace-id>
+```
+
+### Trace Files
+
+Traces are stored in `logs/traces/` as JSON files with an index at `logs/traces/index.jsonl` for fast lookups.
+
 ## Development
 
 ```bash
