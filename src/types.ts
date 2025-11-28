@@ -103,6 +103,7 @@ export type StopReason =
   | 'max_tokens'    // Hit token limit
   | 'stop_sequence' // Hit stop sequence
   | 'tool_use'      // Stopped for tool use
+  | 'refusal'       // Content refused by safety classifier
 
 export interface UsageInfo {
   inputTokens: number

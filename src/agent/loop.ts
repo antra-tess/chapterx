@@ -639,6 +639,12 @@ export class AgentLoop {
       // 7. Stop typing
       await this.connector.stopTyping(channelId)
 
+      // 7.5. Check for refusal
+      const wasRefused = completion.stopReason === 'refusal'
+      if (wasRefused) {
+        logger.warn({ stopReason: completion.stopReason }, 'LLM refused to complete request')
+      }
+
       // 8. Send response
       let responseText = completion.content
         .filter((c: any) => c.type === 'text')
@@ -702,8 +708,22 @@ export class AgentLoop {
         sentMessageIds = await this.connector.sendMessage(channelId, responseText, triggeringMessageId)
         // Track bot's message IDs for reply detection
         sentMessageIds.forEach((id) => this.botMessageIds.add(id))
+        
+        // If refusal with content, add reaction to sent message(s)
+        if (wasRefused && sentMessageIds.length > 0) {
+          for (const msgId of sentMessageIds) {
+            await this.connector.addReaction(channelId, msgId, '🛑')
+          }
+          logger.info({ sentMessageIds }, 'Added refusal reaction to sent messages')
+        }
       } else {
         logger.warn('No text content to send in response')
+        
+        // If refusal with no content, add reaction to triggering message
+        if (wasRefused && triggeringMessageId) {
+          await this.connector.addReaction(channelId, triggeringMessageId, '🛑')
+          logger.info({ triggeringMessageId }, 'Added refusal reaction to triggering message (no content sent)')
+        }
       }
       
       // Record final completion to activation

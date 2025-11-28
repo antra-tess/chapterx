@@ -194,7 +194,18 @@ export class OpenAIProvider implements LLMProvider {
     }
   }
 
-  private mapStopReason(reason: string | null | undefined): 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' {
+  private mapStopReason(reason: string | null | undefined): 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | 'refusal' {
+    // Handle null/undefined
+    if (!reason) {
+      return 'end_turn'
+    }
+    
+    // Check for refusal (OpenAI uses 'content_filter')
+    const lowerReason = reason.toLowerCase()
+    if (lowerReason.includes('refusal') || lowerReason.includes('refuse') || lowerReason.includes('content_filter')) {
+      return 'refusal'
+    }
+    
     switch (reason) {
       case 'stop':
         return 'end_turn'

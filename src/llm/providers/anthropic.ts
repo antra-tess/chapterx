@@ -152,7 +152,18 @@ export class AnthropicProvider implements LLMProvider {
     }
   }
 
-  private mapStopReason(reason: string | null): 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' {
+  private mapStopReason(reason: string | null): 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | 'refusal' {
+    // Handle null/undefined
+    if (!reason) {
+      return 'end_turn'
+    }
+    
+    // Check for refusal (case-insensitive, may appear as 'refusal', 'content_filter', etc.)
+    const lowerReason = reason.toLowerCase()
+    if (lowerReason.includes('refusal') || lowerReason.includes('refuse') || lowerReason.includes('content_filter')) {
+      return 'refusal'
+    }
+    
     switch (reason) {
       case 'end_turn':
         return 'end_turn'
