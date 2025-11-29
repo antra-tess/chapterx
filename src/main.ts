@@ -81,7 +81,8 @@ async function main() {
     llmMiddleware.setVendorConfigs(vendorConfigs)
 
     // Register Anthropic provider if configured
-    const anthropicConfig = vendorConfigs['anthropic'] || vendorConfigs['anthropic-steering-preview'] || vendorConfigs['anthropic-antra']
+    // Look for any vendor with anthropic_api_key (chapter2 uses anthropic-steering-preview, etc.)
+    const anthropicConfig = Object.values(vendorConfigs).find(v => v.config?.anthropic_api_key)
     if (anthropicConfig?.config.anthropic_api_key) {
       const provider = new AnthropicProvider(anthropicConfig.config.anthropic_api_key)
       llmMiddleware.registerProvider(provider)
@@ -89,11 +90,13 @@ async function main() {
     }
 
     // Register OpenAI provider if configured
-    const openaiConfig = vendorConfigs['openai']
+    // Look for any vendor with openai_api_key (chapter2 uses openai-4o, openai-grok, etc.)
+    const openaiConfig = Object.values(vendorConfigs).find(v => v.config?.openai_api_key)
     if (openaiConfig?.config.openai_api_key) {
       const provider = new OpenAIProvider({
         apiKey: openaiConfig.config.openai_api_key,
-        baseUrl: openaiConfig.config.openai_base_url,  // Optional: for compatible APIs
+        // Support both chapter3's openai_base_url and chapter2's api_base
+        baseUrl: openaiConfig.config.openai_base_url || openaiConfig.config.api_base,
       })
       llmMiddleware.registerProvider(provider)
       logger.info('Registered OpenAI provider')

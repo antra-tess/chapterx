@@ -90,8 +90,24 @@ export class LLMMiddleware {
     // Check vendor configs for model match
     for (const [vendorName, config] of Object.entries(this.vendorConfigs)) {
       if (matchesAny(modelName, config.provides)) {
-        const provider = this.providers.get(vendorName)
+        // Determine provider type based on vendor config
+        // (chapter2 uses names like 'anthropic-steering-preview', 'openai-4o', etc.)
+        let providerName: string | null = null
+        
+        if (config.config?.anthropic_api_key) {
+          providerName = 'anthropic'
+        } else if (config.config?.openai_api_key || vendorName.startsWith('openai-')) {
+          providerName = 'openai'
+        } else if (vendorName.startsWith('anthropic')) {
+          providerName = 'anthropic'
+        } else {
+          // Fall back to vendor name (original behavior)
+          providerName = vendorName
+        }
+        
+        const provider = this.providers.get(providerName)
         if (provider) {
+          logger.debug({ modelName, vendorName, providerName }, 'Selected provider for model')
           return provider
         }
       }
