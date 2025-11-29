@@ -960,12 +960,20 @@ const HTML = `<!DOCTYPE html>
       await loadBots();
       loadRecentTraces();
       
-      // Check URL for initial search
-      const params = new URLSearchParams(window.location.search);
-      const q = params.get('q');
-      if (q) {
-        document.getElementById('searchInput').value = q;
-        search();
+      // Check URL for initial trace view or search
+      const path = window.location.pathname;
+      const traceMatch = path.match(/^\/trace\/([a-zA-Z0-9-]+)/);
+      if (traceMatch) {
+        // Direct link to trace
+        loadTrace(traceMatch[1]);
+      } else {
+        // Check for search query
+        const params = new URLSearchParams(window.location.search);
+        const q = params.get('q');
+        if (q) {
+          document.getElementById('searchInput').value = q;
+          search();
+        }
       }
       
       // Enter key to search
@@ -1082,11 +1090,17 @@ const HTML = `<!DOCTYPE html>
       currentTrace = await res.json();
       renderTrace();
       showTrace();
+      
+      // Update URL for sharing
+      history.pushState({ traceId }, '', '/trace/' + traceId);
     }
     
     function showSearch() {
       document.getElementById('searchView').style.display = 'block';
       document.getElementById('traceView').classList.remove('active');
+      
+      // Update URL back to root
+      history.pushState({}, '', '/');
     }
     
     function showTrace() {
@@ -1094,12 +1108,29 @@ const HTML = `<!DOCTYPE html>
       document.getElementById('traceView').classList.add('active');
     }
     
+    // Handle browser back/forward
+    window.addEventListener('popstate', async (e) => {
+      if (e.state?.traceId) {
+        const res = await apiFetch('/api/trace/' + e.state.traceId);
+        if (res.ok) {
+          currentTrace = await res.json();
+          renderTrace();
+          showTrace();
+        }
+      } else {
+        showSearch();
+      }
+    });
+    
     function renderTrace() {
       const t = currentTrace;
       const cb = t.contextBuild;
       
       const html = \`
-        <h2 style="margin-bottom: 20px;">Trace: \${t.traceId}</h2>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+          <h2>Trace: \${t.traceId}</h2>
+          <button onclick="copyTraceLink()" class="view-json-btn" title="Copy shareable link">📋 Copy Link</button>
+        </div>
         
         <div class="stats-grid" style="margin-bottom: 20px;">
           <div class="stat-box">
@@ -1603,6 +1634,20 @@ const HTML = `<!DOCTYPE html>
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
     }
+    
+    function copyTraceLink() {
+      const url = window.location.origin + '/trace/' + currentTrace.traceId;
+      navigator.clipboard.writeText(url).then(() => {
+        // Show brief feedback
+        const btn = event.target;
+        const originalText = btn.textContent;
+        btn.textContent = '✓ Copied!';
+        setTimeout(() => { btn.textContent = originalText; }, 1500);
+      }).catch(err => {
+        console.error('Failed to copy:', err);
+        prompt('Copy this link:', url);
+      });
+    }
   </script>
 </body>
 </html>
@@ -1618,7 +1663,8 @@ const server = createServer((req, res) => {
   if (url.pathname.startsWith('/api/')) {
     handleApi(req, res, url.pathname)
   } else {
-    // For HTML page, check auth via cookie or redirect to login
+    // Serve HTML for all paths (including /trace/:id for deep links)
+    // The client-side JS will handle routing based on pathname
     res.setHeader('Content-Type', 'text/html')
     res.end(HTML)
   }
