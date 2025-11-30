@@ -80,26 +80,33 @@ async function main() {
     const vendorConfigs = configSystem.loadVendors()
     llmMiddleware.setVendorConfigs(vendorConfigs)
 
-    // Register Anthropic provider if configured
-    // Look for any vendor with anthropic_api_key (chapter2 uses anthropic-steering-preview, etc.)
-    const anthropicConfig = Object.values(vendorConfigs).find(v => v.config?.anthropic_api_key)
-    if (anthropicConfig?.config.anthropic_api_key) {
-      const provider = new AnthropicProvider(anthropicConfig.config.anthropic_api_key)
-      llmMiddleware.registerProvider(provider)
-      logger.info('Registered Anthropic provider')
-    }
-
-    // Register OpenAI provider if configured
-    // Look for any vendor with openai_api_key (chapter2 uses openai-4o, openai-grok, etc.)
-    const openaiConfig = Object.values(vendorConfigs).find(v => v.config?.openai_api_key)
-    if (openaiConfig?.config.openai_api_key) {
-      const provider = new OpenAIProvider({
-        apiKey: openaiConfig.config.openai_api_key,
-        // Support both chapter3's openai_base_url and chapter2's api_base
-        baseUrl: openaiConfig.config.openai_base_url || openaiConfig.config.api_base,
-      })
-      llmMiddleware.registerProvider(provider)
-      logger.info('Registered OpenAI provider')
+    // Register providers for each vendor
+    for (const [vendorName, vendorConfig] of Object.entries(vendorConfigs)) {
+      const config = vendorConfig.config
+      
+      // Anthropic provider
+      if (config?.anthropic_api_key) {
+        const provider = new AnthropicProvider(config.anthropic_api_key)
+        // Register with vendor name so middleware can route correctly
+        llmMiddleware.registerProvider(provider, vendorName)
+        logger.info({ vendorName }, 'Registered Anthropic provider')
+      }
+      
+      // OpenAI-compatible provider
+      if (config?.openai_api_key) {
+        const baseUrl = config.openai_base_url || config.api_base
+        if (!baseUrl) {
+          logger.warn({ vendorName }, 'Skipping OpenAI vendor without api_base')
+          continue
+        }
+        const provider = new OpenAIProvider({
+          apiKey: config.openai_api_key,
+          baseUrl,
+        })
+        // Register with vendor name so middleware can route correctly
+        llmMiddleware.registerProvider(provider, vendorName)
+        logger.info({ vendorName, baseUrl }, 'Registered OpenAI provider')
+      }
     }
 
     // TODO: Register other providers (Bedrock, Google)

@@ -45,10 +45,13 @@ export class LLMMiddleware {
 
   /**
    * Register a provider
+   * @param provider The provider instance
+   * @param name Optional name override (defaults to provider.name). Use vendor name for correct routing.
    */
-  registerProvider(provider: LLMProvider): void {
-    this.providers.set(provider.name, provider)
-    logger.info({ provider: provider.name }, 'Registered LLM provider')
+  registerProvider(provider: LLMProvider, name?: string): void {
+    const registrationName = name || provider.name
+    this.providers.set(registrationName, provider)
+    logger.info({ provider: registrationName, type: provider.name }, 'Registered LLM provider')
   }
 
   /**
@@ -88,28 +91,16 @@ export class LLMMiddleware {
 
   private selectProvider(modelName: string): LLMProvider {
     // Check vendor configs for model match
+    // Each vendor is now registered with its own name
     for (const [vendorName, config] of Object.entries(this.vendorConfigs)) {
       if (matchesAny(modelName, config.provides)) {
-        // Determine provider type based on vendor config
-        // (chapter2 uses names like 'anthropic-steering-preview', 'openai-4o', etc.)
-        let providerName: string | null = null
-        
-        if (config.config?.anthropic_api_key) {
-          providerName = 'anthropic'
-        } else if (config.config?.openai_api_key || vendorName.startsWith('openai-')) {
-          providerName = 'openai'
-        } else if (vendorName.startsWith('anthropic')) {
-          providerName = 'anthropic'
-        } else {
-          // Fall back to vendor name (original behavior)
-          providerName = vendorName
-        }
-        
-        const provider = this.providers.get(providerName)
+        const provider = this.providers.get(vendorName)
         if (provider) {
-          logger.debug({ modelName, vendorName, providerName }, 'Selected provider for model')
+          logger.debug({ modelName, vendorName }, 'Selected provider for model')
           return provider
         }
+        // Provider not registered for this vendor - continue looking
+        logger.debug({ modelName, vendorName }, 'Vendor matches but provider not registered')
       }
     }
 
