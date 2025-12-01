@@ -1105,6 +1105,7 @@ export class ContextBuilder {
       botInnerName: config.innerName,
       botDiscordUsername,  // Bot's actual Discord username for chat mode message matching
       chatPersonaPrompt: config.chat_persona_prompt,
+      chatPersonaPrefill: config.chat_persona_prefill,
     }
   }
 }

@@ -275,6 +275,7 @@ export class LLMMiddleware {
     // Use Discord username for message matching (identifies bot's own messages accurately)
     const botDiscordUsername = request.config.botDiscordUsername
     const usePersonaPrompt = request.config.chatPersonaPrompt
+    const usePersonaPrefill = request.config.chatPersonaPrefill
 
     // Add system prompt
     if (request.system_prompt) {
@@ -322,8 +323,8 @@ export class LLMMiddleware {
     // Flush remaining buffer (this is the last user message)
     if (buffer.length > 0) {
       const userMsg = this.mergeToUserMessage(buffer)
-      // Add persona prompt ending if configured
-      if (usePersonaPrompt) {
+      // Add persona prefill ending if configured (adds "botname:" to prompt completion)
+      if (usePersonaPrefill) {
         if (typeof userMsg.content === 'string') {
           userMsg.content = `${userMsg.content}\n\nAI persona you describe:\n${botInnerName}:"`
         } else if (Array.isArray(userMsg.content)) {

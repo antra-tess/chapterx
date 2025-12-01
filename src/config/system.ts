@@ -214,6 +214,7 @@ export class ConfigSystem {
 
       // Chat mode persona
       chat_persona_prompt: config.chat_persona_prompt ?? true,
+      chat_persona_prefill: config.chat_persona_prefill ?? true,
 
       // Retries
       llm_retries: config.llm_retries || 3,
