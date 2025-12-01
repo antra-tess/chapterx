@@ -326,12 +326,12 @@ export class LLMMiddleware {
       // Add persona prefill ending if configured (adds "botname:" to prompt completion)
       if (usePersonaPrefill) {
         if (typeof userMsg.content === 'string') {
-          userMsg.content = `${userMsg.content}\n\nAI persona you describe:\n${botInnerName}:"`
+          userMsg.content = `${userMsg.content}:\n${botInnerName}:`
         } else if (Array.isArray(userMsg.content)) {
           // Find last text block and append
           const lastTextIdx = userMsg.content.map((c: any) => c.type).lastIndexOf('text')
           if (lastTextIdx >= 0) {
-            (userMsg.content[lastTextIdx] as any).text += `\n\nAI persona you describe:\n${botInnerName}:"`
+            (userMsg.content[lastTextIdx] as any).text += `:\n${botInnerName}:`
           }
         }
       }
