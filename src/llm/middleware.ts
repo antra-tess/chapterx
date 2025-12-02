@@ -329,10 +329,10 @@ export class LLMMiddleware {
         // Add bot message as assistant (skip if empty - API doesn't allow empty assistant messages)
         const text = this.extractText(msg.content)
         if (text.trim()) {
-          messages.push({
-            role: 'assistant',
-            content: text,
-          })
+        messages.push({
+          role: 'assistant',
+          content: text,
+        })
         }
       } else {
         // Add to buffer (including bot messages if botAsAssistant is false)

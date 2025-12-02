@@ -65,24 +65,20 @@ const plugin: ToolPlugin = {
       }
     },
     {
-      name: 'request_config_change',
-      description: 'Request a change to bot configuration. Emits and pins a .config message that will auto-apply on next message.',
+      name: 'set_config',
+      description: 'Change bot configuration. Emits and pins a .config message that applies on next message.',
       inputSchema: {
         type: 'object',
         properties: {
           changes: {
             type: 'object',
             description: 'Object with config keys and their new values'
-          },
-          reason: {
-            type: 'string',
-            description: 'Reason for requesting this change'
           }
         },
-        required: ['changes', 'reason']
+        required: ['changes']
       },
       handler: async (input, context) => {
-        const { changes, reason } = input
+        const { changes } = input
         
         // Validate that changes only include allowed keys (not sensitive ones)
         const forbiddenKeys = ['api_key', 'token', 'secret', 'password', 'mcp_servers', 'tool_plugins']
@@ -96,10 +92,7 @@ const plugin: ToolPlugin = {
         }
         
         // Format as .config message (chapter2 format: .config TARGET\n---\nyaml)
-        const yamlLines = [
-          `# ${reason}`,  // Comment with reason
-          ...Object.entries(changes).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
-        ]
+        const yamlLines = Object.entries(changes).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
         const configMessage = `.config ${context.botId}\n---\n${yamlLines.join('\n')}`
         
         // Send and pin the config message
