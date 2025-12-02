@@ -1144,7 +1144,10 @@ const HTML = `<!DOCTYPE html>
       const html = \`
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
           <h2>Trace: \${t.traceId}</h2>
-          <button onclick="copyTraceLink()" class="view-json-btn" title="Copy shareable link">📋 Copy Link</button>
+          <div style="display: flex; gap: 8px;">
+            \${t.llmCalls?.length > 0 ? \`<button onclick="viewRequest('\${t.llmCalls[0].requestBodyRef}')" class="view-json-btn" title="View first LLM request">📤 View Request</button>\` : ''}
+            <button onclick="copyTraceLink()" class="view-json-btn" title="Copy shareable link">📋 Copy Link</button>
+          </div>
         </div>
         
         <div class="stats-grid" style="margin-bottom: 20px;">
