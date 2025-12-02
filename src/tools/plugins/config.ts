@@ -66,13 +66,13 @@ const plugin: ToolPlugin = {
     },
     {
       name: 'set_config',
-      description: 'Change bot configuration. Emits and pins a .config message that applies on next message.',
+      description: 'Change bot configuration by pinning a YAML .config message. For multiline values like system_prompt, use YAML block scalar syntax: key: |\\n  line1\\n  line2',
       inputSchema: {
         type: 'object',
         properties: {
           changes: {
             type: 'object',
-            description: 'Object with config keys and their new values'
+            description: 'YAML-compatible config keys and values. For multiline strings, the value should start with | followed by indented lines.'
           }
         },
         required: ['changes']
