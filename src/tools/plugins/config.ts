@@ -82,36 +82,45 @@ const plugin: ToolPlugin = {
         required: ['key', 'value']
       },
       handler: async (input, context) => {
-        const { key, value } = input
-        
-        if (!key || value === undefined) {
-          return 'Error: key and value are required'
+        try {
+          const { key, value } = input
+          
+          if (!key || value === undefined) {
+            return 'Error: key and value are required'
+          }
+          
+          // Validate that key is not sensitive
+          const forbiddenKeys = ['api_key', 'token', 'secret', 'password', 'mcp_servers', 'tool_plugins']
+          if (forbiddenKeys.some(fk => key.toLowerCase().includes(fk.toLowerCase()))) {
+            return `Error: Cannot change sensitive key: ${key}`
+          }
+          
+          // Check if sendMessage exists
+          if (!context.sendMessage) {
+            return 'Error: sendMessage not available in this context'
+          }
+          
+          // Format value for YAML - use block scalar for multiline
+          let yamlValue = value
+          if (typeof value === 'string' && value.includes('\n')) {
+            // Multiline: use YAML block scalar
+            const indented = value.split('\n').map(line => `  ${line}`).join('\n')
+            yamlValue = `|\n${indented}`
+          }
+          
+          // Format as .config message (chapter2 format: .config TARGET\n---\nyaml)
+          const configMessage = `.config ${context.botId}\n---\n${key}: ${yamlValue}`
+          
+          // Send and pin the config message
+          const messageIds = await context.sendMessage(configMessage)
+          if (messageIds.length > 0 && context.pinMessage) {
+            await context.pinMessage(messageIds[0]!)
+          }
+          
+          return `Config change pinned. ${key} will update on next message.`
+        } catch (err: any) {
+          return `Error: ${err?.message || err?.toString() || 'Unknown error'}`
         }
-        
-        // Validate that key is not sensitive
-        const forbiddenKeys = ['api_key', 'token', 'secret', 'password', 'mcp_servers', 'tool_plugins']
-        if (forbiddenKeys.some(fk => key.toLowerCase().includes(fk.toLowerCase()))) {
-          return `Error: Cannot change sensitive key: ${key}`
-        }
-        
-        // Format value for YAML - use block scalar for multiline
-        let yamlValue = value
-        if (typeof value === 'string' && value.includes('\n')) {
-          // Multiline: use YAML block scalar
-          const indented = value.split('\n').map(line => `  ${line}`).join('\n')
-          yamlValue = `|\n${indented}`
-        }
-        
-        // Format as .config message (chapter2 format: .config TARGET\n---\nyaml)
-        const configMessage = `.config ${context.botId}\n---\n${key}: ${yamlValue}`
-        
-        // Send and pin the config message
-        const messageIds = await context.sendMessage(configMessage)
-        if (messageIds.length > 0) {
-          await context.pinMessage(messageIds[0]!)
-        }
-        
-        return `Config change pinned. ${key} will update on next message.`
       }
     }
   ]
