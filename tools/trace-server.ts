@@ -1179,6 +1179,23 @@ const HTML = `<!DOCTYPE html>
               <span><span style="color: #ef4444;">●</span> Tools: \${formatTokens(cb.tokenEstimates.tools)}</span>
             </div>
             \${cb.didTruncate ? \`<div style="margin-top: 12px; color: var(--warning);">⚠️ Context was truncated: \${cb.messagesRolledOff} messages rolled off (\${cb.truncateReason})</div>\` : ''}
+            \${(() => {
+              const totalCacheRead = (t.llmCalls || []).reduce((sum, c) => sum + (c.tokenUsage.cacheReadTokens || 0), 0);
+              const totalCacheCreated = (t.llmCalls || []).reduce((sum, c) => sum + (c.tokenUsage.cacheCreationTokens || 0), 0);
+              const cacheMarkerMsg = cb.messages?.find(m => m.hasCacheControl);
+              return \`
+                <div style="margin-top: 12px; padding: 12px; background: var(--bg); border-radius: 4px;">
+                  <strong style="color: var(--accent);">🗄️ Cache Info</strong>
+                  <div style="margin-top: 8px; display: flex; gap: 24px; flex-wrap: wrap;">
+                    <span>Marker: \${cb.cacheMarker ? \`<code>\${cb.cacheMarker.slice(-8)}</code>\` : 'None'}</span>
+                    \${cacheMarkerMsg ? \`<span>Position: #\${cacheMarkerMsg.position} (\${cacheMarkerMsg.participant})</span>\` : ''}
+                    \${totalCacheCreated ? \`<span style="color: #f59e0b;">Created: \${formatTokens(totalCacheCreated)}</span>\` : ''}
+                    \${totalCacheRead ? \`<span style="color: #10b981;">Read: \${formatTokens(totalCacheRead)}</span>\` : ''}
+                    \${!totalCacheCreated && !totalCacheRead ? '<span style="color: var(--text-muted);">No caching</span>' : ''}
+                  </div>
+                </div>
+              \`;
+            })()}
           </div>
         </div>
         \` : ''}
