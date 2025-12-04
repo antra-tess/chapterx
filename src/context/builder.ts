@@ -11,6 +11,7 @@ import {
   DiscordMessage,
   DiscordContext,
   CachedImage,
+  CachedDocument,
   ToolCall,
   BotConfig,
   ModelConfig,
@@ -78,7 +79,12 @@ export class ContextBuilder {
     const filteredCount = beforeFilter - messages.length
 
     // 3. Convert to participant messages (limits applied later on final context)
-    const participantMessages = this.formatMessages(messages, discordContext.images, config)
+    const participantMessages = this.formatMessages(
+      messages,
+      discordContext.images,
+      discordContext.documents,
+      config
+    )
 
     // 5. Interleave historical tool use from cache (limited to last 5 calls with results)
     // Tools are inserted chronologically where they occurred, not at the end
@@ -586,12 +592,20 @@ export class ContextBuilder {
   private formatMessages(
     messages: DiscordMessage[],
     images: CachedImage[],
+    documents: CachedDocument[] | undefined,
     config: BotConfig
   ): ParticipantMessage[] {
     const participantMessages: ParticipantMessage[] = []
 
     // Create image lookup
     const imageMap = new Map(images.map((img) => [img.url, img]))
+    const documentsByMessageId = new Map<string, CachedDocument[]>()
+    for (const doc of documents || []) {
+      if (!documentsByMessageId.has(doc.messageId)) {
+        documentsByMessageId.set(doc.messageId, [])
+      }
+      documentsByMessageId.get(doc.messageId)!.push(doc)
+    }
     
     // Track image count and total base64 payload size to stay under API limits
     // Anthropic has ~10MB total request limit, we want to keep images under 3-4MB
@@ -657,6 +671,17 @@ export class ContextBuilder {
         })
       }
 
+      const docAttachments = documentsByMessageId.get(msg.id)
+      if (docAttachments && docAttachments.length > 0) {
+        for (const doc of docAttachments) {
+          const truncatedNotice = doc.truncated ? '\n[Attachment truncated]' : ''
+          content.push({
+            type: 'text',
+            text: `📎 ${doc.filename}\n${doc.text}${truncatedNotice}`,
+          })
+        }
+      }
+
       // Add image content only for pre-selected messages
       if (config.include_images && messagesWithImages.has(msg.id)) {
         logger.debug({ messageId: msg.id, attachments: msg.attachments.length }, 'Adding pre-selected images for message')
@@ -696,7 +721,7 @@ export class ContextBuilder {
     }
 
     // Limit images if needed
-    if (config.include_images && config.max_images > 0) {
+      if (config.include_images && config.max_images > 0) {
       this.limitImages(participantMessages, config.max_images)
     }
 
