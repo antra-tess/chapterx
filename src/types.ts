@@ -314,6 +314,7 @@ export interface DiscordContext {
   messages: DiscordMessage[]
   pinnedConfigs: string[]  // Raw YAML strings from pinned messages
   images: CachedImage[]
+  documents?: CachedDocument[]
   guildId: string
   /** Inheritance info for plugin state */
   inheritanceInfo?: {
@@ -329,6 +330,16 @@ export interface CachedImage {
   data: Buffer
   mediaType: string
   hash: string
+}
+
+export interface CachedDocument {
+  messageId: string
+  url: string
+  filename: string
+  contentType?: string
+  size: number
+  text: string
+  truncated?: boolean
 }
 
 // ============================================================================

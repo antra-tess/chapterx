@@ -3,7 +3,7 @@
  * Handles all Discord API interactions
  */
 
-import { Client, GatewayIntentBits, Message, TextChannel } from 'discord.js'
+import { Attachment, Client, GatewayIntentBits, Message, TextChannel } from 'discord.js'
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -12,6 +12,7 @@ import {
   DiscordContext,
   DiscordMessage,
   CachedImage,
+  CachedDocument,
   DiscordError,
 } from '../types.js'
 import { logger } from '../utils/logger.js'
@@ -22,6 +23,8 @@ export interface ConnectorOptions {
   cacheDir: string
   maxBackoffMs: number
 }
+
+const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
 
 export interface FetchContextParams {
   channelId: string
@@ -339,11 +342,12 @@ export class DiscordConnector {
       }
       endProfile('pinnedFetch')
 
-      startProfile('imageCaching')
-      // Download and cache images
+      startProfile('attachmentProcessing')
+      // Download/cache images and fetch text attachments
       const images: CachedImage[] = []
+      const documents: CachedDocument[] = []
       let newImagesDownloaded = 0
-      logger.debug({ messageCount: messages.length }, 'Checking messages for images')
+      logger.debug({ messageCount: messages.length }, 'Checking messages for attachments')
       
       for (const msg of messages) {
         const attachments = Array.from(msg.attachments.values())
@@ -358,18 +362,22 @@ export class DiscordConnector {
                 newImagesDownloaded++
               }
             }
+          } else if (this.isTextAttachment(attachment)) {
+            const doc = await this.fetchTextAttachment(attachment, msg.id)
+            if (doc) {
+              documents.push(doc)
+            }
           }
         }
       }
       
-      // Save URL map once if any new images were downloaded
       if (newImagesDownloaded > 0) {
         this.saveUrlMap()
         logger.debug({ newImagesDownloaded }, 'Saved URL map after new downloads')
-            }
-      endProfile('imageCaching')
+      }
+      endProfile('attachmentProcessing')
       
-      logger.debug({ totalImages: images.length }, 'Image caching complete')
+      logger.debug({ totalImages: images.length, totalDocuments: documents.length }, 'Attachment processing complete')
 
       // Build inheritance info for plugin state
       const inheritanceInfo: DiscordContext['inheritanceInfo'] = {}
@@ -382,10 +390,11 @@ export class DiscordConnector {
       }
 
       // Log fetch timings
-      logger.info({
+        logger.info({
         ...timings,
         messageCount: discordMessages.length,
         imageCount: images.length,
+          documentCount: documents.length,
         pinnedCount: pinnedConfigs.length,
       }, '⏱️  PROFILING: fetchContext breakdown (ms)')
 
@@ -393,6 +402,7 @@ export class DiscordConnector {
         messages: discordMessages,
         pinnedConfigs,
         images,
+          documents,
         guildId: channel.guildId,
         inheritanceInfo: Object.keys(inheritanceInfo).length > 0 ? inheritanceInfo : undefined,
       }
@@ -1408,6 +1418,53 @@ export class DiscordConnector {
       return cached
     } catch (error) {
       logger.warn({ error, url }, 'Failed to cache image')
+      return null
+    }
+  }
+
+  private isTextAttachment(attachment: Attachment): boolean {
+    if (attachment.contentType) {
+      return attachment.contentType.startsWith('text/plain')
+    }
+    const name = attachment.name?.toLowerCase() || ''
+    return name.endsWith('.txt')
+  }
+
+  private async fetchTextAttachment(attachment: Attachment, messageId: string): Promise<CachedDocument | null> {
+    if (attachment.size && attachment.size > MAX_TEXT_ATTACHMENT_BYTES * 4) {
+      logger.warn({ size: attachment.size, url: attachment.url }, 'Skipping oversized text attachment')
+      return null
+    }
+
+    try {
+      const response = await fetch(attachment.url)
+      if (!response.ok) {
+        logger.warn({ status: response.status, url: attachment.url }, 'Failed to fetch text attachment')
+        return null
+      }
+
+      const arrayBuffer = await response.arrayBuffer()
+      let buffer = Buffer.from(arrayBuffer)
+      let truncated = false
+
+      if (buffer.length > MAX_TEXT_ATTACHMENT_BYTES) {
+        buffer = buffer.slice(0, MAX_TEXT_ATTACHMENT_BYTES)
+        truncated = true
+      }
+
+      const text = buffer.toString('utf-8')
+
+      return {
+        messageId,
+        url: attachment.url,
+        filename: attachment.name || 'attachment.txt',
+        contentType: attachment.contentType || 'text/plain',
+        size: attachment.size,
+        text,
+        truncated,
+      }
+    } catch (error) {
+      logger.warn({ error, url: attachment.url }, 'Failed to download text attachment')
       return null
     }
   }
