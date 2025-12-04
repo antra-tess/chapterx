@@ -592,15 +592,17 @@ export class ContextBuilder {
   private formatMessages(
     messages: DiscordMessage[],
     images: CachedImage[],
-    documents: CachedDocument[] | undefined,
+    documents: CachedDocument[],
     config: BotConfig
   ): ParticipantMessage[] {
     const participantMessages: ParticipantMessage[] = []
 
     // Create image lookup
     const imageMap = new Map(images.map((img) => [img.url, img]))
+    
+    // Create document lookup by messageId
     const documentsByMessageId = new Map<string, CachedDocument[]>()
-    for (const doc of documents || []) {
+    for (const doc of documents) {
       if (!documentsByMessageId.has(doc.messageId)) {
         documentsByMessageId.set(doc.messageId, [])
       }
@@ -708,6 +710,37 @@ export class ContextBuilder {
                 sizeMB: (base64Data.length / 1024 / 1024).toFixed(2)
               }, 'Added image to content')
             }
+          }
+        }
+      }
+
+      // Add text document content in XML blocks
+      if (config.include_text_attachments !== false) {
+        const maxSizeBytes = (config.max_text_attachment_kb || 200) * 1024
+        const msgDocuments = documentsByMessageId.get(msg.id) || []
+        
+        for (const doc of msgDocuments) {
+          if (doc.size <= maxSizeBytes) {
+            // Wrap in XML block with filename
+            const truncatedNote = doc.truncated ? ' [truncated]' : ''
+            const xmlContent = `<attachment filename="${doc.filename}"${truncatedNote}>\n${doc.text}\n</attachment>`
+            content.push({
+              type: 'text',
+              text: xmlContent,
+            })
+            logger.debug({ 
+              messageId: msg.id, 
+              filename: doc.filename,
+              sizeKB: (doc.size / 1024).toFixed(2),
+              truncated: doc.truncated
+            }, 'Added text document to content')
+          } else {
+            logger.debug({ 
+              messageId: msg.id, 
+              filename: doc.filename,
+              sizeKB: (doc.size / 1024).toFixed(2),
+              maxKB: config.max_text_attachment_kb || 200
+            }, 'Skipped text document (too large)')
           }
         }
       }

@@ -169,6 +169,10 @@ export interface BotConfig {
   include_images: boolean
   max_images: number
   
+  // Text attachment config
+  include_text_attachments: boolean
+  max_text_attachment_kb: number  // Max size per text attachment in KB
+  
   // Tool config
   tools_enabled: boolean
   tool_output_visible: boolean
@@ -320,7 +324,7 @@ export interface DiscordContext {
   messages: DiscordMessage[]
   pinnedConfigs: string[]  // Raw YAML strings from pinned messages
   images: CachedImage[]
-  documents?: CachedDocument[]
+  documents: CachedDocument[]  // Text file contents
   guildId: string
   /** Inheritance info for plugin state */
   inheritanceInfo?: {

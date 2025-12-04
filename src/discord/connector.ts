@@ -394,7 +394,7 @@ export class DiscordConnector {
         ...timings,
         messageCount: discordMessages.length,
         imageCount: images.length,
-          documentCount: documents.length,
+        documentCount: documents.length,
         pinnedCount: pinnedConfigs.length,
       }, '⏱️  PROFILING: fetchContext breakdown (ms)')
 
@@ -402,7 +402,7 @@ export class DiscordConnector {
         messages: discordMessages,
         pinnedConfigs,
         images,
-          documents,
+        documents,
         guildId: channel.guildId,
         inheritanceInfo: Object.keys(inheritanceInfo).length > 0 ? inheritanceInfo : undefined,
       }
@@ -1438,14 +1438,55 @@ export class DiscordConnector {
     }
   }
 
+  /**
+   * Check if a file is a text file based on content type or extension
+   */
   private isTextAttachment(attachment: Attachment): boolean {
+    // Common text MIME types
+    const textMimeTypes = [
+      'text/',  // text/plain, text/html, text/css, text/javascript, etc.
+      'application/json',
+      'application/xml',
+      'application/javascript',
+      'application/typescript',
+      'application/x-yaml',
+      'application/yaml',
+      'application/x-sh',
+      'application/x-python',
+    ]
+    
     if (attachment.contentType) {
-      return attachment.contentType.startsWith('text/plain')
+      for (const mime of textMimeTypes) {
+        if (attachment.contentType.startsWith(mime)) {
+          return true
+        }
+      }
     }
+    
+    // Fall back to extension check
+    const textExtensions = [
+      '.txt', '.md', '.markdown', '.rst',
+      '.py', '.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs',
+      '.json', '.yaml', '.yml', '.toml', '.xml',
+      '.html', '.htm', '.css', '.scss', '.sass', '.less',
+      '.sh', '.bash', '.zsh', '.fish',
+      '.c', '.cpp', '.h', '.hpp', '.cc', '.cxx',
+      '.java', '.rs', '.go', '.rb', '.php',
+      '.sql', '.graphql', '.gql',
+      '.lua', '.perl', '.pl', '.r', '.R',
+      '.swift', '.kt', '.kts', '.scala',
+      '.vim', '.el', '.lisp', '.clj', '.cljs',
+      '.ini', '.cfg', '.conf', '.config',
+      '.log', '.csv', '.tsv',
+    ]
+    
     const name = attachment.name?.toLowerCase() || ''
-    return name.endsWith('.txt')
+    return textExtensions.some(ext => name.endsWith(ext))
   }
 
+  /**
+   * Fetch text attachment content with truncation support
+   */
   private async fetchTextAttachment(attachment: Attachment, messageId: string): Promise<CachedDocument | null> {
     if (attachment.size && attachment.size > MAX_TEXT_ATTACHMENT_BYTES * 4) {
       logger.warn({ size: attachment.size, url: attachment.url }, 'Skipping oversized text attachment')

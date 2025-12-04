@@ -236,6 +236,10 @@ export class ConfigSystem {
       include_images: config.include_images ?? true,
       max_images: config.max_images || 5,
 
+      // Text attachment config
+      include_text_attachments: config.include_text_attachments ?? true,
+      max_text_attachment_kb: config.max_text_attachment_kb || 100,  // 100KB default
+
       // Tool config
       tools_enabled: config.tools_enabled ?? true,
       tool_output_visible: config.tool_output_visible ?? false,
