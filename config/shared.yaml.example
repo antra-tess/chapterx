@@ -35,3 +35,6 @@ vendors:
   #     openai_completions_base_url: "https://api.example.com/v1"
   #   provides:
   #     - "my-base-model-.*"
+# Bot config tip for base models:
+# Set message_delimiter: "</s>" to append end-of-sequence token to each message.
+# The base model will learn to end its responses the same way.

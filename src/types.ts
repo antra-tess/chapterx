@@ -132,6 +132,9 @@ export interface ModelConfig {
   chatPersonaPrompt?: boolean  // If true, add persona instruction system prompt for chat mode
   chatPersonaPrefill?: boolean  // If true, add "botname:" prefill to end of last user message in chat mode
   chatBotAsAssistant?: boolean  // If true (default), bot's own messages are sent as assistant role; if false, merged into user turns
+  messageDelimiter?: string  // Optional delimiter appended to each message (for base model completions)
+  presence_penalty?: number  // Penalty for token presence (0.0-2.0)
+  frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
 }
 
 /**
@@ -151,6 +154,8 @@ export interface BotConfig {
   temperature: number
   max_tokens: number
   top_p: number
+  presence_penalty?: number  // Penalty for token presence (0.0-2.0)
+  frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
   
   // Context config
   recency_window_messages?: number  // Max number of messages
@@ -174,6 +179,7 @@ export interface BotConfig {
   
   // Stop sequences
   stop_sequences: string[]
+  message_delimiter?: string  // Delimiter appended to each message in prefill mode (e.g., '</s>' for base models)
   
   // Chat mode persona
   chat_persona_prompt?: boolean  // If true, add persona instruction system prompt for chat mode

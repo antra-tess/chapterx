@@ -1089,6 +1089,12 @@ export class ContextBuilder {
     // Add conversation boundary marker (prevents hallucinating past context end)
     sequences.push('<<HUMAN_CONVERSATION_END>>')
 
+    // Add message delimiter if configured (for base model completions)
+    // This should be the primary stop sequence for base models
+    if (config.message_delimiter) {
+      sequences.unshift(config.message_delimiter)  // Add at start (highest priority)
+    }
+
     // Add configured stop sequences
     sequences.push(...config.stop_sequences)
 
@@ -1108,6 +1114,9 @@ export class ContextBuilder {
       chatPersonaPrompt: config.chat_persona_prompt,
       chatPersonaPrefill: config.chat_persona_prefill,
       chatBotAsAssistant: config.chat_bot_as_assistant,
+      messageDelimiter: config.message_delimiter,  // For base model completions
+      presence_penalty: config.presence_penalty,
+      frequency_penalty: config.frequency_penalty,
     }
   }
 }

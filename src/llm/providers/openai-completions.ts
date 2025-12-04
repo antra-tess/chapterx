@@ -62,6 +62,14 @@ export class OpenAICompletionsProvider implements LLMProvider {
       temperature: request.temperature,
     }
 
+    // Add penalty parameters if provided
+    if (request.presence_penalty !== undefined) {
+      body.presence_penalty = request.presence_penalty
+    }
+    if (request.frequency_penalty !== undefined) {
+      body.frequency_penalty = request.frequency_penalty
+    }
+
     // Add stop sequences if provided
     if (request.stop_sequences && request.stop_sequences.length > 0) {
       body.stop = request.stop_sequences

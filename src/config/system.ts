@@ -221,6 +221,8 @@ export class ConfigSystem {
       temperature: config.temperature ?? 1.0,
       max_tokens: config.max_tokens || 4096,
       top_p: config.top_p ?? 1.0,
+      presence_penalty: config.presence_penalty,
+      frequency_penalty: config.frequency_penalty,
 
       // Context config
       recency_window_messages: config.recency_window_messages,
@@ -244,6 +246,7 @@ export class ConfigSystem {
 
       // Stop sequences
       stop_sequences: config.stop_sequences || [],
+      message_delimiter: config.message_delimiter,  // Optional: e.g., '</s>' for base models
 
       // Chat mode persona
       chat_persona_prompt: config.chat_persona_prompt ?? true,

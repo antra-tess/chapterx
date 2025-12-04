@@ -30,6 +30,8 @@ export interface ProviderRequest {
   top_p: number
   stop_sequences?: string[]
   tools?: any[]
+  presence_penalty?: number
+  frequency_penalty?: number
 }
 
 export interface ProviderMessage {
@@ -111,6 +113,7 @@ export class LLMMiddleware {
     // Build conversation, splitting messages with images into user turns
     const messages: ProviderMessage[] = []
     const botName = request.config.botInnerName
+    const delimiter = request.config.messageDelimiter || ''  // e.g., '</s>' for base models
     let lastNonEmptyParticipant: string | null = null
     
     // Track conversation lines for current section
@@ -218,14 +221,15 @@ export class LLMMiddleware {
         continue
       } else if (isLastMessage && isEmpty) {
         // Completion target - optionally start with thinking tag
+        // Note: No delimiter here - we want the model to generate the message
         if (request.config.prefill_thinking) {
           currentConversation.push({ text: `${msg.participant}: <thinking>` })
         } else {
           currentConversation.push({ text: `${msg.participant}:` })
         }
       } else if (formatted.text) {
-        // Regular message
-        currentConversation.push({ text: `${msg.participant}: ${formatted.text}` })
+        // Regular message - append delimiter if configured (for base model completions)
+        currentConversation.push({ text: `${msg.participant}: ${formatted.text}${delimiter}` })
         if (!hasToolResult) {
           lastNonEmptyParticipant = msg.participant
         }
@@ -280,6 +284,8 @@ export class LLMMiddleware {
       top_p: request.config.top_p,
       stop_sequences: request.stop_sequences,
       tools: undefined,  // Don't use native tool use in prefill mode
+      presence_penalty: request.config.presence_penalty,
+      frequency_penalty: request.config.frequency_penalty,
     }
   }
 
@@ -362,6 +368,8 @@ export class LLMMiddleware {
       max_tokens: request.config.max_tokens,
       top_p: request.config.top_p,
       tools: request.tools,
+      presence_penalty: request.config.presence_penalty,
+      frequency_penalty: request.config.frequency_penalty,
     }
   }
 
