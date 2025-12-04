@@ -114,6 +114,8 @@ export class LLMMiddleware {
     const messages: ProviderMessage[] = []
     const botName = request.config.botInnerName
     const delimiter = request.config.messageDelimiter || ''  // e.g., '</s>' for base models
+    // If using delimiter, don't add newlines between messages - delimiter provides separation
+    const joiner = delimiter ? '' : '\n'
     let lastNonEmptyParticipant: string | null = null
     
     // Track conversation lines for current section
@@ -167,7 +169,7 @@ export class LLMMiddleware {
       if (hasImages && !isEmpty) {
         // Flush current assistant conversation (NO cache_control here - only at cache marker)
         if (currentConversation.length > 0) {
-          const content = currentConversation.map(e => e.text).join('\n')
+          const content = currentConversation.map(e => e.text).join(joiner)
           messages.push({
             role: 'assistant',
             content: content,
@@ -200,7 +202,7 @@ export class LLMMiddleware {
       if (hasCacheMarker && !passedCacheMarker) {
         // Flush everything before this message WITH cache_control
         if (currentConversation.length > 0) {
-          const content = currentConversation.map(e => e.text).join('\n')
+          const content = currentConversation.map(e => e.text).join(joiner)
           messages.push({
             role: 'assistant',
             content: [{ type: 'text', text: content, cache_control: { type: 'ephemeral' } }],
@@ -250,7 +252,7 @@ export class LLMMiddleware {
         if (beforeTools.length > 0) {
           messages.push({
             role: 'assistant',
-            content: beforeTools.map(e => e.text).join('\n'),
+            content: beforeTools.map(e => e.text).join(joiner),
           })
         }
         
@@ -264,14 +266,14 @@ export class LLMMiddleware {
         if (afterTools.length > 0) {
           messages.push({
             role: 'assistant',
-            content: afterTools.map(e => e.text).join('\n'),
+            content: afterTools.map(e => e.text).join(joiner),
           })
         }
       } else {
         // Short conversation - just add everything (no cache_control - we're past marker or none exists)
         messages.push({
           role: 'assistant',
-          content: currentConversation.map(e => e.text).join('\n'),
+          content: currentConversation.map(e => e.text).join(joiner),
         })
       }
     }
