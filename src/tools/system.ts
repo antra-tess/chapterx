@@ -265,8 +265,122 @@ export class ToolSystem {
     return entries.map(e => e.call)
   }
 
+  // Anthropic-style XML tag constants (assembled to avoid triggering stop sequences)
+  private static readonly FUNC_CALLS_OPEN = '<' + 'antml:function_calls>'
+  private static readonly FUNC_CALLS_CLOSE = '</' + 'antml:function_calls>'
+  private static readonly INVOKE_OPEN = '<' + 'antml:invoke'
+  private static readonly INVOKE_CLOSE = '</' + 'antml:invoke>'
+  private static readonly PARAM_OPEN = '<' + 'antml:parameter'
+  private static readonly PARAM_CLOSE = '</' + 'antml:parameter>'
+  private static readonly FUNC_RESULTS_OPEN = '<' + 'function_results>'
+  private static readonly FUNC_RESULTS_CLOSE = '</' + 'function_results>'
+
   /**
-   * Parse tool calls from completion text (for prefill mode)
+   * Parse Anthropic-style tool calls from completion text
+   * Format:
+   *   [antml:function_calls]
+   *   [antml:invoke name="tool_name"]
+   *   [antml:parameter name="param"]value[/antml:parameter]
+   *   [/antml:invoke]
+   *   [/antml:function_calls]
+   * 
+   * Returns the first complete function_calls block found, or null if none/incomplete.
+   * Also returns the text before and after the block for continuation.
+   */
+  parseAnthropicToolCalls(completion: string): {
+    calls: ToolCall[],
+    beforeText: string,
+    afterText: string,
+    fullMatch: string,
+  } | null {
+    // Build regex patterns from constants (avoid literal tags in source)
+    const openTag = ToolSystem.FUNC_CALLS_OPEN.replace(/[<>]/g, '\\$&')
+    const closeTag = ToolSystem.FUNC_CALLS_CLOSE.replace(/[<>]/g, '\\$&')
+    
+    // Match the entire function_calls block
+    const blockPattern = new RegExp(openTag + '([\\s\\S]*?)' + closeTag)
+    const blockMatch = completion.match(blockPattern)
+    
+    if (!blockMatch) {
+      // Check if there's an incomplete block (opened but not closed)
+      if (completion.includes(ToolSystem.FUNC_CALLS_OPEN) && 
+          !completion.includes(ToolSystem.FUNC_CALLS_CLOSE)) {
+        return null  // Incomplete - need more tokens
+      }
+      return null  // No tool calls
+    }
+    
+    const fullMatch = blockMatch[0]
+    const blockContent = blockMatch[1]!
+    const beforeText = completion.slice(0, completion.indexOf(fullMatch))
+    const afterText = completion.slice(completion.indexOf(fullMatch) + fullMatch.length)
+    
+    // Parse individual invoke blocks
+    // Build patterns dynamically to avoid stop sequences in source
+    const invokeOpenPat = '<' + 'antml:invoke\\s+name="([^"]+)">'
+    const invokeClosePat = '</' + 'antml:invoke>'
+    const invokePattern = new RegExp(invokeOpenPat + '([\\s\\S]*?)' + invokeClosePat, 'g')
+    const calls: ToolCall[] = []
+    let invokeMatch
+    
+    while ((invokeMatch = invokePattern.exec(blockContent)) !== null) {
+      const toolName = invokeMatch[1]!
+      const invokeContent = invokeMatch[2]!
+      
+      // Parse parameters - build pattern dynamically
+      const paramOpenPat = '<' + 'antml:parameter\\s+name="([^"]+)">'
+      const paramClosePat = '</' + 'antml:parameter>'
+      const paramPattern = new RegExp(paramOpenPat + '([^<]*)' + paramClosePat, 'g')
+      const input: Record<string, any> = {}
+      let paramMatch
+      
+      while ((paramMatch = paramPattern.exec(invokeContent)) !== null) {
+        const paramName = paramMatch[1]!
+        let paramValue: any = paramMatch[2]!
+        
+        // Try to parse as JSON, otherwise keep as string
+        try {
+          paramValue = JSON.parse(paramValue)
+        } catch {
+          // Keep as string
+        }
+        
+        input[paramName] = paramValue
+      }
+      
+      calls.push({
+        id: this.generateToolCallId(),
+        name: toolName,
+        input,
+        messageId: '',
+        timestamp: new Date(),
+        originalCompletionText: completion,
+      })
+      
+      logger.debug({ toolName, input }, 'Parsed Anthropic-style tool call')
+    }
+    
+    return { calls, beforeText, afterText, fullMatch }
+  }
+
+  /**
+   * Format tool result for injection into completion (Anthropic style)
+   */
+  formatToolResultForInjection(toolName: string, result: string): string {
+    return '\n\n' + ToolSystem.FUNC_RESULTS_OPEN + '\n' + result + '\n' + ToolSystem.FUNC_RESULTS_CLOSE + '\n\n'
+  }
+
+  /**
+   * Check if completion has an incomplete tool call block (opened but not closed)
+   */
+  hasIncompleteToolCall(completion: string): boolean {
+    const hasOpen = completion.includes(ToolSystem.FUNC_CALLS_OPEN)
+    const hasClose = completion.includes(ToolSystem.FUNC_CALLS_CLOSE)
+    return hasOpen && !hasClose
+  }
+
+  /**
+   * Parse tool calls from completion text (for prefill mode) - LEGACY FORMAT
    * Looks for XML-formatted tool calls like: <tool_name>{"param": "value"}</tool_name>
    * Also handles empty calls: <tool_name></tool_name> or <tool_name>{}</tool_name>
    * Skips tool calls that are escaped (wrapped in backticks or inside code blocks)

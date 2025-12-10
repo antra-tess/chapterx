@@ -244,6 +244,7 @@ export class ConfigSystem {
       tools_enabled: config.tools_enabled ?? true,
       tool_output_visible: config.tool_output_visible ?? false,
       max_tool_depth: config.max_tool_depth || 100,
+      inline_tool_execution: config.inline_tool_execution ?? false,  // Off by default until tested
       mcp_servers: config.mcp_servers,
       tool_plugins: config.tool_plugins || [],
       plugin_config: config.plugin_config,

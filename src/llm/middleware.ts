@@ -449,23 +449,46 @@ export class LLMMiddleware {
       .join('\n')
   }
 
+  // Anthropic-style XML tag constants (assembled to avoid triggering stop sequences)
+  private static readonly FUNC_CALLS_OPEN = '<' + 'antml:function_calls>'
+  private static readonly FUNC_CALLS_CLOSE = '</' + 'antml:function_calls>'
+  private static readonly INVOKE_OPEN = '<' + 'antml:invoke name="'
+  private static readonly INVOKE_CLOSE = '</' + 'antml:invoke>'
+  private static readonly PARAM_OPEN = '<' + 'antml:parameter name="'
+  private static readonly PARAM_CLOSE = '</' + 'antml:parameter>'
+
   private formatToolsForPrefill(tools: any[]): string {
     const formatted = tools.map((tool) => {
-      // Generate concise description: strip fluff, keep first sentence, max ~60 chars
+      // Generate concise description
       const desc = this.conciseDescription(tool.description)
       
-      // Generate example from schema
+      // Generate example in Anthropic XML format
       const example = this.schemaToExample(tool.inputSchema)
-      const exampleStr = JSON.stringify(example)
+      const exampleParams = Object.entries(example)
+        .map(([key, value]) => {
+          const valStr = typeof value === 'string' ? value : JSON.stringify(value)
+          return `${LLMMiddleware.PARAM_OPEN}${key}">${valStr}${LLMMiddleware.PARAM_CLOSE}`
+        })
+        .join('\n')
       
-      return `${tool.name} - ${desc}\n  <${tool.name}>${exampleStr}</${tool.name}>`
+      return `**${tool.name}** - ${desc}
+${LLMMiddleware.INVOKE_OPEN}${tool.name}">
+${exampleParams}
+${LLMMiddleware.INVOKE_CLOSE}`
     })
 
     return `<tools>
-${formatted.join('\n')}
+Tool calls are executed inline - results appear immediately after the call.
+Wrap calls in ${LLMMiddleware.FUNC_CALLS_OPEN}...${LLMMiddleware.FUNC_CALLS_CLOSE}
 
-Don't announce the tool calls. Others will not see the calls, as they will be redacted from Discord messages.
-To escape a tool call (show without executing), wrap in backticks: \`<tool>{}\`
+${formatted.join('\n\n')}
+
+Example:
+${LLMMiddleware.FUNC_CALLS_OPEN}
+${LLMMiddleware.INVOKE_OPEN}tool_name">
+${LLMMiddleware.PARAM_OPEN}param">value${LLMMiddleware.PARAM_CLOSE}
+${LLMMiddleware.INVOKE_CLOSE}
+${LLMMiddleware.FUNC_CALLS_CLOSE}
 </tools>`
   }
   

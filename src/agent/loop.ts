@@ -884,7 +884,13 @@ export class AgentLoop {
 
       // 6. Call LLM (with tool loop)
       startProfile('llmCall')
-      const { completion, toolCallIds, preambleMessageIds } = await this.executeWithTools(
+      
+      // Use inline tool execution if enabled (Anthropic-style, saves tokens)
+      const executeMethod = config.inline_tool_execution 
+        ? this.executeWithInlineTools.bind(this)
+        : this.executeWithTools.bind(this)
+      
+      const { completion, toolCallIds, preambleMessageIds } = await executeMethod(
         contextResult.request, 
         config, 
         channelId,
@@ -1061,6 +1067,229 @@ export class AgentLoop {
       
       throw error
     }
+  }
+
+  /**
+   * Execute with inline tool injection (Anthropic style)
+   * 
+   * Instead of making separate LLM calls for each tool use, this method:
+   * 1. Detects tool calls in the completion stream
+   * 2. Executes the tool immediately
+   * 3. Injects the result into the assistant's output
+   * 4. Continues the completion from there
+   * 
+   * This saves tokens by avoiding context re-sends and preserves the bot's
+   * "train of thought" across tool uses.
+   */
+  private async executeWithInlineTools(
+    llmRequest: any,
+    config: BotConfig,
+    channelId: string,
+    triggeringMessageId: string,
+    activationId?: string
+  ): Promise<{ completion: any; toolCallIds: string[]; preambleMessageIds: string[] }> {
+    let accumulatedOutput = ''
+    let toolDepth = 0
+    const allToolCallIds: string[] = []
+    const allPreambleMessageIds: string[] = []
+    const maxToolDepth = config.max_tool_depth
+    
+    // Keep track of the base request (without accumulated output)
+    const baseRequest = { ...llmRequest }
+    
+    while (toolDepth < maxToolDepth) {
+      // Build continuation request with accumulated output as prefill
+      const continuationRequest = this.buildInlineContinuationRequest(
+        baseRequest, 
+        accumulatedOutput,
+        config
+      )
+      
+      // Get completion
+      let completion = await this.llmMiddleware.complete(continuationRequest)
+      
+      // Handle stop sequence continuation (existing logic)
+      if (completion.stopReason === 'stop_sequence' && config.mode === 'prefill') {
+        const completionText = completion.content
+          .filter((c: any) => c.type === 'text')
+          .map((c: any) => c.text)
+          .join('')
+        
+        let unclosedTag = this.detectUnclosedXmlTag(completionText)
+        if (!unclosedTag && config.prefill_thinking && !completionText.includes('</thinking>')) {
+          unclosedTag = 'thinking'
+        }
+        
+        if (unclosedTag) {
+          const triggeredStopSequence = completion.raw?.stop_sequence
+          if (triggeredStopSequence) {
+            completion = await this.continueCompletionAfterStopSequence(
+              continuationRequest,
+              completion,
+              triggeredStopSequence,
+              config
+            )
+          }
+        }
+      }
+      
+      // Prepend thinking tag if prefilled
+      if (config.prefill_thinking && accumulatedOutput === '') {
+        const firstTextBlock = completion.content.find((c: any) => c.type === 'text') as any
+        if (firstTextBlock?.text) {
+          firstTextBlock.text = '<thinking>' + firstTextBlock.text
+        }
+      }
+      
+      // Get new completion text
+      const newText = completion.content
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.text)
+        .join('')
+      
+      accumulatedOutput += newText
+      
+      // Try to parse Anthropic-style tool calls
+      const toolParse = this.toolSystem.parseAnthropicToolCalls(accumulatedOutput)
+      
+      if (!toolParse || toolParse.calls.length === 0) {
+        // No tool calls - check if incomplete (still generating)
+        if (this.toolSystem.hasIncompleteToolCall(accumulatedOutput)) {
+          // Incomplete tool call - need to continue
+          // This shouldn't happen with non-streaming, but handle it
+          logger.warn('Incomplete tool call detected in non-streaming mode')
+        }
+        
+        // Done - return final completion
+        return {
+          completion: {
+            content: [{ type: 'text', text: accumulatedOutput }],
+            stopReason: completion.stopReason,
+            usage: completion.usage,
+            model: completion.model,
+          },
+          toolCallIds: allToolCallIds,
+          preambleMessageIds: allPreambleMessageIds,
+        }
+      }
+      
+      // Execute tools and collect results
+      logger.debug({ 
+        toolCount: toolParse.calls.length, 
+        toolDepth 
+      }, 'Executing inline tools')
+      
+      const resultsTexts: string[] = []
+      
+      for (const call of toolParse.calls) {
+        const toolStartTime = Date.now()
+        const result = await this.toolSystem.executeTool(call)
+        const toolDurationMs = Date.now() - toolStartTime
+        
+        allToolCallIds.push(call.id)
+        
+        // Collect result for injection
+        const outputStr = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
+        if (result.error) {
+          resultsTexts.push(`Error executing ${call.name}: ${result.error}`)
+        } else {
+          resultsTexts.push(outputStr)
+        }
+        
+        // Persist tool use
+        await this.toolSystem.persistToolUse(
+          this.botId,
+          channelId,
+          call,
+          result
+        )
+        
+        // Record to trace
+        traceToolExecution({
+          toolCallId: call.id,
+          toolName: call.name,
+          input: call.input,
+          output: outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr,
+          outputTruncated: outputStr.length > 1000,
+          fullOutputLength: outputStr.length,
+          durationMs: toolDurationMs,
+          sentToDiscord: config.tool_output_visible,
+          error: result.error ? String(result.error) : undefined,
+        })
+        
+        // Send tool output to Discord if visible
+        if (config.tool_output_visible) {
+          const inputStr = JSON.stringify(call.input)
+          const rawOutput = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
+          const flatOutput = rawOutput.replace(/\n/g, ' ').replace(/\s+/g, ' ')
+          const maxLen = 200
+          const trimmedOutput = flatOutput.length > maxLen 
+            ? `${flatOutput.slice(0, maxLen)}... (${rawOutput.length} chars)`
+            : flatOutput
+          
+          const toolMessage = `.${config.innerName}>[${call.name}]: ${inputStr}\n.${config.innerName}<[${call.name}]: ${trimmedOutput}`
+          await this.connector.sendWebhook(channelId, toolMessage, config.innerName)
+        }
+      }
+      
+      // Inject results after the function_calls block
+      const resultsText = resultsTexts.join('\n\n---\n\n')
+      accumulatedOutput = toolParse.beforeText + toolParse.fullMatch + 
+        this.toolSystem.formatToolResultForInjection('', resultsText)
+      
+      toolDepth++
+    }
+    
+    logger.warn('Reached max inline tool depth')
+    return {
+      completion: {
+        content: [{ type: 'text', text: accumulatedOutput + '\n[Max tool depth reached]' }],
+        stopReason: 'end_turn' as const,
+        usage: { inputTokens: 0, outputTokens: 0 },
+        model: '',
+      },
+      toolCallIds: allToolCallIds,
+      preambleMessageIds: allPreambleMessageIds,
+    }
+  }
+  
+  
+  /**
+   * Build a continuation request with accumulated output as prefill
+   */
+  private buildInlineContinuationRequest(
+    baseRequest: any,
+    accumulatedOutput: string,
+    config: BotConfig
+  ): any {
+    if (!accumulatedOutput) {
+      return baseRequest
+    }
+    
+    // Clone the request
+    const request = {
+      ...baseRequest,
+      messages: [...baseRequest.messages],
+    }
+    
+    // Find the last message (should be empty bot message for completion)
+    const lastMsg = request.messages[request.messages.length - 1]
+    
+    if (lastMsg && lastMsg.participant === config.innerName) {
+      // Replace the last empty message with accumulated output
+      request.messages[request.messages.length - 1] = {
+        ...lastMsg,
+        content: [{ type: 'text', text: accumulatedOutput }],
+      }
+    } else {
+      // Add accumulated output as new message
+      request.messages.push({
+        participant: config.innerName,
+        content: [{ type: 'text', text: accumulatedOutput }],
+      })
+    }
+    
+    return request
   }
 
   private async executeWithTools(
