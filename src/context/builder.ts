@@ -1236,7 +1236,7 @@ export class ContextBuilder {
     }
 
     // Add system message prefixes (bot should never generate these)
-    sequences.push('System<[', 'System>[')
+    sequences.push('\nSystem<[', '\nSystem>[', '\nSystem:')
     
     // Add conversation boundary marker (prevents hallucinating past context end)
     sequences.push('<<HUMAN_CONVERSATION_END>>')
