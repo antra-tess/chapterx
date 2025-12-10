@@ -92,6 +92,12 @@ const plugin: ToolPlugin = {
    * Get context injections - returns notes to be injected into context
    */
   getContextInjections: async (context: PluginStateContext): Promise<ContextInjection[]> => {
+    // Check if injection is disabled via config (defaults to true)
+    const config = context.pluginConfig as { inject_into_context?: boolean } | undefined
+    if (config?.inject_into_context === false) {
+      return []
+    }
+    
     // Use configured scope (defaults to 'channel')
     const scope = context.configuredScope
     const state = await context.getState<NotesState>(scope)
