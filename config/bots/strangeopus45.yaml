@@ -1,0 +1,46 @@
+# StrangeOpus4.5 - Local test bot for prompt caching
+name: StrangeOpus4.5
+innerName: StrangeOpus4.5
+
+# Model configuration
+mode: prefill
+prefill_thinking: true
+debug_thinking: false
+preserve_thinking_context: true
+continuation_model: claude-opus-4-5-20251101
+temperature: 1.0
+max_tokens: 16384
+top_p: 1.0
+
+# Context configuration
+recency_window_messages: 400
+recency_window_characters: 100000
+hard_max_characters: 500000
+rolling_threshold: 50
+recent_participant_count: 10
+
+# Image configuration
+include_images: true
+max_images: 5
+
+# Tool configuration
+tools_enabled: true
+tool_output_visible: false
+max_tool_depth: 20
+tool_plugins: ['config', 'notes', 'inject']
+plugin_config:
+  notes:
+    state_scope: global
+
+# Stop sequences
+stop_sequences: []
+
+# Retry configuration
+llm_retries: 3
+discord_backoff_max: 32000
+
+# Activation settings
+reply_on_random: 500
+reply_on_name: false
+max_queued_replies: 1
+
