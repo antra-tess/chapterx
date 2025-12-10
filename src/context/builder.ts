@@ -369,8 +369,11 @@ export class ContextBuilder {
       
       // Don't merge messages starting with "." (tool outputs, preambles)
       // These need to stay separate so they can be filtered later
-      const isDotMessage = msg.content.trim().startsWith('.')
-      const lastIsDotMessage = lastMsg?.content.trim().startsWith('.')
+      // Strip reply prefix before checking (replies look like "<reply:@user> .test")
+      const contentWithoutReply = msg.content.trim().replace(/^<reply:@[^>]+>\s*/, '')
+      const lastContentWithoutReply = lastMsg?.content.trim().replace(/^<reply:@[^>]+>\s*/, '') || ''
+      const isDotMessage = contentWithoutReply.startsWith('.')
+      const lastIsDotMessage = lastContentWithoutReply.startsWith('.')
 
       if (
         isBotMessage &&
@@ -393,8 +396,10 @@ export class ContextBuilder {
 
   private filterDotMessages(messages: DiscordMessage[]): DiscordMessage[] {
     return messages.filter((msg) => {
-      // Filter messages starting with period
-      if (msg.content.trim().startsWith('.')) {
+      // Filter messages starting with period (after stripping reply prefix)
+      // Replies look like "<reply:@username> .test" so we need to strip the prefix
+      const contentWithoutReply = msg.content.trim().replace(/^<reply:@[^>]+>\s*/, '')
+      if (contentWithoutReply.startsWith('.')) {
         return false
       }
       // Filter messages with dotted_line_face reaction (🫥)
