@@ -28,6 +28,18 @@ export interface ToolPlugin {
   ) => Promise<void>
   
   /**
+   * Post-process tool result before returning to LLM.
+   * Allows plugins to inject actual data (e.g., note content) into the result.
+   * Called after handler, before result is sent to LLM.
+   */
+  postProcessResult?: (
+    toolName: string,
+    input: any,
+    result: string,
+    context: PluginStateContext
+  ) => Promise<string>
+  
+  /**
    * Called when plugin is initialized for a channel.
    * Use to set up initial state or inherit from parent.
    */

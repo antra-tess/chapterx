@@ -346,30 +346,42 @@ export class ToolSystem {
           pinMessage: this.pluginContext.pinMessage || (async () => {}),
         }
         
-        const result = await pluginHandler(call.input, context)
+        let result = await pluginHandler(call.input, context)
         
-        // Call onToolExecution lifecycle hook for all plugins that own this tool
+        // Call lifecycle hooks for plugins that own this tool
         const toolDef = this.tools.find(t => t.name === call.name)
         if (toolDef?.serverName?.startsWith('plugin:')) {
           const pluginName = toolDef.serverName.replace('plugin:', '')
           const plugin = this.loadedPluginObjects.get(pluginName)
-          if (plugin?.onToolExecution && this.pluginContextFactory) {
+          
+          if (this.pluginContextFactory) {
             try {
               // Get plugin-specific config
               const pluginConfig = this.pluginConfigs[pluginName]
               
-              // Create a plugin-specific state context (so state is stored under the correct plugin name)
+              // Create a plugin-specific state context
               const pluginStateContext = this.pluginContextFactory.createStateContext(
-                pluginName,  // Use actual plugin name, not 'system'
+                pluginName,
                 context,
                 undefined,  // inheritanceInfo
                 undefined,  // epicReducer
-                pluginConfig  // Pass plugin config
+                pluginConfig
               )
-              await plugin.onToolExecution(call.name, call.input, result, pluginStateContext)
-              logger.debug({ pluginName, toolName: call.name }, 'Called onToolExecution hook')
+              
+              // Call onToolExecution hook
+              if (plugin?.onToolExecution) {
+                await plugin.onToolExecution(call.name, call.input, result, pluginStateContext)
+                logger.debug({ pluginName, toolName: call.name }, 'Called onToolExecution hook')
+              }
+              
+              // Call postProcessResult hook to allow enriching the result
+              if (plugin?.postProcessResult) {
+                const resultStr = typeof result === 'string' ? result : JSON.stringify(result)
+                result = await plugin.postProcessResult(call.name, call.input, resultStr, pluginStateContext)
+                logger.debug({ pluginName, toolName: call.name }, 'Called postProcessResult hook')
+              }
             } catch (hookError) {
-              logger.error({ hookError, pluginName, toolName: call.name }, 'onToolExecution hook failed')
+              logger.error({ hookError, pluginName, toolName: call.name }, 'Plugin hook failed')
             }
           }
         }

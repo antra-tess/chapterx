@@ -53,15 +53,49 @@ const plugin: ToolPlugin = {
     },
     {
       name: 'list_notes',
-      description: 'List all saved notes for this channel',
+      description: 'List all saved notes with their IDs and full content',
       inputSchema: {
         type: 'object',
         properties: {},
       },
       handler: async (_input: any, context: PluginContext) => {
-        // This would use PluginStateContext.getState('channel') in practice
         logger.debug({ channelId: context.channelId }, 'Notes list requested')
-        return 'Use save_note to add new notes.'
+        // Note: Handler can't access state directly, but we return a message
+        // The actual notes are visible in context injection
+        return 'Notes are displayed in context above. Use read_note with an ID to retrieve a specific note.'
+      },
+    },
+    {
+      name: 'read_note',
+      description: 'Read a specific note by ID or search by title/content',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: 'The note ID (e.g., note_abc123)',
+          },
+          search: {
+            type: 'string',
+            description: 'Search term to find notes by title or content',
+          },
+        },
+      },
+      handler: async (input: { id?: string; search?: string }, context: PluginContext) => {
+        logger.debug({ 
+          noteId: input.id,
+          search: input.search,
+          channelId: context.channelId 
+        }, 'Note read requested')
+        
+        if (!input.id && !input.search) {
+          return 'Please provide either an id or search term'
+        }
+        
+        // Handler returns placeholder - actual retrieval happens in onToolExecution
+        return input.id 
+          ? `Looking up note: ${input.id}`
+          : `Searching notes for: ${input.search}`
       },
     },
     {
@@ -173,6 +207,68 @@ const plugin: ToolPlugin = {
         }, 'Note deleted')
       }
     }
+  },
+  
+  /**
+   * Post-process tool results to inject actual note content
+   */
+  postProcessResult: async (
+    toolName: string,
+    input: any,
+    result: string,
+    context: PluginStateContext
+  ): Promise<string> => {
+    if (toolName === 'read_note') {
+      const scope = context.configuredScope
+      const state = await context.getState<NotesState>(scope)
+      
+      if (!state?.notes.length) {
+        return 'No notes saved yet.'
+      }
+      
+      if (input.id) {
+        const note = state.notes.find(n => n.id === input.id)
+        if (note) {
+          return `**Note [${note.id}]** (created ${note.createdAt}):\n\n${note.content}`
+        }
+        return `Note not found: ${input.id}`
+      }
+      
+      if (input.search) {
+        const searchLower = input.search.toLowerCase()
+        const matches = state.notes.filter(n => 
+          n.content.toLowerCase().includes(searchLower)
+        )
+        
+        if (matches.length === 0) {
+          return `No notes found matching: "${input.search}"`
+        }
+        
+        if (matches.length === 1) {
+          const note = matches[0]!
+          return `**Note [${note.id}]** (created ${note.createdAt}):\n\n${note.content}`
+        }
+        
+        return `Found ${matches.length} notes matching "${input.search}":\n\n` +
+          matches.map(n => `- [${n.id}] ${n.content.slice(0, 100)}${n.content.length > 100 ? '...' : ''}`).join('\n')
+      }
+      
+      return result
+    }
+    
+    if (toolName === 'list_notes') {
+      const scope = context.configuredScope
+      const state = await context.getState<NotesState>(scope)
+      
+      if (!state?.notes.length) {
+        return 'No notes saved yet. Use save_note to create one.'
+      }
+      
+      return `**${state.notes.length} notes:**\n\n` +
+        state.notes.map((n, i) => `${i + 1}. [${n.id}] ${n.content}`).join('\n\n')
+    }
+    
+    return result
   },
 }
 
