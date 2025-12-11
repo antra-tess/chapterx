@@ -10,7 +10,7 @@ import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { LLMMiddleware } from '../llm/middleware.js'
 import { ToolSystem } from '../tools/system.js'
-import { Event, BotConfig, DiscordMessage } from '../types.js'
+import { Event, BotConfig, DiscordMessage, ToolCall, ToolResult } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { sleep } from '../utils/retry.js'
 import { 
@@ -890,7 +890,7 @@ export class AgentLoop {
         ? this.executeWithInlineTools.bind(this)
         : this.executeWithTools.bind(this)
       
-      const { completion, toolCallIds, preambleMessageIds } = await executeMethod(
+      const { completion, toolCallIds, preambleMessageIds, fullCompletionText } = await executeMethod(
         contextResult.request, 
         config, 
         channelId,
@@ -995,15 +995,16 @@ export class AgentLoop {
       
       // Record final completion to activation
       if (activation) {
-        // Get the full completion text (with thinking, before stripping)
-        const fullCompletionText = completion.content
+        // Get the full completion text (with thinking and tool calls, before stripping)
+        // For inline tool execution, use the preserved fullCompletionText which includes tool calls/results
+        const activationCompletionText = fullCompletionText || completion.content
           .filter((c: any) => c.type === 'text')
           .map((c: any) => c.text)
           .join('\n')
         
         this.activationStore.addCompletion(
           activation.id,
-          fullCompletionText,
+          activationCompletionText,
           sentMessageIds,
           [],
           []
@@ -1081,21 +1082,32 @@ export class AgentLoop {
    * This saves tokens by avoiding context re-sends and preserves the bot's
    * "train of thought" across tool uses.
    */
+  // Stop sequence for inline tool execution (assembled to avoid stop sequence in source)
+  private static readonly FUNC_CALLS_CLOSE = '</' + 'function_calls>'
+
   private async executeWithInlineTools(
     llmRequest: any,
     config: BotConfig,
     channelId: string,
-    _triggeringMessageId: string,
+    triggeringMessageId: string,
     _activationId?: string
-  ): Promise<{ completion: any; toolCallIds: string[]; preambleMessageIds: string[] }> {
+  ): Promise<{ completion: any; toolCallIds: string[]; preambleMessageIds: string[]; fullCompletionText?: string }> {
     let accumulatedOutput = ''
     let toolDepth = 0
     const allToolCallIds: string[] = []
     const allPreambleMessageIds: string[] = []
     const maxToolDepth = config.max_tool_depth
+    const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
     
     // Keep track of the base request (without accumulated output)
-    const baseRequest = { ...llmRequest }
+    // Add </function_calls> as stop sequence so we can intercept and execute tools
+    const baseRequest = { 
+      ...llmRequest,
+      stop_sequences: [
+        ...(llmRequest.stop_sequences || []),
+        AgentLoop.FUNC_CALLS_CLOSE
+      ]
+    }
     
     while (toolDepth < maxToolDepth) {
       // Build continuation request with accumulated output as prefill
@@ -1108,21 +1120,41 @@ export class AgentLoop {
       // Get completion
       let completion = await this.llmMiddleware.complete(continuationRequest)
       
-      // Handle stop sequence continuation (existing logic)
+      // Handle stop sequence continuation - only if we're inside an unclosed tag
       if (completion.stopReason === 'stop_sequence' && config.mode === 'prefill') {
         const completionText = completion.content
           .filter((c: any) => c.type === 'text')
           .map((c: any) => c.text)
           .join('')
         
-        let unclosedTag = this.detectUnclosedXmlTag(completionText)
-        if (!unclosedTag && config.prefill_thinking && !completionText.includes('</thinking>')) {
-          unclosedTag = 'thinking'
-        }
+        const triggeredStopSequence = completion.raw?.stop_sequence
         
-        if (unclosedTag) {
-          const triggeredStopSequence = completion.raw?.stop_sequence
-          if (triggeredStopSequence) {
+        // Check if we're inside an unclosed <function_calls> block
+        // If so, the stop sequence might be inside a tool parameter (e.g., a username)
+        // and we should continue to complete the tool call
+        const funcCallsOpen = (completionText.match(/<function_calls>/g) || []).length
+        const funcCallsClose = (completionText.match(/<\/function_calls>/g) || []).length
+        const insideFunctionCalls = funcCallsOpen > funcCallsClose
+        
+        // Only continue past stop sequences if we're inside an unclosed function_calls block
+        // or if we have an unclosed thinking tag and stopped on </function_calls>
+        if (insideFunctionCalls && triggeredStopSequence && 
+            triggeredStopSequence !== AgentLoop.FUNC_CALLS_CLOSE) {
+          // Inside a tool call, participant name in parameter - continue
+          logger.debug({ triggeredStopSequence }, 'Stop sequence inside function_calls, continuing')
+          completion = await this.continueCompletionAfterStopSequence(
+            continuationRequest,
+            completion,
+            triggeredStopSequence,
+            config
+          )
+        } else if (triggeredStopSequence === AgentLoop.FUNC_CALLS_CLOSE) {
+          // Check for unclosed thinking tag - need to continue
+          let unclosedTag = this.detectUnclosedXmlTag(completionText)
+          if (!unclosedTag && config.prefill_thinking && !completionText.includes('</thinking>')) {
+            unclosedTag = 'thinking'
+          }
+          if (unclosedTag) {
             completion = await this.continueCompletionAfterStopSequence(
               continuationRequest,
               completion,
@@ -1131,6 +1163,8 @@ export class AgentLoop {
             )
           }
         }
+        // If stopped on participant name OUTSIDE function_calls, don't continue
+        // The check later will return early
       }
       
       // Prepend thinking tag if prefilled
@@ -1149,6 +1183,52 @@ export class AgentLoop {
       
       accumulatedOutput += newText
       
+      // If we stopped on </function_calls>, append it back (stop sequence consumes the matched text)
+      if (completion.stopReason === 'stop_sequence' && 
+          completion.raw?.stop_sequence === AgentLoop.FUNC_CALLS_CLOSE) {
+        accumulatedOutput += AgentLoop.FUNC_CALLS_CLOSE
+      }
+      
+      // If we stopped on a participant name (not function_calls), check if we should exit
+      // Only exit if we're NOT inside an unclosed function_calls block
+      if (completion.stopReason === 'stop_sequence' && 
+          completion.raw?.stop_sequence !== AgentLoop.FUNC_CALLS_CLOSE) {
+        // Check if we're inside an unclosed function_calls block
+        const funcCallsOpen = (accumulatedOutput.match(/<function_calls>/g) || []).length
+        const funcCallsClose = (accumulatedOutput.match(/<\/function_calls>/g) || []).length
+        const insideFunctionCalls = funcCallsOpen > funcCallsClose
+        
+        if (!insideFunctionCalls) {
+          // Not inside a tool call - model was about to hallucinate, exit
+          logger.debug({ 
+            stopSequence: completion.raw?.stop_sequence 
+          }, 'Stopped on participant name outside function_calls, returning')
+          
+          // Persist all pending tool uses with the final accumulated output
+          for (const { call, result } of pendingToolPersistence) {
+            call.originalCompletionText = accumulatedOutput
+            await this.toolSystem.persistToolUse(this.botId, channelId, call, result)
+          }
+          
+          const displayText = this.toolSystem.stripToolXml(accumulatedOutput)
+          return {
+            completion: {
+              content: [{ type: 'text', text: displayText }],
+              stopReason: completion.stopReason,
+              usage: completion.usage,
+              model: completion.model,
+            },
+            toolCallIds: allToolCallIds,
+            preambleMessageIds: allPreambleMessageIds,
+            fullCompletionText: accumulatedOutput,  // Full output with tool calls for activation store
+          }
+        }
+        // Inside function_calls - the stop sequence was in a parameter, continue
+        logger.debug({ 
+          stopSequence: completion.raw?.stop_sequence 
+        }, 'Stopped on participant name inside function_calls, continuing to parse')
+      }
+      
       // Try to parse Anthropic-style tool calls
       const toolParse = this.toolSystem.parseAnthropicToolCalls(accumulatedOutput)
       
@@ -1160,16 +1240,24 @@ export class AgentLoop {
           logger.warn('Incomplete tool call detected in non-streaming mode')
         }
         
-        // Done - return final completion
+        // Persist all pending tool uses with the final accumulated output
+        for (const { call, result } of pendingToolPersistence) {
+          call.originalCompletionText = accumulatedOutput
+          await this.toolSystem.persistToolUse(this.botId, channelId, call, result)
+        }
+        
+        // Done - return final completion with tool XML stripped for display
+        const displayText = this.toolSystem.stripToolXml(accumulatedOutput)
         return {
           completion: {
-            content: [{ type: 'text', text: accumulatedOutput }],
+            content: [{ type: 'text', text: displayText }],
             stopReason: completion.stopReason,
             usage: completion.usage,
             model: completion.model,
           },
           toolCallIds: allToolCallIds,
           preambleMessageIds: allPreambleMessageIds,
+          fullCompletionText: accumulatedOutput,  // Full output with tool calls for activation store
         }
       }
       
@@ -1182,6 +1270,9 @@ export class AgentLoop {
       const resultsTexts: string[] = []
       
       for (const call of toolParse.calls) {
+        // Set messageId for tool cache interleaving
+        call.messageId = triggeringMessageId
+        
         const toolStartTime = Date.now()
         const result = await this.toolSystem.executeTool(call)
         const toolDurationMs = Date.now() - toolStartTime
@@ -1196,13 +1287,8 @@ export class AgentLoop {
           resultsTexts.push(outputStr)
         }
         
-        // Persist tool use
-        await this.toolSystem.persistToolUse(
-          this.botId,
-          channelId,
-          call,
-          result
-        )
+        // Store for later persistence (with final accumulatedOutput)
+        pendingToolPersistence.push({ call, result })
         
         // Record to trace
         traceToolExecution({
@@ -1237,19 +1323,35 @@ export class AgentLoop {
       accumulatedOutput = toolParse.beforeText + toolParse.fullMatch + 
         this.toolSystem.formatToolResultForInjection('', resultsText)
       
+      // After injecting, we need to continue and get the model's response to the tool results
+      // This will either be: more tool calls, final text, or stop on participant
       toolDepth++
+      
+      // Continue to next iteration to see what the model generates after seeing tool results
+      // The loop will exit when:
+      // 1. No more tool calls are found (model finished or stopped on participant)
+      // 2. Max tool depth reached
     }
     
     logger.warn('Reached max inline tool depth')
+    
+    // Persist all pending tool uses with the final accumulated output
+    for (const { call, result } of pendingToolPersistence) {
+      call.originalCompletionText = accumulatedOutput
+      await this.toolSystem.persistToolUse(this.botId, channelId, call, result)
+    }
+    
+    const displayText = this.toolSystem.stripToolXml(accumulatedOutput)
     return {
       completion: {
-        content: [{ type: 'text', text: accumulatedOutput + '\n[Max tool depth reached]' }],
+        content: [{ type: 'text', text: displayText + '\n[Max tool depth reached]' }],
         stopReason: 'end_turn' as const,
         usage: { inputTokens: 0, outputTokens: 0 },
         model: '',
       },
       toolCallIds: allToolCallIds,
       preambleMessageIds: allPreambleMessageIds,
+      fullCompletionText: accumulatedOutput + '\n[Max tool depth reached]',  // Full output for activation store
     }
   }
   
@@ -1266,6 +1368,9 @@ export class AgentLoop {
       return baseRequest
     }
     
+    // Trim trailing whitespace - Anthropic API rejects assistant prefill ending with whitespace
+    const trimmedOutput = accumulatedOutput.trimEnd()
+    
     // Clone the request
     const request = {
       ...baseRequest,
@@ -1279,13 +1384,13 @@ export class AgentLoop {
       // Replace the last empty message with accumulated output
       request.messages[request.messages.length - 1] = {
         ...lastMsg,
-        content: [{ type: 'text', text: accumulatedOutput }],
+        content: [{ type: 'text', text: trimmedOutput }],
       }
     } else {
       // Add accumulated output as new message
       request.messages.push({
         participant: config.innerName,
-        content: [{ type: 'text', text: accumulatedOutput }],
+        content: [{ type: 'text', text: trimmedOutput }],
       })
     }
     
@@ -1298,7 +1403,7 @@ export class AgentLoop {
     channelId: string,
     triggeringMessageId: string,
     activationId?: string  // Optional activation ID for recording completions
-  ): Promise<{ completion: any; toolCallIds: string[]; preambleMessageIds: string[] }> {
+  ): Promise<{ completion: any; toolCallIds: string[]; preambleMessageIds: string[]; fullCompletionText?: string }> {
     let depth = 0
     let currentRequest = llmRequest
     let allToolResults: Array<{ call: any; result: any }> = []

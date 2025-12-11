@@ -455,13 +455,13 @@ export class LLMMiddleware {
   private static readonly FUNCTION_OPEN = '<' + 'function>'
   private static readonly FUNCTION_CLOSE = '</' + 'function>'
 
-  // Additional Anthropic-style constants for invoke/parameter tags
-  private static readonly INVOKE_OPEN_EX = '<' + 'antml:invoke name="'
-  private static readonly INVOKE_CLOSE_EX = '</' + 'antml:invoke>'
-  private static readonly PARAM_OPEN_EX = '<' + 'antml:parameter name="'
-  private static readonly PARAM_CLOSE_EX = '</' + 'antml:parameter>'
-  private static readonly FUNC_CALLS_OPEN_EX = '<' + 'antml:function_calls>'
-  private static readonly FUNC_CALLS_CLOSE_EX = '</' + 'antml:function_calls>'
+  // Tool call format constants (plain format - model prefers this)
+  private static readonly INVOKE_OPEN_EX = '<' + 'invoke name="'
+  private static readonly INVOKE_CLOSE_EX = '</' + 'invoke>'
+  private static readonly PARAM_OPEN_EX = '<' + 'parameter name="'
+  private static readonly PARAM_CLOSE_EX = '</' + 'parameter>'
+  private static readonly FUNC_CALLS_OPEN_EX = '<' + 'function_calls>'
+  private static readonly FUNC_CALLS_CLOSE_EX = '</' + 'function_calls>'
 
   private formatToolsForPrefill(tools: any[]): string {
     // Format each tool as JSON inside <function> tags (Anthropic's actual format)

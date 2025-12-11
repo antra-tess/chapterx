@@ -91,43 +91,51 @@ export class ContextBuilder {
     )
 
     // 5. Interleave historical tool use from cache (limited to last 5 calls with results)
-    // Tools are inserted chronologically where they occurred, not at the end
-    const toolMessagesByTrigger = this.formatToolUseWithResults(toolCacheWithResults, config.innerName)
-    
-    // Create a map of triggering message ID -> tool messages
-    const toolsByMessageId = new Map<string, ParticipantMessage[]>()
-    for (let i = 0; i < toolMessagesByTrigger.length; i += 2) {
-      const toolCall = toolMessagesByTrigger[i]
-      const toolResult = toolMessagesByTrigger[i + 1]
-      if (toolCall && toolResult) {
-        const messageId = toolCall.messageId || ''
-        if (!toolsByMessageId.has(messageId)) {
-          toolsByMessageId.set(messageId, [])
+    // Skip when preserve_thinking_context is enabled - activation store injection handles tool content
+    if (!config.preserve_thinking_context) {
+      // Tools are inserted chronologically where they occurred, not at the end
+      const toolMessagesByTrigger = this.formatToolUseWithResults(toolCacheWithResults, config.innerName)
+      
+      // Create a map of triggering message ID -> tool messages
+      const toolsByMessageId = new Map<string, ParticipantMessage[]>()
+      for (let i = 0; i < toolMessagesByTrigger.length; i += 2) {
+        const toolCall = toolMessagesByTrigger[i]
+        const toolResult = toolMessagesByTrigger[i + 1]
+        if (toolCall && toolResult) {
+          const messageId = toolCall.messageId || ''
+          if (!toolsByMessageId.has(messageId)) {
+            toolsByMessageId.set(messageId, [])
+          }
+          toolsByMessageId.get(messageId)!.push(toolCall, toolResult)
         }
-        toolsByMessageId.get(messageId)!.push(toolCall, toolResult)
       }
-    }
-    
-    // Interleave tools with messages based on messageId
-    const interleavedMessages: ParticipantMessage[] = []
-    for (const msg of participantMessages) {
-      interleavedMessages.push(msg)
-      // Add any tools triggered by this message
-      if (msg.messageId && toolsByMessageId.has(msg.messageId)) {
-        interleavedMessages.push(...toolsByMessageId.get(msg.messageId)!)
+      
+      // Interleave tools with messages based on messageId
+      const interleavedMessages: ParticipantMessage[] = []
+      for (const msg of participantMessages) {
+        interleavedMessages.push(msg)
+        // Add any tools triggered by this message
+        if (msg.messageId && toolsByMessageId.has(msg.messageId)) {
+          interleavedMessages.push(...toolsByMessageId.get(msg.messageId)!)
+        }
       }
+      
+      logger.debug({ 
+        discordMessages: messages.length,
+        toolCallsWithResults: toolCacheWithResults.length,
+        toolMessages: toolMessagesByTrigger.length,
+        interleavedTotal: interleavedMessages.length 
+      }, 'Context assembly complete with interleaved tools')
+      
+      // Replace participantMessages with interleaved version
+      participantMessages.length = 0
+      participantMessages.push(...interleavedMessages)
+    } else {
+      logger.debug({ 
+        discordMessages: messages.length,
+        toolCallsWithResults: toolCacheWithResults.length,
+      }, 'Skipping tool cache interleaving (preserve_thinking_context enabled)')
     }
-    
-    logger.debug({ 
-      discordMessages: messages.length,
-      toolCallsWithResults: toolCacheWithResults.length,
-      toolMessages: toolMessagesByTrigger.length,
-      interleavedTotal: interleavedMessages.length 
-    }, 'Context assembly complete with interleaved tools')
-    
-    // Replace participantMessages with interleaved version
-    participantMessages.length = 0
-    participantMessages.push(...interleavedMessages)
 
     // 4.5. Inject activation completions if preserve_thinking_context is enabled
     if (config.preserve_thinking_context && activations && activations.length > 0) {
@@ -1236,8 +1244,10 @@ export class ContextBuilder {
     }
 
     // Add participant names with colon
+    // In prefill mode, participant names appear after newlines, so include both variants
     for (const participant of recentParticipants) {
       sequences.push(`${participant}:`)
+      sequences.push(`\n${participant}:`)  // Also match with leading newline
     }
 
     // Add system message prefixes (bot should never generate these)

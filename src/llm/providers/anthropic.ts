@@ -43,7 +43,7 @@ export class AnthropicProvider implements LLMProvider {
           // Simple string format
           systemParam = systemMsgs
             .map(m => typeof m.content === 'string' ? m.content : '')
-            .join('\n\n')
+        .join('\n\n')
         }
       }
 

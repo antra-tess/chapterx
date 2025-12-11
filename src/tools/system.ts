@@ -266,19 +266,20 @@ export class ToolSystem {
   }
 
   // Anthropic-style XML tag constants (assembled to avoid triggering stop sequences)
-  private static readonly FUNC_CALLS_OPEN = '<' + 'antml:function_calls>'
-  private static readonly FUNC_CALLS_CLOSE = '</' + 'antml:function_calls>'
+  // Support both antml: prefixed and plain formats
+  private static readonly FUNC_CALLS_OPEN_ANTML = '<' + 'antml:function_calls>'
+  private static readonly FUNC_CALLS_CLOSE_ANTML = '</' + 'antml:function_calls>'
+  private static readonly FUNC_CALLS_OPEN_PLAIN = '<' + 'function_calls>'
+  private static readonly FUNC_CALLS_CLOSE_PLAIN = '</' + 'function_calls>'
   private static readonly FUNC_RESULTS_OPEN = '<' + 'function_results>'
   private static readonly FUNC_RESULTS_CLOSE = '</' + 'function_results>'
 
   /**
    * Parse Anthropic-style tool calls from completion text
-   * Format:
-   *   [antml:function_calls]
-   *   [antml:invoke name="tool_name"]
-   *   [antml:parameter name="param"]value[/antml:parameter]
-   *   [/antml:invoke]
-   *   [/antml:function_calls]
+   * Supports both formats:
+   *   [antml:function_calls] / [function_calls]
+   *   [antml:invoke] / [invoke]
+   *   [antml:parameter] / [parameter]
    * 
    * Returns the first complete function_calls block found, or null if none/incomplete.
    * Also returns the text before and after the block for continuation.
@@ -289,50 +290,63 @@ export class ToolSystem {
     afterText: string,
     fullMatch: string,
   } | null {
-    // Build regex patterns from constants (avoid literal tags in source)
-    const openTag = ToolSystem.FUNC_CALLS_OPEN.replace(/[<>]/g, '\\$&')
-    const closeTag = ToolSystem.FUNC_CALLS_CLOSE.replace(/[<>]/g, '\\$&')
+    // Try antml: prefixed format first, then plain format
+    // Match pattern: <(antml:)?function_calls>...</(antml:)?function_calls>
+    // Use global match to find ALL blocks, then pick the last one that doesn't have results yet
+    const blockPattern = /<(antml:)?function_calls>([\s\S]*?)<\/(antml:)?function_calls>/g
     
-    // Match the entire function_calls block
-    const blockPattern = new RegExp(openTag + '([\\s\\S]*?)' + closeTag)
-    const blockMatch = completion.match(blockPattern)
+    let blockMatch: RegExpExecArray | null = null
+    let lastUnexecutedMatch: RegExpExecArray | null = null
+    
+    while ((blockMatch = blockPattern.exec(completion)) !== null) {
+      // Check if this block already has results after it
+      const afterPos = blockMatch.index + blockMatch[0].length
+      const textAfter = completion.slice(afterPos, afterPos + 100) // Check next 100 chars
+      if (!textAfter.trimStart().startsWith('<function_results>')) {
+        // This block hasn't been executed yet
+        lastUnexecutedMatch = { ...blockMatch } as RegExpExecArray
+        Object.assign(lastUnexecutedMatch, blockMatch)
+        lastUnexecutedMatch.index = blockMatch.index
+      }
+    }
+    
+    blockMatch = lastUnexecutedMatch
     
     if (!blockMatch) {
       // Check if there's an incomplete block (opened but not closed)
-      if (completion.includes(ToolSystem.FUNC_CALLS_OPEN) && 
-          !completion.includes(ToolSystem.FUNC_CALLS_CLOSE)) {
+      const hasOpen = completion.includes(ToolSystem.FUNC_CALLS_OPEN_ANTML) || 
+                      completion.includes(ToolSystem.FUNC_CALLS_OPEN_PLAIN)
+      const hasClose = completion.includes(ToolSystem.FUNC_CALLS_CLOSE_ANTML) || 
+                       completion.includes(ToolSystem.FUNC_CALLS_CLOSE_PLAIN)
+      if (hasOpen && !hasClose) {
         return null  // Incomplete - need more tokens
       }
       return null  // No tool calls
     }
     
     const fullMatch = blockMatch[0]
-    const blockContent = blockMatch[1]!
+    const blockContent = blockMatch[2]!  // Group 2 is the content between tags
     const beforeText = completion.slice(0, completion.indexOf(fullMatch))
     const afterText = completion.slice(completion.indexOf(fullMatch) + fullMatch.length)
     
     // Parse individual invoke blocks
-    // Build patterns dynamically to avoid stop sequences in source
-    const invokeOpenPat = '<' + 'antml:invoke\\s+name="([^"]+)">'
-    const invokeClosePat = '</' + 'antml:invoke>'
-    const invokePattern = new RegExp(invokeOpenPat + '([\\s\\S]*?)' + invokeClosePat, 'g')
+    // Support both <invoke> and <invoke> formats
+    const invokePattern = /<(antml:)?invoke\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?invoke>/g
     const calls: ToolCall[] = []
     let invokeMatch
     
     while ((invokeMatch = invokePattern.exec(blockContent)) !== null) {
-      const toolName = invokeMatch[1]!
-      const invokeContent = invokeMatch[2]!
+      const toolName = invokeMatch[2]!  // Group 2 is the name
+      const invokeContent = invokeMatch[3]!  // Group 3 is the content
       
-      // Parse parameters - build pattern dynamically
-      const paramOpenPat = '<' + 'antml:parameter\\s+name="([^"]+)">'
-      const paramClosePat = '</' + 'antml:parameter>'
-      const paramPattern = new RegExp(paramOpenPat + '([^<]*)' + paramClosePat, 'g')
+      // Parse parameters - support both <parameter> and <parameter>
+      const paramPattern = /<(antml:)?parameter\s+name="([^"]+)">([^<]*)<\/(antml:)?parameter>/g
       const input: Record<string, any> = {}
       let paramMatch
       
       while ((paramMatch = paramPattern.exec(invokeContent)) !== null) {
-        const paramName = paramMatch[1]!
-        let paramValue: any = paramMatch[2]!
+        const paramName = paramMatch[2]!  // Group 2 is the name
+        let paramValue: any = paramMatch[3]!  // Group 3 is the value
         
         // Try to parse as JSON, otherwise keep as string
         try {
@@ -363,16 +377,33 @@ export class ToolSystem {
    * Format tool result for injection into completion (Anthropic style)
    */
   formatToolResultForInjection(_toolName: string, result: string): string {
-    return '\n\n' + ToolSystem.FUNC_RESULTS_OPEN + '\n' + result + '\n' + ToolSystem.FUNC_RESULTS_CLOSE + '\n\n'
+    // No trailing whitespace - Anthropic API rejects it for assistant prefill
+    return '\n\n' + ToolSystem.FUNC_RESULTS_OPEN + '\n' + result + '\n' + ToolSystem.FUNC_RESULTS_CLOSE
   }
 
   /**
    * Check if completion has an incomplete tool call block (opened but not closed)
    */
   hasIncompleteToolCall(completion: string): boolean {
-    const hasOpen = completion.includes(ToolSystem.FUNC_CALLS_OPEN)
-    const hasClose = completion.includes(ToolSystem.FUNC_CALLS_CLOSE)
+    const hasOpen = completion.includes(ToolSystem.FUNC_CALLS_OPEN_ANTML) || 
+                    completion.includes(ToolSystem.FUNC_CALLS_OPEN_PLAIN)
+    const hasClose = completion.includes(ToolSystem.FUNC_CALLS_CLOSE_ANTML) || 
+                     completion.includes(ToolSystem.FUNC_CALLS_CLOSE_PLAIN)
     return hasOpen && !hasClose
+  }
+
+  /**
+   * Strip tool call and result XML blocks from text (for display to Discord)
+   * Preserves any text before/after the blocks
+   */
+  stripToolXml(text: string): string {
+    // Strip <function_calls>...</function_calls> blocks
+    let result = text.replace(/<(antml:)?function_calls>[\s\S]*?<\/(antml:)?function_calls>/g, '')
+    // Strip <function_results>...</function_results> blocks
+    result = result.replace(/<function_results>[\s\S]*?<\/function_results>/g, '')
+    // Clean up excessive whitespace from removals
+    result = result.replace(/\n{3,}/g, '\n\n')
+    return result.trim()
   }
 
   /**
