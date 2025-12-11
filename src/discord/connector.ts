@@ -829,15 +829,36 @@ export class DiscordConnector {
       // Try to find user by username in guild members
       try {
         // Search guild members (fetches if not cached)
-        const members = await channel.guild.members.fetch({ query: username, limit: 5 })
-        const member = members.find(m => 
+        const members = await channel.guild.members.fetch({ query: username, limit: 10 })
+        
+        // Filter to exact matches only
+        const exactMatches = members.filter(m => 
           m.user.username.toLowerCase() === username.toLowerCase() ||
           m.displayName.toLowerCase() === username.toLowerCase()
         )
         
-        if (member) {
-          result = result.replace(match[0], `<@${member.user.id}>`)
-          logger.debug({ username, userId: member.user.id }, 'Resolved mention to user ID')
+        if (exactMatches.size > 0) {
+          // Prefer non-bot users over bots (humans are more likely to be mentioned)
+          // Also prefer users who have recently been active (not deleted accounts)
+          const sortedMatches = [...exactMatches.values()].sort((a, b) => {
+            // Non-bots first
+            if (a.user.bot !== b.user.bot) return a.user.bot ? 1 : -1
+            // Then by join date (more recent = likely more active)
+            const aJoined = a.joinedAt?.getTime() || 0
+            const bJoined = b.joinedAt?.getTime() || 0
+            return bJoined - aJoined
+          })
+          
+          const member = sortedMatches[0]
+          if (member) {
+            result = result.replace(match[0], `<@${member.user.id}>`)
+            logger.debug({ 
+              username, 
+              userId: member.user.id, 
+              isBot: member.user.bot,
+              matchCount: exactMatches.size 
+            }, 'Resolved mention to user ID')
+          }
         }
       } catch (error) {
         logger.debug({ username, error }, 'Failed to resolve mention')
