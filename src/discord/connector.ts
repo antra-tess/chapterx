@@ -1264,6 +1264,21 @@ export class DiscordConnector {
   }
 
   /**
+   * Extract username from oblique bridge webhook format.
+   * Oblique sends messages via webhooks with nickname format: `displayname[oblique:various text]`
+   * Returns the extracted displayname, or null if not an oblique message.
+   */
+  private extractObliqueUsername(username: string): string | null {
+    // Match pattern: displayname[oblique:...]
+    const obliquePattern = /^(.+?)\[oblique:[^\]]*\]$/
+    const match = username.match(obliquePattern)
+    if (match && match[1]) {
+      return match[1].trim()
+    }
+    return null
+  }
+
+  /**
    * Convert Discord.js Message to DiscordMessage format
    * Public for API access
    */
@@ -1275,18 +1290,22 @@ export class DiscordConnector {
       content = content.replace(new RegExp(`<@!?${userId}>`, 'g'), `<@${user.username}>`)
     }
     
-    // If this is a reply (and not from a bot), prepend <reply:@username>
-    if (msg.reference?.messageId && !msg.author.bot) {
+    // Check if this is an oblique bridge message and extract the real username
+    const obliqueUsername = this.extractObliqueUsername(msg.author.username)
+    const effectiveUsername = obliqueUsername || msg.author.username
+    // Oblique messages are from webhooks (technically bots) but should be treated as human messages
+    const effectiveBot = obliqueUsername ? false : msg.author.bot
+    
+    // If this is a reply, prepend <reply:@username>
+    // For oblique messages, treat as non-bot (they should get reply prefixes)
+    if (msg.reference?.messageId && !effectiveBot) {
       // Look up the referenced message to get the author name
       const referencedMsg = messageMap?.get(msg.reference.messageId)
       if (referencedMsg) {
-        const replyToName = referencedMsg.author.username
+        // Also extract oblique username from reply target if applicable
+        const replyToObliqueUsername = this.extractObliqueUsername(referencedMsg.author.username)
+        const replyToName = replyToObliqueUsername || referencedMsg.author.username
         content = `<reply:@${replyToName}> ${content}`
-        /*logger.debug({ 
-          messageId: msg.id, 
-          replyToId: msg.reference.messageId,
-          replyToName 
-        }, 'Added reply prefix to message')*/
       } else {
         content = `<reply:@someone> ${content}`
         logger.debug({ messageId: msg.id, replyToId: msg.reference.messageId }, 'Reply target not found in message map')
@@ -1299,9 +1318,9 @@ export class DiscordConnector {
       guildId: msg.guildId || '',
       author: {
         id: msg.author.id,
-        username: msg.author.username,
-        displayName: msg.author.username,  // Use username consistently (chapter2 compatibility)
-        bot: msg.author.bot,
+        username: effectiveUsername,
+        displayName: effectiveUsername,
+        bot: effectiveBot,
       },
       content,
       timestamp: msg.createdAt,
