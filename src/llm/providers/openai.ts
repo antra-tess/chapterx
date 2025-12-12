@@ -56,6 +56,7 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     // Add stop sequences if provided
+    // Note: OpenAI API may limit to 4, but we let them handle that
     if (request.stop_sequences && request.stop_sequences.length > 0) {
       body.stop = request.stop_sequences
     }

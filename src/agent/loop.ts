@@ -612,10 +612,22 @@ export class AgentLoop {
       const discordContext = await this.connector.fetchContext({
         channelId,
         depth: fetchDepth,
+        // Anchor the start of the fetched window for prompt cache stability.
+        // This prevents the oldest message from sliding forward as new messages arrive,
+        // which would otherwise invalidate the cached prompt prefix on every activation.
+        firstMessageId: state.cacheOldestMessageId || undefined,
         authorized_roles: [],  // Will apply after loading config
         pinnedConfigs,  // Reuse pre-fetched pinned configs (avoids second API call)
       })
       endProfile('fetchContext')
+
+      // If we don't yet have a cached starting point for this channel, initialize it now.
+      // The Discord connector will ensure this ID remains in the fetch window on subsequent activations.
+      if (!state.cacheOldestMessageId && discordContext.messages[0]?.id) {
+        const oldestMessageId = discordContext.messages[0].id
+        this.stateManager.updateCacheOldestMessageId(this.botId, channelId, oldestMessageId)
+        logger.debug({ channelId, oldestMessageId }, 'Initialized cached starting point for cache stability')
+      }
       
       // Trim messages to cached starting point for cache stability
       // This ensures the cached prefix stays identical between requests
@@ -636,8 +648,9 @@ export class AgentLoop {
           logger.warn({
             cacheOldestId,
             fetchedMessages: discordContext.messages.length,
-          }, 'Cached oldest message not found in fetch - clearing cached starting point')
-          this.stateManager.updateCacheOldestMessageId(this.botId, channelId, null)
+          }, 'Cached oldest message not found in fetch - resetting cached starting point')
+          const newOldestMessageId = discordContext.messages[0]?.id ?? null
+          this.stateManager.updateCacheOldestMessageId(this.botId, channelId, newOldestMessageId)
         }
       }
       
@@ -938,8 +951,14 @@ export class AgentLoop {
         responseLength: responseText.length
       }, 'Extracted response text')
 
-      // Truncate if model starts speaking as another participant (post-hoc stop sequence)
-      const truncateResult = this.truncateAtParticipant(responseText, discordContext.messages, config.innerName)
+      // Truncate if model continues past a stop sequence (post-hoc enforcement)
+      // This catches cases where the API ignored stop sequences (e.g., OpenRouter with >4 sequences)
+      const truncateResult = this.truncateAtParticipant(
+        responseText, 
+        discordContext.messages, 
+        config.innerName,
+        contextResult.request.stop_sequences
+      )
       responseText = truncateResult.text
 
       // Strip ALL <thinking>...</thinking> sections (respecting backtick escaping)
@@ -1920,8 +1939,14 @@ export class AgentLoop {
   /**
    * Truncate completion text if the model starts speaking as another participant.
    * Uses the full participant list from the conversation (not just recent ones in stop sequences).
+   * Also checks for any additional stop sequences provided.
    */
-  private truncateAtParticipant(text: string, messages: DiscordMessage[], botName: string): { text: string; truncatedAt: string | null } {
+  private truncateAtParticipant(
+    text: string, 
+    messages: DiscordMessage[], 
+    botName: string,
+    additionalStopSequences?: string[]
+  ): { text: string; truncatedAt: string | null } {
     // Collect ALL unique participant names from the conversation
     const participants = new Set<string>()
     for (const msg of messages) {
@@ -1930,25 +1955,33 @@ export class AgentLoop {
       }
     }
 
-    if (participants.size === 0) {
-      return { text, truncatedAt: null }
-    }
-
-    // Find the earliest occurrence of any "\nparticipant:" pattern
+    // Find the earliest occurrence of any stop sequence
     let earliestIndex = -1
     let truncatedAt: string | null = null
 
+    // Check participant patterns
     for (const participant of participants) {
       const pattern = `\n${participant}:`
       const index = text.indexOf(pattern)
       if (index !== -1 && (earliestIndex === -1 || index < earliestIndex)) {
         earliestIndex = index
-        truncatedAt = participant
+        truncatedAt = `participant:${participant}`
+      }
+    }
+
+    // Check additional stop sequences
+    if (additionalStopSequences) {
+      for (const stopSeq of additionalStopSequences) {
+        const index = text.indexOf(stopSeq)
+        if (index !== -1 && (earliestIndex === -1 || index < earliestIndex)) {
+          earliestIndex = index
+          truncatedAt = `stop:${stopSeq.replace(/\n/g, '\\n')}`
+        }
       }
     }
 
     if (earliestIndex !== -1) {
-      logger.info({ truncatedAt, position: earliestIndex, originalLength: text.length }, 'Truncated completion at participant boundary')
+      logger.info({ truncatedAt, position: earliestIndex, originalLength: text.length }, 'Truncated completion at stop sequence')
       return { text: text.substring(0, earliestIndex), truncatedAt }
     }
 

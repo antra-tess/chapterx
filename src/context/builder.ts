@@ -1335,28 +1335,32 @@ export class ContextBuilder {
       }
     }
 
-    // Add participant names with colon
-    // In prefill mode, participant names always appear after newlines
-    // Only use \n-prefixed versions to avoid wasting stop sequence slots
-    // (non-prefixed would be redundant since it's a substring match)
-    for (const participant of recentParticipants) {
+    // Priority order for stop sequences (OpenAI-compatible APIs limit to 4):
+    // 1. Message delimiter (if configured - for base models)
+    // 2. Most recent participant names (most likely to appear next)
+    // 3. Configured stop sequences
+    // 4. System prefixes and boundary markers (less critical)
+    
+    // Add message delimiter first (highest priority for base models)
+    if (config.message_delimiter) {
+      sequences.push(config.message_delimiter)
+    }
+
+    // Add participant names with newline prefix (in priority order - most recent first)
+    // Limit to 3 participants to leave room for other sequences
+    const participantLimit = config.message_delimiter ? 2 : 3
+    for (const participant of recentParticipants.slice(0, participantLimit)) {
       sequences.push(`\n${participant}:`)
     }
 
-    // Add system message prefixes (bot should never generate these)
-    sequences.push('\nSystem<[', '\nSystem>[', '\nSystem:')
-    
-    // Add conversation boundary marker (prevents hallucinating past context end)
-    sequences.push('<<HUMAN_CONVERSATION_END>>')
-
-    // Add message delimiter if configured (for base model completions)
-    // This should be the primary stop sequence for base models
-    if (config.message_delimiter) {
-      sequences.unshift(config.message_delimiter)  // Add at start (highest priority)
-    }
-
-    // Add configured stop sequences
+    // Add configured stop sequences (user-defined are important)
     sequences.push(...config.stop_sequences)
+    
+    // Add system message prefixes (lower priority)
+    sequences.push('\nSystem:')
+    
+    // Add conversation boundary marker (lowest priority)
+    sequences.push('<<HUMAN_CONVERSATION_END>>')
 
     return sequences
   }
