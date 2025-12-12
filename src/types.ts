@@ -343,6 +343,9 @@ export interface CachedImage {
   data: Buffer
   mediaType: string
   hash: string
+  width?: number
+  height?: number
+  tokenEstimate?: number  // Anthropic formula: (width * height) / 750
 }
 
 export interface CachedDocument {

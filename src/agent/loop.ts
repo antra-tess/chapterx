@@ -1966,11 +1966,22 @@ export class AgentLoop {
       }
     }
 
+    // Check if response STARTS with another participant's name (complete hallucination)
+    // This catches cases where the model role-plays as another user from the beginning
+    for (const participant of participants) {
+      const startPattern = `${participant}:`
+      if (text.startsWith(startPattern)) {
+        logger.warn({ participant, responseStart: text.substring(0, 100) }, 
+          'Response starts with another participant - complete hallucination, discarding')
+        return { text: '', truncatedAt: `start_hallucination:${participant}` }
+      }
+    }
+
     // Find the earliest occurrence of any stop sequence
     let earliestIndex = -1
     let truncatedAt: string | null = null
 
-    // Check participant patterns
+    // Check participant patterns (with newline prefix - mid-response hallucination)
     for (const participant of participants) {
       const pattern = `\n${participant}:`
       const index = text.indexOf(pattern)

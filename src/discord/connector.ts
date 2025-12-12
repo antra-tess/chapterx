@@ -7,6 +7,7 @@ import { Attachment, Client, GatewayIntentBits, Message, TextChannel } from 'dis
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
+import sharp from 'sharp'
 import { EventQueue } from '../agent/event-queue.js'
 import {
   DiscordContext,
@@ -1401,16 +1402,39 @@ export class DiscordConnector {
           const ext = cachedFilename.split('.')[1] || 'jpg'
           const mediaType = `image/${ext}`
           
+          // Get image dimensions for token estimation
+          let width = 1024, height = 1024
+          try {
+            const metadata = await sharp(buffer).metadata()
+            width = metadata.width || 1024
+            height = metadata.height || 1024
+          } catch (e) {
+            // Use defaults
+          }
+          
+          // Anthropic resizes to max 1568x1568
+          const maxDim = 1568
+          if (width > maxDim || height > maxDim) {
+            const scale = maxDim / Math.max(width, height)
+            width = Math.floor(width * scale)
+            height = Math.floor(height * scale)
+          }
+          
+          const tokenEstimate = Math.ceil((width * height) / 750)
+          
           const cached: CachedImage = {
             url,
             data: buffer,
             mediaType,
             hash,
+            width,
+            height,
+            tokenEstimate,
           }
           
           // Store in memory for faster subsequent access
           this.imageCache.set(url, cached)
-          logger.debug({ url, filename: cachedFilename }, 'Loaded image from disk cache')
+          logger.debug({ url, filename: cachedFilename, tokenEstimate }, 'Loaded image from disk cache')
           return cached
         } catch (error) {
           logger.warn({ error, url, filepath }, 'Failed to read cached image from disk')
@@ -1440,11 +1464,35 @@ export class DiscordConnector {
       // Update URL map (will be persisted by caller after batch)
       this.urlToFilename.set(url, filename)
 
+      // Get image dimensions for token estimation
+      let width = 1024, height = 1024  // Default fallback
+      try {
+        const metadata = await sharp(buffer).metadata()
+        width = metadata.width || 1024
+        height = metadata.height || 1024
+      } catch (e) {
+        logger.debug({ url }, 'Could not get image dimensions, using defaults')
+      }
+      
+      // Anthropic resizes to max 1568x1568 (maintaining aspect ratio)
+      const maxDim = 1568
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height)
+        width = Math.floor(width * scale)
+        height = Math.floor(height * scale)
+      }
+      
+      // Anthropic token formula: (width * height) / 750
+      const tokenEstimate = Math.ceil((width * height) / 750)
+
       const cached: CachedImage = {
         url,
         data: buffer,
         mediaType: actualMediaType,
         hash,
+        width,
+        height,
+        tokenEstimate,
       }
 
       this.imageCache.set(url, cached)
@@ -1452,7 +1500,10 @@ export class DiscordConnector {
       logger.debug({ 
         url, 
         discordType: contentType, 
-        detectedType: actualMediaType 
+        detectedType: actualMediaType,
+        width,
+        height,
+        tokenEstimate,
       }, 'Downloaded and cached new image')
 
       return cached

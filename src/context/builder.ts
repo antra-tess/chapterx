@@ -267,11 +267,12 @@ export class ContextBuilder {
         if (block.type === 'image') {
           imageCount++
           totalImages++
-          // Add image detail
+          // Add image detail with actual token estimate
+          const imgBlock = block as any
           imageDetails.push({
             discordMessageId: msg.messageId || '',
             url: 'embedded',  // Base64 embedded
-            tokenEstimate: 1000,  // Rough estimate
+            tokenEstimate: imgBlock.tokenEstimate || 1000,  // Use actual or fallback
           })
         }
       }
@@ -313,13 +314,19 @@ export class ContextBuilder {
       if (msg.participant.startsWith('System<[')) {
         toolTokens += msgTokens
       } else {
-        // Check for images
+        // Check for images and use actual token estimates
         for (const block of msg.content) {
           if (block.type === 'image') {
-            imageTokens += 1000
+            const imgBlock = block as any
+            const estimate = imgBlock.tokenEstimate || 1000  // Fallback to 1000 if no estimate
+            imageTokens += estimate
           }
         }
-        messageTokens += msgTokens - (msg.content.filter(b => b.type === 'image').length * 1000)
+        // Subtract image tokens from message tokens (they're counted separately)
+        const imgTokensInMsg = msg.content
+          .filter(b => b.type === 'image')
+          .reduce((sum, b) => sum + ((b as any).tokenEstimate || 1000), 0)
+        messageTokens += msgTokens - imgTokensInMsg
       }
     }
     
@@ -731,6 +738,10 @@ export class ContextBuilder {
               
               const base64Data = imageData.toString('base64')
               
+              // Use cached token estimate, or calculate from dimensions
+              const tokenEstimate = cached.tokenEstimate || 
+                Math.ceil((cached.width || 1024) * (cached.height || 1024) / 750)
+              
               content.push({
                 type: 'image',
                 source: {
@@ -738,12 +749,14 @@ export class ContextBuilder {
                   data: base64Data,
                   media_type: mediaType,  // Anthropic API uses snake_case
                 },
-              })
+                tokenEstimate,  // For accurate context size calculation
+              } as any)
               
               logger.debug({ 
                 messageId: msg.id, 
                 url: attachment.url,
-                sizeMB: (base64Data.length / 1024 / 1024).toFixed(2)
+                sizeMB: (base64Data.length / 1024 / 1024).toFixed(2),
+                tokenEstimate,
               }, 'Added image to content')
             }
           }
@@ -1302,11 +1315,13 @@ export class ContextBuilder {
 
     // Get recent N unique participants (from most recent messages)
     // Include both message authors AND mentioned users
+    // Collect at least 10 for stop sequences (post-hoc truncation catches ALL participants anyway)
     const recentParticipants: string[] = []
     const seen = new Set<string>()
+    const minParticipants = Math.max(config.recent_participant_count, 10)
 
     // Iterate backwards to get most recent participants and their mentions
-    for (let i = participantMessages.length - 1; i >= 0 && recentParticipants.length < config.recent_participant_count; i--) {
+    for (let i = participantMessages.length - 1; i >= 0 && recentParticipants.length < minParticipants; i--) {
       const msg = participantMessages[i]
       if (!msg) continue
       
@@ -1323,7 +1338,7 @@ export class ContextBuilder {
           let match
           while ((match = mentionRegex.exec(block.text)) !== null) {
             const mentionedUser = match[1]!
-            if (!seen.has(mentionedUser) && recentParticipants.length < config.recent_participant_count) {
+            if (!seen.has(mentionedUser) && recentParticipants.length < minParticipants) {
               seen.add(mentionedUser)
               recentParticipants.push(mentionedUser)
             }
@@ -1332,11 +1347,12 @@ export class ContextBuilder {
       }
     }
 
-    // Priority order for stop sequences (OpenAI-compatible APIs limit to 4):
+    // Priority order for stop sequences:
     // 1. Message delimiter (if configured - for base models)
-    // 2. Most recent participant names (most likely to appear next)
+    // 2. Recent participant names (most likely to appear next)
     // 3. Configured stop sequences
     // 4. System prefixes and boundary markers (less critical)
+    // Note: APIs with limits (OpenAI: 4) will truncate, but post-hoc truncation catches all participants
     
     // Add message delimiter first (highest priority for base models)
     if (config.message_delimiter) {
@@ -1344,9 +1360,8 @@ export class ContextBuilder {
     }
 
     // Add participant names with newline prefix (in priority order - most recent first)
-    // Limit to 3 participants to leave room for other sequences
-    const participantLimit = config.message_delimiter ? 2 : 3
-    for (const participant of recentParticipants.slice(0, participantLimit)) {
+    // Use all collected participants - post-hoc truncation catches everyone anyway
+    for (const participant of recentParticipants) {
       sequences.push(`\n${participant}:`)
     }
 
