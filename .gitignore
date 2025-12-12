@@ -49,3 +49,4 @@ config/bots/simantra_discord_token
 config/bots/simantra.md
 config/bots/DrElaraVoss.yaml
 config/bots/Archimedes.yaml
+tools/strangesonnet45/

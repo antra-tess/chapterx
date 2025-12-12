@@ -620,7 +620,7 @@ export class AgentLoop {
       // Trim messages to cached starting point for cache stability
       // This ensures the cached prefix stays identical between requests
       const cacheOldestId = state.cacheOldestMessageId
-      if (cacheOldestId && state.messagesSinceRoll > 0) {
+      if (cacheOldestId) {
         const oldestIdx = discordContext.messages.findIndex(m => m.id === cacheOldestId)
         if (oldestIdx > 0) {
           // Trim messages that are older than our cached starting point
@@ -632,11 +632,12 @@ export class AgentLoop {
             remaining: discordContext.messages.length,
           }, 'Trimmed messages to cached starting point for cache stability')
         } else if (oldestIdx === -1) {
-          // Cached oldest message no longer in fetch - force a roll by clearing the marker
+          // Cached oldest message no longer in fetch - cache stability is broken
           logger.warn({
             cacheOldestId,
             fetchedMessages: discordContext.messages.length,
-          }, 'Cached oldest message not found in fetch - cache will be invalidated')
+          }, 'Cached oldest message not found in fetch - clearing cached starting point')
+          this.stateManager.updateCacheOldestMessageId(this.botId, channelId, null)
         }
       }
       
@@ -1060,8 +1061,11 @@ export class AgentLoop {
       }
 
       // 9. Update state
+      const prevCacheMarker = state.lastCacheMarker
+      const prevMessagesSinceRoll = state.messagesSinceRoll
+
       // Update cache marker if it changed
-      if (contextResult.cacheMarker && contextResult.cacheMarker !== state.lastCacheMarker) {
+      if (contextResult.cacheMarker && contextResult.cacheMarker !== prevCacheMarker) {
         this.stateManager.updateCacheMarker(this.botId, channelId, contextResult.cacheMarker)
       }
 
@@ -1069,7 +1073,9 @@ export class AgentLoop {
       if (contextResult.didRoll) {
         this.stateManager.resetMessageCount(this.botId, channelId)
         // Record the oldest message ID for cache stability on subsequent requests
-        const oldestMessageId = discordContext.messages[0]?.id ?? null
+        // Use the oldest Discord message ID that actually made it into the rolled context
+        const oldestMessageId =
+          contextResult.request.messages.find((m) => m.messageId)?.messageId ?? null
         this.stateManager.updateCacheOldestMessageId(this.botId, channelId, oldestMessageId)
         logger.debug({ channelId, oldestMessageId }, 'Context rolled, recorded oldest message for cache stability')
       } else {
@@ -1087,10 +1093,10 @@ export class AgentLoop {
           maxToolDepth: trace.getLLMCallCount(),
           hitMaxToolDepth: false,
           stateUpdates: {
-            cacheMarkerUpdated: contextResult.cacheMarker !== state.lastCacheMarker,
+            cacheMarkerUpdated: contextResult.cacheMarker !== prevCacheMarker,
             newCacheMarker: contextResult.cacheMarker || undefined,
             messageCountReset: contextResult.didRoll,
-            newMessageCount: contextResult.didRoll ? 0 : state.messagesSinceRoll + 1,
+            newMessageCount: contextResult.didRoll ? 0 : prevMessagesSinceRoll + 1,
           },
         })
       }
