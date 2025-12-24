@@ -30,6 +30,58 @@ const TRACE_DIR = join(LOGS_DIR, 'traces')
 const channelNameCache = new Map<string, string>()
 
 // ============================================================================
+// Index Cache
+// ============================================================================
+
+type IndexEntry = TraceIndex & { filename: string, botName?: string }
+
+let indexCache: IndexEntry[] | null = null
+let indexMtime: number = 0
+
+function getIndexCache(): IndexEntry[] {
+  const indexFile = join(TRACE_DIR, 'index.jsonl')
+  if (!existsSync(indexFile)) {
+    indexCache = []
+    indexMtime = 0
+    return []
+  }
+  
+  // Check if file changed since last load
+  const stat = statSync(indexFile)
+  if (indexCache !== null && stat.mtimeMs === indexMtime) {
+    // Cache hit - return cached data
+    return indexCache
+  }
+  
+  // Cache miss - reload from disk
+  console.log(`[cache] Reloading index (mtime changed: ${indexMtime} -> ${stat.mtimeMs})`)
+  const start = Date.now()
+  
+  const entries = readFileSync(indexFile, 'utf-8')
+    .split('\n')
+    .filter(Boolean)
+    .map(line => {
+      try { return JSON.parse(line) } 
+      catch { return null }
+    })
+    .filter(Boolean) as IndexEntry[]
+  
+  // Update channel name cache
+  for (const entry of entries) {
+    if (entry.channelName && entry.channelId) {
+      channelNameCache.set(entry.channelId, entry.channelName)
+    }
+  }
+  
+  indexCache = entries
+  indexMtime = stat.mtimeMs
+  
+  console.log(`[cache] Loaded ${entries.length} index entries in ${Date.now() - start}ms`)
+  
+  return entries
+}
+
+// ============================================================================
 // Data Loading
 // ============================================================================
 
@@ -43,25 +95,8 @@ function discoverBots(): string[] {
     })
 }
 
-function loadIndex(botName?: string): (TraceIndex & { filename: string, botName?: string })[] {
-  const indexFile = join(TRACE_DIR, 'index.jsonl')
-  if (!existsSync(indexFile)) return []
-  
-  const entries = readFileSync(indexFile, 'utf-8')
-    .split('\n')
-    .filter(Boolean)
-    .map(line => {
-      try { return JSON.parse(line) } 
-      catch { return null }
-    })
-    .filter(Boolean) as (TraceIndex & { filename: string, botName?: string })[]
-  
-  // Cache channel names from entries
-  for (const entry of entries) {
-    if (entry.channelName && entry.channelId) {
-      channelNameCache.set(entry.channelId, entry.channelName)
-    }
-  }
+function loadIndex(botName?: string): IndexEntry[] {
+  const entries = getIndexCache()
   
   // Filter by bot if specified
   if (botName) {
@@ -231,13 +266,24 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
       if (channel) entries = entries.filter(e => e.channelId === channel)
       if (failed) entries = entries.filter(e => !e.success)
       
-      // Add channel names to entries
-      const enrichedEntries = entries.slice(0, limit).map(e => ({
-        ...e,
+      // Strip large arrays not needed for list view (only used for search)
+      // This reduces response size from ~13KB to ~500 bytes per entry
+      const slimEntries = entries.slice(0, limit).map(e => ({
+        traceId: e.traceId,
+        timestamp: e.timestamp,
+        channelId: e.channelId,
+        triggeringMessageId: e.triggeringMessageId,
+        botName: e.botName,
         channelName: getChannelName(e.channelId),
+        success: e.success,
+        durationMs: e.durationMs,
+        llmCallCount: e.llmCallCount,
+        toolExecutionCount: e.toolExecutionCount,
+        totalTokens: e.totalTokens,
+        // contextMessageIds and sentMessageIds intentionally omitted
       }))
       
-      res.end(JSON.stringify(enrichedEntries))
+      res.end(JSON.stringify(slimEntries))
       return
     }
     
