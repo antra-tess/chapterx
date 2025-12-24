@@ -308,6 +308,13 @@ export class LLMMiddleware {
       }
     }
 
+    // Anthropic API rejects assistant prefill ending with trailing whitespace
+    // Trim the final assistant message if it exists
+    const lastMessage = messages[messages.length - 1]
+    if (lastMessage?.role === 'assistant' && typeof lastMessage.content === 'string') {
+      lastMessage.content = lastMessage.content.trimEnd()
+    }
+
     return {
       messages,
       model: request.config.model,
