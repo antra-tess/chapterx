@@ -19,6 +19,7 @@
 import { createServer, IncomingMessage, ServerResponse } from 'http'
 import { readFileSync, existsSync, readdirSync, statSync } from 'fs'
 import { join, basename } from 'path'
+import { gzipSync } from 'zlib'
 import { ActivationTrace, TraceIndex } from '../src/trace/types.js'
 
 const PORT = parseInt(process.env.PORT || '3847', 10)
@@ -171,6 +172,25 @@ function checkAuth(req: IncomingMessage): boolean {
 // API Handlers
 // ============================================================================
 
+/** 
+ * Send JSON response with gzip compression if client supports it
+ * Compression threshold: only compress if payload > 1KB
+ */
+function sendJson(req: IncomingMessage, res: ServerResponse, data: unknown): void {
+  const json = JSON.stringify(data)
+  const acceptEncoding = req.headers['accept-encoding'] || ''
+  
+  // Only compress if client supports gzip and payload is large enough
+  if (acceptEncoding.includes('gzip') && json.length > 1024) {
+    const compressed = gzipSync(json)
+    res.setHeader('Content-Encoding', 'gzip')
+    res.setHeader('Content-Length', compressed.length)
+    res.end(compressed)
+  } else {
+    res.end(json)
+  }
+}
+
 function handleApi(req: IncomingMessage, res: ServerResponse, path: string): void {
   res.setHeader('Content-Type', 'application/json')
   
@@ -185,7 +205,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
     // GET /api/bots - List available bots
     if (path === '/api/bots') {
       const bots = discoverBots()
-      res.end(JSON.stringify({ bots }))
+      sendJson(req, res, { bots })
       return
     }
     
@@ -250,7 +270,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
         }
       }
       
-      res.end(JSON.stringify({ messageId, results }))
+      sendJson(req, res, { messageId, results })
       return
     }
     
@@ -283,7 +303,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
         // contextMessageIds and sentMessageIds intentionally omitted
       }))
       
-      res.end(JSON.stringify(slimEntries))
+      sendJson(req, res, slimEntries)
       return
     }
     
@@ -296,7 +316,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
         res.end(JSON.stringify({ error: 'Trace not found' }))
         return
       }
-      res.end(JSON.stringify(trace))
+      sendJson(req, res, trace)
       return
     }
     
@@ -309,7 +329,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
         res.end(JSON.stringify({ error: 'Request body not found' }))
         return
       }
-      res.end(JSON.stringify(body))
+      sendJson(req, res, body)
       return
     }
     
@@ -322,7 +342,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
         res.end(JSON.stringify({ error: 'Response body not found' }))
         return
       }
-      res.end(JSON.stringify(body))
+      sendJson(req, res, body)
       return
     }
     
@@ -332,7 +352,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
         id,
         name,
       }))
-      res.end(JSON.stringify({ channels }))
+      sendJson(req, res, { channels })
       return
     }
     
