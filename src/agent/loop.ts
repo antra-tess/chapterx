@@ -1701,45 +1701,8 @@ export class AgentLoop {
       }
     }
     
-    // 7. Send segments to Discord
-    let actualSentText = ''
-    if (segments.length > 0) {
-      const sendResult = await this.sendSegments(
-        channelId, 
-        segments, 
-        allSentMessageIds.length === 0 ? triggeringMessageId : undefined
-      )
-      allSentMessageIds.push(...sendResult.sentMessageIds)
-      
-      // Merge contexts
-      for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
-        messageContexts[msgId] = ctx
-      }
-      
-      actualSentText = segments.map(s => s.visible).join('')
-    }
-    
-    // 8. Handle phantom invisible (only invisible content, no visible)
-    // This happens when the model outputs only thinking/tool results at the end
-    const allInvisible = this.extractAllInvisible(truncatedRemaining)
-    if (!segments.length && allInvisible && allSentMessageIds.length > 0) {
-      // Attach invisible as suffix to last sent message
-      const lastMsgId = allSentMessageIds[allSentMessageIds.length - 1]!
-      const existing = messageContexts[lastMsgId]
-      messageContexts[lastMsgId] = {
-        prefix: existing?.prefix ?? '',
-        suffix: (existing?.suffix || '') + allInvisible
-      }
-    }
-    
-    // 9. Calculate full display text for trace and extract thinking content
+    // 7. Extract thinking content and post debug messages BEFORE the visible response
     const { stripped, content: thinkingContent } = this.stripThinkingBlocks(this.toolSystem.stripToolXml(accumulatedOutput))
-    let displayText = stripped
-    if (discordMessages) {
-      displayText = await this.replaceMentions(displayText, discordMessages)
-    }
-    
-    // 10. Post thinking content as debug messages if debug_thinking is enabled
     if (config.debug_thinking && thinkingContent.length > 0) {
       for (const thinking of thinkingContent) {
         if (thinking.trim()) {
@@ -1760,6 +1723,43 @@ export class AgentLoop {
           }
         }
       }
+    }
+    
+    // 8. Send segments to Discord
+    let actualSentText = ''
+    if (segments.length > 0) {
+      const sendResult = await this.sendSegments(
+        channelId, 
+        segments, 
+        allSentMessageIds.length === 0 ? triggeringMessageId : undefined
+      )
+      allSentMessageIds.push(...sendResult.sentMessageIds)
+      
+      // Merge contexts
+      for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
+        messageContexts[msgId] = ctx
+      }
+      
+      actualSentText = segments.map(s => s.visible).join('')
+    }
+    
+    // 9. Handle phantom invisible (only invisible content, no visible)
+    // This happens when the model outputs only thinking/tool results at the end
+    const allInvisible = this.extractAllInvisible(truncatedRemaining)
+    if (!segments.length && allInvisible && allSentMessageIds.length > 0) {
+      // Attach invisible as suffix to last sent message
+      const lastMsgId = allSentMessageIds[allSentMessageIds.length - 1]!
+      const existing = messageContexts[lastMsgId]
+      messageContexts[lastMsgId] = {
+        prefix: existing?.prefix ?? '',
+        suffix: (existing?.suffix || '') + allInvisible
+      }
+    }
+    
+    // 10. Calculate full display text for trace
+    let displayText = stripped
+    if (discordMessages) {
+      displayText = await this.replaceMentions(displayText, discordMessages)
     }
     
     // 11. Build final completion text for trace
