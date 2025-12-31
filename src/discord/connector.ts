@@ -466,6 +466,10 @@ export class DiscordConnector {
     let currentBefore = startFromId
     const batchSize = 100
     let foundHistory = false  // Track if we found .history in current recursion level
+    
+    // Use a unique key for this fetch call to avoid conflicts with recursive calls
+    const fetchId = Math.random().toString(36).substring(7)
+    const pendingKey = `_pendingNewerMessages_${fetchId}`
 
     logger.debug({ 
       channelId: channel.id, 
@@ -571,19 +575,19 @@ export class DiscordConnector {
               logger.debug({
                 resultsCount: results.length,
                 batchResultsCount: batchResults.length,
-                hadPendingNewerMessages: !!(this as any)._pendingNewerMessages,
+                hadPendingNewerMessages: !!(this as any)[pendingKey],
               }, 'Empty .history command - keeping newer messages, discarding older')
               this.lastHistoryDidClear = true  // Signal to skip parent fetch for threads
               
               // If we previously processed a .history range in this batch, the historical
               // messages it fetched are now in `results`. Since this .history clear is
               // NEWER than that range, we need to discard those historical messages too.
-              if ((this as any)._pendingNewerMessages) {
-                // _pendingNewerMessages has the ACTUAL newer messages we want to keep
+              if ((this as any)[pendingKey]) {
+                // pendingKey has the ACTUAL newer messages we want to keep
                 // results has historical messages that should be discarded
                 results.length = 0
-                results.push(...(this as any)._pendingNewerMessages)
-                delete (this as any)._pendingNewerMessages
+                results.push(...(this as any)[pendingKey])
+                delete (this as any)[pendingKey]
                 logger.debug({
                   restoredCount: results.length,
                 }, 'Restored newer messages after .history clear overrode earlier .history range')
@@ -647,7 +651,7 @@ export class DiscordConnector {
                 results.push(...historicalMessages)
                 
                 // Store newer messages to append after we collect batch-after-history
-                ;(this as any)._pendingNewerMessages = newerMessages
+                ;(this as any)[pendingKey] = newerMessages
                 
                 // Clear batchResults - we don't want messages BEFORE .history
                 // Only keep messages AFTER .history in the current channel
@@ -680,8 +684,8 @@ export class DiscordConnector {
         results.push(...batchResults)
         
         // Append previously collected newer messages (batches processed before finding .history)
-        const newerMessages = (this as any)._pendingNewerMessages || []
-        delete (this as any)._pendingNewerMessages
+        const newerMessages = (this as any)[pendingKey] || []
+        delete (this as any)[pendingKey]
         
         if (newerMessages.length > 0) {
           results.push(...newerMessages)
