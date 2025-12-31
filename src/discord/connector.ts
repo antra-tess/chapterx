@@ -565,10 +565,22 @@ export class DiscordConnector {
             }, 'Parsed .history command')
 
             if (historyRange === null) {
-              // Empty .history - clear history, continue with messages after
-              logger.debug('Empty .history command - clearing prior history')
+              // Empty .history - clear history BEFORE this point, keep messages AFTER
+              // Since we fetch newest→oldest, `results` has NEWER messages (keep them!)
+              // `batchResults` has messages OLDER than .history in current batch (discard)
+              logger.debug({
+                resultsCount: results.length,
+                batchResultsCount: batchResults.length,
+              }, 'Empty .history command - keeping newer messages, discarding older')
               this.lastHistoryDidClear = true  // Signal to skip parent fetch for threads
-              return results
+              
+              // Clear only batchResults (older messages in current batch)
+              // Keep results (newer batches already collected)
+              batchResults.length = 0
+              foundHistory = true
+              
+              // Continue processing remaining messages in batch (newer than .history)
+              continue
             } else if (historyRange) {
               // Recursively fetch from history target
               const targetChannelId = this.extractChannelIdFromUrl(historyRange.last)
