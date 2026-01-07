@@ -273,6 +273,13 @@ export class ConfigSystem {
       // Loop prevention
       max_bot_reply_chain_depth: config.max_bot_reply_chain_depth ?? 2,
       bot_reply_chain_depth_emote: config.bot_reply_chain_depth_emote || '🔁',
+      
+      // Soma integration (credit system) - optional
+      soma: config.soma ? {
+        enabled: config.soma.enabled ?? false,
+        url: config.soma.url || '',
+        token: config.soma.token,  // Optional: uses SOMA_TOKEN env var if not set
+      } : undefined,
     }
   }
 

@@ -210,6 +210,9 @@ export interface BotConfig {
   
   // API mode
   api_only?: boolean  // If true, disable Discord activation handling - only serve API requests
+  
+  // Soma integration (credit system)
+  soma?: SomaConfig
 }
 
 /**
@@ -236,6 +239,45 @@ export interface PluginInstanceConfig {
   state_scope?: 'global' | 'channel' | 'epic' | 'off'
   /** Any other plugin-specific settings */
   [key: string]: any
+}
+
+// ============================================================================
+// Soma Integration (Credit System)
+// ============================================================================
+
+/**
+ * Soma integration configuration
+ * When enabled, users must have sufficient ichor (credits) to trigger the bot
+ */
+export interface SomaConfig {
+  /** Enable Soma credit checking (default: false) */
+  enabled: boolean
+  /** Soma API base URL (e.g., "http://localhost:3100/api/v1") */
+  url: string
+  /** Optional: Override token from environment (default: uses SOMA_TOKEN env var) */
+  token?: string
+}
+
+/**
+ * Result from Soma check-and-deduct API
+ */
+export interface SomaCheckResult {
+  allowed: boolean
+  cost: number
+  // Success fields
+  balanceAfter?: number
+  transactionId?: string
+  // Failure fields  
+  currentBalance?: number
+  regenRate?: number
+  timeToAfford?: number  // Minutes
+  cheaperAlternatives?: Array<{
+    botId: string
+    name: string
+    cost: number
+  }>
+  // Reason for denial (if allowed=false)
+  reason?: 'insufficient_funds' | 'bot_not_configured'
 }
 
 export interface ToolDefinition {

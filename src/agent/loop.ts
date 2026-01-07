@@ -24,6 +24,7 @@ import {
 } from '../trace/index.js'
 import { ActivationStore, Activation, TriggerType, MessageContext } from '../activation/index.js'
 import { PluginContextFactory, ContextInjection } from '../tools/plugins/index.js'
+import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.js'
 
 /**
  * A segment of content: invisible prefix followed by visible text.
@@ -43,6 +44,7 @@ export class AgentLoop {
   private activeChannels = new Set<string>()  // Track channels currently being processed
   private activationStore: ActivationStore
   private cacheDir: string
+  private somaClient?: SomaClient  // Optional Soma credit system client
 
   constructor(
     private botId: string,
@@ -385,6 +387,27 @@ export class AgentLoop {
     // Determine activation reason for tracing
     const activationReason = this.determineActivationReason(events)
     
+    // ===== SOMA CREDIT CHECK =====
+    // Check if user has sufficient ichor before proceeding with activation
+    // Only charge for human-initiated triggers (mention, reply, m_command) - not random
+    const somaCheckResult = await this.checkSomaCredits(
+      events,
+      channelId,
+      guildId,
+      activationReason.reason,
+      triggeringMessageId
+    )
+    
+    if (somaCheckResult.status === 'blocked') {
+      // User doesn't have enough ichor - message already sent
+      this.activeChannels.delete(channelId)
+      return
+    }
+    
+    // Store transaction ID for potential refund if activation fails
+    const somaTransactionId = somaCheckResult.transactionId
+    // ===== END SOMA CHECK =====
+    
     // Wrap activation in both logging and trace context
     const activationPromise = triggeringMessageId
       ? withActivationLogging(channelId, triggeringMessageId, async () => {
@@ -424,6 +447,23 @@ export class AgentLoop {
             }, traceError ? 'Trace saved (with error)' : 'Trace saved')
           } catch (writeError) {
             logger.error({ writeError }, 'Failed to write trace')
+          }
+          
+          // If there was an error and we charged the user, refund them
+          if (traceError && somaTransactionId && this.somaClient) {
+            logger.info({ 
+              transactionId: somaTransactionId,
+              error: traceError.message 
+            }, 'Soma: refunding due to activation failure')
+            
+            try {
+              await this.somaClient.refund({
+                transactionId: somaTransactionId,
+                reason: 'inference_failed',
+              })
+            } catch (refundError) {
+              logger.error({ refundError, transactionId: somaTransactionId }, 'Failed to refund Soma transaction')
+            }
           }
           
           // Re-throw the original error if there was one
@@ -475,6 +515,137 @@ export class AgentLoop {
     }
     
     return { reason, events: triggerEvents }
+  }
+
+  /**
+   * Check Soma credits if enabled
+   * Returns status and transaction ID (for refunds if activation fails)
+   * 
+   * Design decisions:
+   * - Fails open: API errors allow activation (prevents Soma outages from blocking bots)
+   * - Only charges for direct triggers (mention, reply, m_command) - not random activations
+   * - Soma is optional: if not configured, always allows
+   * - Returns transactionId so we can refund if LLM inference fails
+   */
+  private async checkSomaCredits(
+    events: Event[],
+    channelId: string,
+    guildId: string,
+    triggerReason: 'mention' | 'reply' | 'random' | 'm_command',
+    triggeringMessageId?: string
+  ): Promise<{ status: 'allowed' | 'blocked'; transactionId?: string }> {
+    // Load config to check if Soma is enabled
+    let config: any
+    try {
+      const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
+      config = this.configSystem.loadConfig({
+        botName: this.botId,
+        guildId,
+        channelConfigs: pinnedConfigs,
+      })
+    } catch (error) {
+      logger.warn({ error }, 'Failed to load config for Soma check - allowing activation')
+      return { status: 'allowed' }
+    }
+
+    // Check if Soma is enabled
+    if (!config.soma?.enabled || !config.soma?.url) {
+      return { status: 'allowed' }
+    }
+
+    // Random activations are free
+    if (!shouldChargeTrigger(triggerReason)) {
+      logger.debug({ triggerReason }, 'Soma: trigger type is free')
+      return { status: 'allowed' }
+    }
+
+    // Initialize Soma client if needed
+    if (!this.somaClient) {
+      this.somaClient = new SomaClient(config.soma)
+      logger.info({ url: config.soma.url }, 'Soma client initialized')
+    }
+
+    // Find the triggering user
+    const triggeringUser = this.findTriggeringUser(events)
+    if (!triggeringUser) {
+      logger.warn('Could not identify triggering user for Soma check - allowing activation')
+      return { status: 'allowed' }
+    }
+
+    // Call Soma API (include channelId so Soma bot can add reactions)
+    const result = await this.somaClient.checkAndDeduct({
+      userId: triggeringUser.id,
+      serverId: guildId,
+      channelId: channelId,
+      botId: this.botUserId || '',
+      messageId: triggeringMessageId || '',
+      triggerType: triggerReason as SomaTriggerType,
+      userRoles: triggeringUser.roles || [],
+    })
+
+    if (result.allowed) {
+      logger.info({
+        userId: triggeringUser.id,
+        cost: result.cost,
+        balanceAfter: result.balanceAfter,
+        triggerType: triggerReason,
+        transactionId: result.transactionId,
+      }, 'Soma: ichor deducted, activation allowed')
+      return { status: 'allowed', transactionId: result.transactionId }
+    }
+
+    // Bot not configured in Soma - ChapterX adds ⚙️ reaction
+    // (Soma can't handle this since the bot isn't registered)
+    if (result.reason === 'bot_not_configured') {
+      logger.warn({
+        botId: this.botUserId,
+        serverId: guildId,
+        triggerType: triggerReason,
+      }, 'Soma: bot not configured, activation blocked')
+
+      // Add gear reaction to indicate configuration needed
+      if (triggeringMessageId) {
+        try {
+          await this.connector.addReaction(channelId, triggeringMessageId, '⚙️')
+        } catch (error) {
+          logger.warn({ error }, 'Failed to add bot-not-configured reaction')
+        }
+      }
+
+      return { status: 'blocked' }
+    }
+
+    // Insufficient funds - Soma bot handles 💸 reaction and DM notification
+    // ChapterX just silently blocks activation
+    logger.info({
+      userId: triggeringUser.id,
+      cost: result.cost,
+      currentBalance: result.currentBalance,
+      timeToAfford: result.timeToAfford,
+      triggerType: triggerReason,
+    }, 'Soma: insufficient ichor, activation blocked')
+
+    return { status: 'blocked' }
+  }
+
+  /**
+   * Find the user who triggered the activation
+   */
+  private findTriggeringUser(events: Event[]): { id: string; roles?: string[] } | null {
+    for (const event of events) {
+      if (event.type === 'message') {
+        const message = event.data as any
+        if (message.author && !message.author.bot) {
+          return {
+            id: message.author.id,
+            roles: message.member?.roles?.cache 
+              ? Array.from(message.member.roles.cache.keys())
+              : [],
+          }
+        }
+      }
+    }
+    return null
   }
 
   private async replaceMentions(text: string, messages: any[]): Promise<string> {
@@ -1229,6 +1400,30 @@ export class AgentLoop {
             newMessageCount: contextResult.didRoll ? 0 : prevMessagesSinceRoll + 1,
           },
         })
+      }
+
+      // Track bot messages for Soma reaction rewards
+      // Only track if we have a triggering user and sent messages
+      if (this.somaClient && sentMessageIds.length > 0 && triggeringMessageId) {
+        // Find the triggering user from the discord context
+        const triggeringMessage = discordContext.messages.find(m => m.id === triggeringMessageId)
+        const triggerUserId = triggeringMessage?.author?.id
+        
+        if (triggerUserId && !triggeringMessage?.author?.bot) {
+          for (const messageId of sentMessageIds) {
+            try {
+              await this.somaClient.trackMessage({
+                messageId,
+                channelId,
+                serverId: guildId,
+                botId: this.botUserId || '',
+                triggerUserId,
+              })
+            } catch (trackError) {
+              logger.warn({ trackError, messageId }, 'Failed to track message for Soma')
+            }
+          }
+        }
       }
 
       logger.info({ channelId, tokens: completion.usage, didRoll: contextResult.didRoll }, 'Activation complete')
