@@ -115,8 +115,10 @@ export class LLMMiddleware {
     // Bot's participant name in LLM context is always config.botName
     // (context builder normalizes bot's Discord messages to use this name)
     const botName = request.config.botName
-    const delimiter = request.config.messageDelimiter || ''  // e.g., '</s>' for base models
-    // If using delimiter, don't add newlines between messages - delimiter provides separation
+    const delimiter = request.config.messageDelimiter || ''  // e.g., '</s>' for base models (removes newlines)
+    const turnEndToken = request.config.turnEndToken || ''  // e.g., '<eot>' for Gemini (preserves newlines)
+    // If using delimiter (base model), don't add newlines - delimiter provides separation
+    // If using turnEndToken, keep newlines - token is just appended to content
     const joiner = delimiter ? '' : '\n'
     let lastNonEmptyParticipant: string | null = null
     
@@ -260,8 +262,11 @@ export class LLMMiddleware {
           currentConversation.push({ text: `${msg.participant}:` })
         }
       } else if (formatted.text) {
-        // Regular message - append delimiter if configured (for base model completions)
-        currentConversation.push({ text: `${msg.participant}: ${formatted.text}${delimiter}` })
+        // Regular message - append delimiter/turnEndToken if configured
+        // delimiter: for base models (e.g., '</s>') - removes newlines between messages
+        // turnEndToken: for models like Gemini (e.g., '<eot>') - preserves newlines
+        const suffix = delimiter || turnEndToken
+        currentConversation.push({ text: `${msg.participant}: ${formatted.text}${suffix}` })
         if (!hasToolResult) {
           lastNonEmptyParticipant = msg.participant
         }

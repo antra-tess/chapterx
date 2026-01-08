@@ -1453,13 +1453,18 @@ export class ContextBuilder {
     }
 
     // Priority order for stop sequences:
-    // 1. Message delimiter (if configured - for base models)
+    // 1. Turn end token / message delimiter (if configured - for model-specific turn boundaries)
     // 2. Recent participant names (most likely to appear next)
     // 3. Configured stop sequences
     // 4. System prefixes and boundary markers (less critical)
     // Note: APIs with limits (OpenAI: 4) will truncate, but post-hoc truncation catches all participants
     
-    // Add message delimiter first (highest priority for base models)
+    // Add turn end token first (highest priority - stops at end of turn for Gemini etc)
+    if (config.turn_end_token) {
+      sequences.push(config.turn_end_token)
+    }
+    
+    // Add message delimiter (for base models)
     if (config.message_delimiter) {
       sequences.push(config.message_delimiter)
     }
@@ -1495,7 +1500,8 @@ export class ContextBuilder {
       chatPersonaPrompt: config.chat_persona_prompt,
       chatPersonaPrefill: config.chat_persona_prefill,
       chatBotAsAssistant: config.chat_bot_as_assistant,
-      messageDelimiter: config.message_delimiter,  // For base model completions
+      messageDelimiter: config.message_delimiter,  // For base model completions (removes newlines)
+      turnEndToken: config.turn_end_token,  // For Gemini etc (preserves newlines)
       presence_penalty: config.presence_penalty,
       frequency_penalty: config.frequency_penalty,
       prompt_caching: config.prompt_caching,

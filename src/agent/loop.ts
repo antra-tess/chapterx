@@ -1108,6 +1108,70 @@ export class AgentLoop {
         logger.warn({ stopReason: completion.stopReason }, 'LLM refused to complete request')
       }
 
+      // 7.6. Check for image content blocks (from image generation models)
+      const imageBlocks = completion.content.filter((c: any) => c.type === 'image')
+      if (imageBlocks.length > 0) {
+        logger.info({ imageCount: imageBlocks.length }, 'Completion contains generated images')
+        
+        // Send each image as a Discord attachment
+        const imageSentIds: string[] = []
+        for (const imageBlock of imageBlocks) {
+          try {
+            const imageData = imageBlock.source?.data
+            const mediaType = imageBlock.source?.media_type || 'image/png'
+            
+            if (imageData) {
+              const msgIds = await this.connector.sendImageAttachment(
+                channelId,
+                imageData,
+                mediaType,
+                undefined,  // No caption
+                triggeringMessageId
+              )
+              imageSentIds.push(...msgIds)
+              logger.debug({ messageId: msgIds[0], mediaType }, 'Sent generated image to Discord')
+            }
+          } catch (err) {
+            logger.error({ err }, 'Failed to send generated image to Discord')
+          }
+        }
+        
+        // Record activation if enabled
+        if (activation) {
+          this.activationStore.addCompletion(
+            activation.id,
+            '[Generated image]',
+            imageSentIds,
+            [],
+            []
+          )
+          await this.activationStore.completeActivation(activation.id)
+        }
+        
+        // Update state and trace for image response
+        if (contextResult.cacheMarker) {
+          this.stateManager.updateCacheMarker(this.botId, channelId, contextResult.cacheMarker)
+        }
+        
+        trace?.recordOutcome({
+          success: true,
+          responseText: '[Generated image]',
+          responseLength: 0,
+          sentMessageIds: imageSentIds,
+          messagesSent: imageSentIds.length,
+          maxToolDepth: 1,
+          hitMaxToolDepth: false,
+          stateUpdates: {
+            cacheMarkerUpdated: !!contextResult.cacheMarker,
+            newCacheMarker: contextResult.cacheMarker || undefined,
+            messageCountReset: false,
+            newMessageCount: 1,
+          }
+        })
+        
+        return  // Done - image response handled
+      }
+
       // 8. Collect sent message IDs and handle reactions
       // Inline execution (executeWithInlineTools) already sent messages progressively.
       // For phantoms (all thinking, no visible text), sentMessageIds will be empty -

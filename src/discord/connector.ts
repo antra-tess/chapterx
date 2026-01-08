@@ -1008,6 +1008,68 @@ export class DiscordConnector {
   }
 
   /**
+   * Send a message with an image attachment (base64 encoded)
+   * Used for image generation model outputs
+   */
+  async sendImageAttachment(
+    channelId: string,
+    imageBase64: string,
+    mediaType: string = 'image/png',
+    caption?: string,
+    replyToMessageId?: string
+  ): Promise<string[]> {
+    return retryDiscord(async () => {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+
+      if (!channel || !channel.isTextBased()) {
+        throw new DiscordError(`Channel ${channelId} not found`)
+      }
+
+      // Determine file extension from media type
+      const extMap: Record<string, string> = {
+        'image/png': 'png',
+        'image/jpeg': 'jpg',
+        'image/jpg': 'jpg',
+        'image/gif': 'gif',
+        'image/webp': 'webp',
+      }
+      const ext = extMap[mediaType] || 'png'
+      const filename = `generated_${Date.now()}.${ext}`
+
+      const options: any = {
+        content: caption || '',
+        files: [{
+          name: filename,
+          attachment: Buffer.from(imageBase64, 'base64'),
+        }],
+      }
+
+      if (replyToMessageId) {
+        try {
+          options.reply = { messageReference: replyToMessageId }
+          const sent = await channel.send(options)
+          logger.debug({ channelId, filename, replyTo: replyToMessageId }, 'Sent image attachment')
+          return [sent.id]
+        } catch (error: any) {
+          // If reply fails (message deleted), send without reply
+          if (error.code === 10008 || error.message?.includes('Unknown message')) {
+            logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
+            delete options.reply
+            const sent = await channel.send(options)
+            return [sent.id]
+          } else {
+            throw error
+          }
+        }
+      } else {
+        const sent = await channel.send(options)
+        logger.debug({ channelId, filename }, 'Sent image attachment')
+        return [sent.id]
+      }
+    }, this.options.maxBackoffMs)
+  }
+
+  /**
    * Send a webhook message
    * For tool output, creates/reuses a webhook in the channel
    * Falls back to regular message if webhooks aren't supported (e.g., threads)

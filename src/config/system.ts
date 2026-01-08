@@ -250,7 +250,8 @@ export class ConfigSystem {
 
       // Stop sequences
       stop_sequences: config.stop_sequences || [],
-      message_delimiter: config.message_delimiter,  // Optional: e.g., '</s>' for base models
+      message_delimiter: config.message_delimiter,  // Optional: e.g., '</s>' for base models (removes newlines)
+      turn_end_token: config.turn_end_token,  // Optional: e.g., '<eot>' for Gemini (preserves newlines)
 
       // Chat mode persona
       chat_persona_prompt: config.chat_persona_prompt ?? true,

@@ -9,6 +9,7 @@ import { LLMProvider, ProviderRequest } from '../middleware.js'
 import { LLMCompletion, ContentBlock, LLMError } from '../../types.js'
 import { logger } from '../../utils/logger.js'
 import { getCurrentTrace } from '../../trace/index.js'
+import { processRequestForLogging } from '../../utils/blob-store.js'
 
 export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic'
@@ -219,7 +220,10 @@ export class AnthropicProvider implements LLMProvider {
       const basename = `request-${timestamp}.json`
       const filename = join(dir, basename)
 
-      writeFileSync(filename, JSON.stringify(params, null, 2))
+      // Extract images to blob store before logging
+      const processedParams = processRequestForLogging(params)
+      
+      writeFileSync(filename, JSON.stringify(processedParams, null, 2))
       logger.debug({ filename }, 'Logged request to file')
       return basename
     } catch (error) {

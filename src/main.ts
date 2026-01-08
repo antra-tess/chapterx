@@ -15,6 +15,7 @@ import { LLMMiddleware } from './llm/middleware.js'
 import { AnthropicProvider } from './llm/providers/anthropic.js'
 import { OpenAIProvider } from './llm/providers/openai.js'
 import { OpenAICompletionsProvider } from './llm/providers/openai-completions.js'
+import { OpenAIImageProvider } from './llm/providers/openai-image.js'
 import { OpenRouterProvider } from './llm/providers/openrouter.js'
 import { ToolSystem } from './tools/system.js'
 import { ApiServer } from './api/server.js'
@@ -143,6 +144,18 @@ async function main() {
         // Register with vendor name so middleware can route correctly
         llmMiddleware.registerProvider(provider, vendorName)
         logger.info({ vendorName, baseUrl }, 'Registered OpenRouter provider')
+      }
+      
+      // OpenAI Image provider (for gpt-image-1, gpt-image-1.5, gpt-image-1-mini models)
+      if (config?.openai_image_api_key) {
+        const baseUrl = config.openai_image_base_url || config.openai_base_url || 'https://api.openai.com/v1'
+        const provider = new OpenAIImageProvider({
+          apiKey: config.openai_image_api_key,
+          baseUrl,
+        })
+        // Register with vendor name so middleware can route correctly
+        llmMiddleware.registerProvider(provider, vendorName)
+        logger.info({ vendorName, baseUrl }, 'Registered OpenAI Image provider')
       }
     }
 
