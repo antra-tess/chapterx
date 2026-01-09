@@ -67,3 +67,10 @@ reply_on_random: 500  # Random reply: 1/N chance per message (default 500 = 0.2%
 reply_on_name: false  # Reply when name is mentioned (not yet implemented)
 max_queued_replies: 1  # Max queued replies before dropping
 
+# Soma integration (credit system) - optional
+# When enabled, users must have sufficient ichor (credits) to trigger the bot
+# soma:
+#   enabled: true
+#   url: "http://localhost:3100/api/v1"
+#   # token: "..."  # Optional: uses SOMA_TOKEN env var if not set
+
