@@ -63,19 +63,19 @@ Create `config/bots/your-bot-name.yaml`:
 name: Claude  # Name used in LLM context
 
 mode: prefill
-continuationModel: claude-3-5-sonnet-20241022
+continuation_model: claude-3-5-sonnet-20241022
 temperature: 1.0
-maxTokens: 4096
+max_tokens: 4096
 
-recencyWindowMessages: 400  # Optional: max messages
-recencyWindowCharacters: 100000  # Optional: max characters  
-rollingThreshold: 50
+recency_window_messages: 400  # Optional: max messages
+recency_window_characters: 100000  # Optional: max characters
+rolling_threshold: 50
 
-includeImages: true
-maxImages: 5
+include_images: true
+max_images: 5
 
-toolsEnabled: true
-toolOutputVisible: false
+tools_enabled: true
+tool_output_visible: false
 ```
 
 ### 4. Configure Vendor
@@ -149,35 +149,35 @@ name: BotName  # Name used in LLM context (prefill labels, stop sequences)
 
 # Model
 mode: prefill  # or 'chat'
-continuationModel: claude-3-5-sonnet-20241022
+continuation_model: claude-3-5-sonnet-20241022
 temperature: 1.0
-maxTokens: 4096
-topP: 1.0
+max_tokens: 4096
+top_p: 1.0
 
 # Context
-recencyWindowMessages: 400  # Optional: max messages
-recencyWindowCharacters: 100000  # Optional: max characters
+recency_window_messages: 400  # Optional: max messages
+recency_window_characters: 100000  # Optional: max characters
 # When both specified, whichever limit is reached first is used
-rollingThreshold: 50
+rolling_threshold: 50
 
 # Images
-includeImages: true
-maxImages: 5
+include_images: true
+max_images: 5
 
 # Tools
-toolsEnabled: true
-toolOutputVisible: false
-maxToolDepth: 100
+tools_enabled: true
+tool_output_visible: false
+max_tool_depth: 100
 
 # Retry
-llmRetries: 3
-discordBackoffMax: 32000
+llm_retries: 3
+discord_backoff_max: 32000
 
 # Misc
-systemPrompt: "Optional system prompt"
-replyOnRandom: 0
-replyOnName: false
-maxQueuedReplies: 1
+system_prompt: "Optional system prompt"
+reply_on_random: 0
+reply_on_name: false
+max_queued_replies: 1
 ```
 
 ### Discord Commands
@@ -195,7 +195,7 @@ last: https://discord.com/channels/.../message_id
 .config botname
 ---
 temperature: 0.7
-maxTokens: 2000
+max_tokens: 2000
 ```
 
 **M Commands**:

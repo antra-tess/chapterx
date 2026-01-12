@@ -320,39 +320,40 @@ class ConfigSystem {
 }
 
 interface BotConfig {
-  innerName: string  // Name used in LLM context
+  name: string  // Name used in LLM context
   
   // Model config
   mode: 'prefill' | 'chat'
-  continuationModel: string
+  continuation_model: string
   temperature: number
-  maxTokens: number
-  topP: number
+  max_tokens: number
+  top_p: number
   
   // Context config
-  recencyWindow: number  // Max messages or chars
-  rollingThreshold: number  // Messages before truncation
+  recency_window_messages: number  // Max messages
+  recency_window_characters: number  // Max characters
+  rolling_threshold: number  // Messages before truncation
   
   // Image config
-  includeImages: boolean
-  maxImages: number
+  include_images: boolean
+  max_images: number
   
   // Tool config
-  toolsEnabled: boolean
-  toolOutputVisible: boolean
-  maxToolDepth: number
+  tools_enabled: boolean
+  tool_output_visible: boolean
+  max_tool_depth: number
   
   // Stop sequences
-  stopSequences: string[]
+  stop_sequences: string[]
   
   // Retries
-  llmRetries: number
-  discordBackoffMax: number
+  llm_retries: number
+  discord_backoff_max: number
   
   // Misc
-  replyOnRandom: number
-  replyOnName: boolean
-  maxQueuedReplies: number
+  reply_on_random: number
+  reply_on_name: boolean
+  max_queued_replies: number
 }
 ```
 
@@ -1162,22 +1163,22 @@ See `config_examples.md` for detailed configuration examples.
 name: Claude  # Name used in LLM context
 
 mode: prefill
-continuationModel: claude-3-5-sonnet-20241022
+continuation_model: claude-3-5-sonnet-20241022
 temperature: 1.0
-maxTokens: 4096
+max_tokens: 4096
 
-recencyWindow: 400
-rollingThreshold: 50
+recency_window_messages: 400
+rolling_threshold: 50
 
-includeImages: true
-maxImages: 5
+include_images: true
+max_images: 5
 
-toolsEnabled: true
-toolOutputVisible: false
-maxToolDepth: 100
+tools_enabled: true
+tool_output_visible: false
+max_tool_depth: 100
 
-llmRetries: 3
-discordBackoffMax: 32000
+llm_retries: 3
+discord_backoff_max: 32000
 ```
 
 ### Vendor Config
