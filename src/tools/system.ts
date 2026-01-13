@@ -245,7 +245,10 @@ export class ToolSystem {
               originalCompletionText: entry.call.originalCompletionText || '',
               botMessageIds: botMsgIds,
             },
-            result
+            result: {
+              output: result,
+              images: entry.result.images,  // Restore MCP images from cache
+            }
           })
         }
       } catch (error) {
@@ -595,9 +598,13 @@ export class ToolSystem {
         arguments: call.input,
       })
 
+      // Parse MCP result content - extract text and images separately
+      const { textOutput, images } = this.parseMcpResultContent(result.content)
+
       return {
         callId: call.id,
-        output: result.content,
+        output: textOutput,
+        images: images.length > 0 ? images : undefined,
         timestamp: new Date(),
       }
     } catch (error) {
@@ -644,6 +651,7 @@ export class ToolSystem {
       result: {
         output: result.output,
         error: result.error,
+        images: result.images,  // MCP image content (base64)
       },
       timestamp: result.timestamp.toISOString(),
     }
@@ -773,6 +781,72 @@ export class ToolSystem {
 
   private generateToolCallId(): string {
     return `call_${Date.now()}_${Math.random().toString(36).substring(7)}`
+  }
+
+  /**
+   * Parse MCP result content - extract text and images separately
+   * MCP content can be an array of content blocks:
+   * - { type: 'text', text: string }
+   * - { type: 'image', data: string, mimeType: string }
+   * - { type: 'resource', ... } (embedded resources - treated as text)
+   */
+  private parseMcpResultContent(content: any): {
+    textOutput: string
+    images: Array<{ data: string; mimeType: string }>
+  } {
+    const images: Array<{ data: string; mimeType: string }> = []
+    const textParts: string[] = []
+
+    // Handle null/undefined
+    if (!content) {
+      return { textOutput: '', images: [] }
+    }
+
+    // Handle string content directly
+    if (typeof content === 'string') {
+      return { textOutput: content, images: [] }
+    }
+
+    // Handle array of content blocks (standard MCP format)
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!block || typeof block !== 'object') {
+          textParts.push(String(block))
+          continue
+        }
+
+        if (block.type === 'text' && typeof block.text === 'string') {
+          textParts.push(block.text)
+        } else if (block.type === 'image') {
+          // MCP image content block
+          const data = block.data || block.source?.data
+          const mimeType = block.mimeType || block.source?.media_type || 'image/png'
+          if (data) {
+            images.push({ data, mimeType })
+            logger.debug({ mimeType, dataLength: data.length }, 'Extracted image from MCP tool result')
+          }
+        } else if (block.type === 'resource') {
+          // Embedded resource - extract text if available
+          if (block.resource?.text) {
+            textParts.push(block.resource.text)
+          } else if (block.resource?.blob) {
+            // Binary resource - just note its presence
+            textParts.push(`[Binary resource: ${block.resource.uri || 'unknown'}]`)
+          }
+        } else {
+          // Unknown block type - stringify it
+          textParts.push(JSON.stringify(block))
+        }
+      }
+    } else {
+      // Non-array content - stringify it
+      textParts.push(typeof content === 'string' ? content : JSON.stringify(content))
+    }
+
+    return {
+      textOutput: textParts.join('\n'),
+      images,
+    }
   }
 }
 

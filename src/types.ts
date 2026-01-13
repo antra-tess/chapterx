@@ -179,6 +179,7 @@ export interface BotConfig {
   tools_enabled: boolean
   tool_output_visible: boolean
   max_tool_depth: number
+  max_mcp_images: number  // Max images from MCP tool results to include in context
   mcp_servers?: MCPServerConfig[]
   tool_plugins?: string[]  // Plugin names to enable (e.g., ['config'])
   plugin_config?: Record<string, PluginInstanceConfig>  // Per-plugin configuration
@@ -265,6 +266,11 @@ export interface ToolCallWithResult {
 export interface ToolResult {
   callId: string
   output: any
+  /** Image content blocks returned from MCP tools (base64 encoded) */
+  images?: Array<{
+    data: string      // base64 encoded image data
+    mimeType: string  // e.g., 'image/png', 'image/jpeg'
+  }>
   error?: string
   timestamp: Date
 }

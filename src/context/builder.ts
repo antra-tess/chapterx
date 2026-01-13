@@ -8,6 +8,7 @@ import {
   ContextBuildResult,
   ParticipantMessage,
   ContentBlock,
+  ImageContent,
   DiscordMessage,
   DiscordContext,
   CachedImage,
@@ -147,6 +148,11 @@ export class ContextBuilder {
       // Replace participantMessages with interleaved version
       participantMessages.length = 0
       participantMessages.push(...interleavedMessages)
+      
+      // Limit MCP images (from tool results) - keep the latest ones
+      if (config.max_mcp_images >= 0) {
+        this.limitMcpImages(participantMessages, config.max_mcp_images)
+      }
     } else {
       logger.debug({ 
         discordMessages: messages.length,
@@ -927,6 +933,60 @@ export class ContextBuilder {
   }
 
   /**
+   * Limit MCP images (from tool results) - keeps the LATEST images
+   * MCP tool results have participant names like "System<[tool_name]"
+   */
+  private limitMcpImages(messages: ParticipantMessage[], maxMcpImages: number): void {
+    // Collect MCP image positions (from tool result messages)
+    const mcpImagePositions: Array<{ msgIndex: number; contentIndex: number }> = []
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i]!
+      // MCP tool results have participant like "System<[tool_name]"
+      if (!msg.participant.startsWith('System<[')) continue
+      
+      for (let j = 0; j < msg.content.length; j++) {
+        if (msg.content[j]!.type === 'image') {
+          mcpImagePositions.push({ msgIndex: i, contentIndex: j })
+        }
+      }
+    }
+
+    if (mcpImagePositions.length <= maxMcpImages) {
+      return // Under limit, nothing to do
+    }
+
+    // Remove OLDEST images (keep the latest ones at the end)
+    // Images are in chronological order, so remove from the beginning
+    const toRemove = mcpImagePositions.length - maxMcpImages
+    
+    // Remove in reverse order of contentIndex within each message to preserve indices
+    // Group by msgIndex first
+    const removalsByMsg = new Map<number, number[]>()
+    for (let i = 0; i < toRemove; i++) {
+      const pos = mcpImagePositions[i]!
+      if (!removalsByMsg.has(pos.msgIndex)) {
+        removalsByMsg.set(pos.msgIndex, [])
+      }
+      removalsByMsg.get(pos.msgIndex)!.push(pos.contentIndex)
+    }
+
+    // Remove in reverse contentIndex order within each message
+    for (const [msgIndex, contentIndices] of removalsByMsg) {
+      contentIndices.sort((a, b) => b - a) // Descending order
+      for (const contentIndex of contentIndices) {
+        messages[msgIndex]!.content.splice(contentIndex, 1)
+      }
+    }
+
+    logger.debug({
+      totalMcpImages: mcpImagePositions.length,
+      removed: toRemove,
+      kept: maxMcpImages,
+    }, 'Limited MCP images in context (kept latest)')
+  }
+
+  /**
    * Resample an image to fit within the target base64 size limit.
    * Uses progressive quality reduction and resizing.
    */
@@ -1014,15 +1074,40 @@ export class ContextBuilder {
       })
 
       // Tool result message from SYSTEM (not bot)
-      const resultText = typeof entry.result === 'string' ? entry.result : JSON.stringify(entry.result)
+      // Result can be: string (legacy), { output, images } (new format), or other object
+      const resultContent: ContentBlock[] = []
+      
+      if (typeof entry.result === 'string') {
+        // Legacy string result
+        resultContent.push({ type: 'text', text: entry.result })
+      } else if (entry.result && typeof entry.result === 'object') {
+        // New format with output and optional images
+        const output = entry.result.output
+        const outputText = typeof output === 'string' ? output : JSON.stringify(output)
+        resultContent.push({ type: 'text', text: outputText })
+        
+        // Add MCP images to context
+        if (entry.result.images && Array.isArray(entry.result.images)) {
+          for (const img of entry.result.images) {
+            if (img.data && img.mimeType) {
+              resultContent.push({
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  data: img.data,
+                  media_type: img.mimeType,
+                },
+              } as ImageContent)
+            }
+          }
+        }
+      } else {
+        resultContent.push({ type: 'text', text: String(entry.result) })
+      }
+      
       messages.push({
         participant: `System<[${entry.call.name}]`,
-        content: [
-          {
-            type: 'text',
-            text: resultText,
-          },
-        ],
+        content: resultContent,
         timestamp: entry.call.timestamp,
         messageId: entry.call.messageId,
       })

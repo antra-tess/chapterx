@@ -306,6 +306,9 @@ export interface ToolExecutionInfo {
   /** Was this tool result sent to Discord? */
   sentToDiscord: boolean
   
+  /** Number of images returned by MCP tool (if any) */
+  imageCount?: number
+  
   /** Any error */
   error?: string
 }

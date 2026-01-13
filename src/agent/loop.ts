@@ -1594,11 +1594,22 @@ export class AgentLoop {
         
         // Collect result for injection
         const outputStr = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
+        
+        // Build result text - include note about images if present
+        let resultText = ''
         if (result.error) {
-          resultsTexts.push(`Error executing ${call.name}: ${result.error}`)
+          resultText = `Error executing ${call.name}: ${result.error}`
         } else {
-          resultsTexts.push(outputStr)
+          resultText = outputStr
+          // If images were returned, append a note so the model knows
+          if (result.images && result.images.length > 0) {
+            const imageNote = result.images.map((img, i) => 
+              `[Image ${i + 1}: ${img.mimeType}]`
+            ).join('\n')
+            resultText += '\n\n' + imageNote
+          }
         }
+        resultsTexts.push(resultText)
         
         // Store for later persistence (with final accumulatedOutput)
         pendingToolPersistence.push({ call, result })
@@ -1614,6 +1625,7 @@ export class AgentLoop {
           durationMs: toolDurationMs,
           sentToDiscord: config.tool_output_visible,
           error: result.error ? String(result.error) : undefined,
+          imageCount: result.images?.length,
         })
         
         // Send tool output to Discord if visible
@@ -1628,6 +1640,25 @@ export class AgentLoop {
           
           const toolMessage = `.${config.name}>[${call.name}]: ${inputStr}\n.${config.name}<[${call.name}]: ${trimmedOutput}`
           await this.connector.sendWebhook(channelId, toolMessage, config.name)
+          
+          // Send MCP images as dotted attachments if present
+          if (result.images && result.images.length > 0) {
+            for (let i = 0; i < result.images.length; i++) {
+              const img = result.images[i]!
+              try {
+                await this.connector.sendImageAttachment(
+                  channelId,
+                  img.data,
+                  img.mimeType,
+                  `.${config.name}<[${call.name}] image ${i + 1}/${result.images.length}`,
+                  undefined  // No reply
+                )
+                logger.debug({ toolName: call.name, imageIndex: i }, 'Sent MCP tool image to Discord')
+              } catch (err) {
+                logger.warn({ err, toolName: call.name, imageIndex: i }, 'Failed to send MCP tool image to Discord')
+              }
+            }
+          }
         }
       }
       

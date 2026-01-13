@@ -244,6 +244,7 @@ export class ConfigSystem {
       tools_enabled: config.tools_enabled ?? true,
       tool_output_visible: config.tool_output_visible ?? false,
       max_tool_depth: config.max_tool_depth || 100,
+      max_mcp_images: config.max_mcp_images ?? 3,  // Default: keep up to 3 latest MCP images
       mcp_servers: config.mcp_servers,
       tool_plugins: config.tool_plugins || [],
       plugin_config: config.plugin_config,
