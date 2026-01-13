@@ -58,6 +58,24 @@ export interface PluginTool {
 }
 
 /**
+ * An image visible to the bot in its current context
+ */
+export interface VisibleImage {
+  /** Index from most recent (1 = most recent) */
+  index: number
+  /** Source of the image */
+  source: 'discord' | 'mcp_tool'
+  /** For discord: message author. For mcp_tool: tool name */
+  sourceDetail: string
+  /** Base64 encoded image data */
+  data: string
+  /** MIME type (e.g., 'image/png', 'image/jpeg') */
+  mimeType: string
+  /** Optional description/context about the image */
+  description?: string
+}
+
+/**
  * Basic plugin context for tool execution
  */
 export interface PluginContext {
@@ -68,6 +86,9 @@ export interface PluginContext {
   config: any  // Current bot config
   sendMessage: (content: string) => Promise<string[]>  // Send a message, returns message IDs
   pinMessage: (messageId: string) => Promise<void>  // Pin a message
+  uploadFile?: (buffer: Buffer, filename: string, contentType: string, caption?: string) => Promise<string[]>  // Upload a file
+  /** Images visible to the bot (from Discord context + MCP tool results), newest first */
+  visibleImages?: VisibleImage[]
 }
 
 /**

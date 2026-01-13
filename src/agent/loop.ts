@@ -24,6 +24,7 @@ import {
 } from '../trace/index.js'
 import { ActivationStore, Activation, TriggerType, MessageContext } from '../activation/index.js'
 import { PluginContextFactory, ContextInjection } from '../tools/plugins/index.js'
+import { setResourceAccessor } from '../tools/plugins/mcp-resources.js'
 
 /**
  * A segment of content: invisible prefix followed by visible text.
@@ -865,6 +866,13 @@ export class AgentLoop {
         logger.info({ serverCount: config.mcp_servers.length }, 'Initializing MCP servers from config')
         await this.toolSystem.initializeServers(config.mcp_servers)
         this.mcpInitialized = true
+        
+        // Set up MCP resource accessor for the mcp-resources plugin
+        setResourceAccessor({
+          getMcpResources: () => this.toolSystem.getMcpResources(),
+          readMcpResource: (uri) => this.toolSystem.readMcpResource(uri),
+        })
+        
         endProfile('mcpInit')
       }
       
@@ -873,6 +881,17 @@ export class AgentLoop {
       if (config.tool_plugins && config.tool_plugins.length > 0) {
         this.toolSystem.loadPlugins(config.tool_plugins)
       }
+      
+      // Build initial visible images from Discord context (newest first)
+      // These will be augmented with MCP tool result images during execution
+      const initialVisibleImages = discordContext.images.map((img, i) => ({
+        index: i + 1,
+        source: 'discord' as const,
+        sourceDetail: 'channel',
+        data: img.data.toString('base64'),
+        mimeType: img.mediaType,
+        description: img.url ? `cached from ${img.url.split('/').pop()?.slice(0, 20)}` : undefined,
+      }))
       
       // Set plugin context for this activation
       this.toolSystem.setPluginContext({
@@ -887,6 +906,10 @@ export class AgentLoop {
         pinMessage: async (messageId: string) => {
           await this.connector.pinMessage(channelId, messageId)
         },
+        uploadFile: async (buffer: Buffer, filename: string, contentType: string, caption?: string) => {
+          return await this.connector.sendFileAttachment(channelId, buffer, filename, contentType, caption)
+        },
+        visibleImages: initialVisibleImages,
       })
       endProfile('pluginSetup')
 
@@ -924,6 +947,47 @@ export class AgentLoop {
       )
       const toolCacheForContext = filteredToolCache
       endProfile('toolCacheReload')
+      
+      // 4b2. Extract cached MCP images and add to visible images
+      // These are images from previous tool executions that were persisted
+      const cachedMcpImages: Array<{ toolName: string; images: Array<{ data: string; mimeType: string }> }> = []
+      for (const entry of filteredToolCache) {
+        if (entry.result?.images && Array.isArray(entry.result.images) && entry.result.images.length > 0) {
+          cachedMcpImages.push({
+            toolName: entry.call.name,
+            images: entry.result.images,
+          })
+        }
+      }
+      
+      if (cachedMcpImages.length > 0) {
+        // Build visible images: cached MCP images first (newest), then discord images
+        const mcpVisibleImages = cachedMcpImages.flatMap(({ toolName, images }) =>
+          images.map((img, i) => ({
+            index: 0, // Will be re-indexed below
+            source: 'mcp_tool' as const,
+            sourceDetail: toolName,
+            data: img.data,
+            mimeType: img.mimeType,
+            description: `cached result ${i + 1} from ${toolName}`,
+          }))
+        )
+        
+        // Get existing discord images from context
+        const existingContext = this.toolSystem.getPluginContext()
+        const discordImages = (existingContext?.visibleImages || [])
+          .filter(img => img.source === 'discord')
+        
+        // Combine and re-index (MCP first as they're tool results, then discord)
+        const allVisibleImages = [...mcpVisibleImages, ...discordImages]
+          .map((img, i) => ({ ...img, index: i + 1 }))
+        
+        this.toolSystem.setPluginContext({ visibleImages: allVisibleImages })
+        logger.debug({ 
+          cachedMcpImageCount: mcpVisibleImages.length,
+          discordImageCount: discordImages.length 
+        }, 'Updated visible images with cached MCP results')
+      }
       
       // 4c. Filter out Discord messages that are in tool cache's botMessageIds
       // ONLY when preserve_thinking_context is DISABLED
@@ -992,6 +1056,9 @@ export class AgentLoop {
           pinMessage: async (messageId: string) => {
             await this.connector.pinMessage(channelId, messageId)
           },
+          uploadFile: async (buffer: Buffer, filename: string, contentType: string, caption?: string) => {
+            return await this.connector.sendFileAttachment(channelId, buffer, filename, contentType, caption)
+          },
         }
         
         // Get injections from all plugins that support it
@@ -1052,7 +1119,13 @@ export class AgentLoop {
 
       // Add tools if enabled
       if (config.tools_enabled) {
-        contextResult.request.tools = this.toolSystem.getAvailableTools()
+        const availableTools = this.toolSystem.getAvailableTools()
+        contextResult.request.tools = availableTools
+        logger.info({ 
+          toolCount: availableTools.length,
+          toolNames: availableTools.map(t => t.name),
+          serverNames: [...new Set(availableTools.map(t => t.serverName))]
+        }, 'Tools being sent to LLM')
       }
       endProfile('contextBuild')
 
@@ -1347,6 +1420,10 @@ export class AgentLoop {
     const maxToolDepth = config.max_tool_depth
     const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
     
+    // Track MCP tool result images for injection into continuation requests
+    // These accumulate across tool iterations so the model can see all images
+    let pendingToolImages: Array<{ toolName: string; images: Array<{ data: string; mimeType: string }> }> = []
+    
     // Check if thinking was actually prefilled (not in continuation mode)
     const thinkingWasPrefilled = this.wasThinkingPrefilled(llmRequest, config)
     
@@ -1366,10 +1443,12 @@ export class AgentLoop {
     
     while (toolDepth < maxToolDepth) {
       // Build continuation request with accumulated output as prefill
+      // Include any MCP tool result images so the model can see them
       const continuationRequest = this.buildInlineContinuationRequest(
         baseRequest, 
         accumulatedOutput,
-        config
+        config,
+        pendingToolImages.length > 0 ? pendingToolImages : undefined
       )
       
       // Get completion
@@ -1601,8 +1680,40 @@ export class AgentLoop {
           resultText = `Error executing ${call.name}: ${result.error}`
         } else {
           resultText = outputStr
-          // If images were returned, append a note so the model knows
+          // If images were returned, collect them for injection into next LLM call
+          // and append a text note so the model knows images are available
           if (result.images && result.images.length > 0) {
+            // Collect images for LLM context injection
+            pendingToolImages.push({
+              toolName: call.name,
+              images: result.images,
+            })
+            
+            // Update plugin context with new visible images
+            // MCP images come first (newest), then discord images
+            const mcpVisibleImages = pendingToolImages.flatMap(({ toolName, images }) =>
+              images.map((img, i) => ({
+                index: 0, // Will be re-indexed below
+                source: 'mcp_tool' as const,
+                sourceDetail: toolName,
+                data: img.data,
+                mimeType: img.mimeType,
+                description: `result ${i + 1} from ${toolName}`,
+              }))
+            ).reverse() // Most recent tool results first
+            
+            // Get existing discord images from context
+            const existingContext = this.toolSystem.getPluginContext()
+            const discordImages = (existingContext?.visibleImages || [])
+              .filter(img => img.source === 'discord')
+            
+            // Combine and re-index
+            const allVisibleImages = [...mcpVisibleImages, ...discordImages]
+              .map((img, i) => ({ ...img, index: i + 1 }))
+            
+            this.toolSystem.setPluginContext({ visibleImages: allVisibleImages })
+            
+            // Append text note about the images
             const imageNote = result.images.map((img, i) => 
               `[Image ${i + 1}: ${img.mimeType}]`
             ).join('\n')
@@ -1614,14 +1725,17 @@ export class AgentLoop {
         // Store for later persistence (with final accumulatedOutput)
         pendingToolPersistence.push({ call, result })
         
-        // Record to trace
+        // Record to trace - use error message as output when there's an error
+        const traceOutput = result.error 
+          ? `[ERROR] ${result.error}` 
+          : (outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr)
         traceToolExecution({
           toolCallId: call.id,
           toolName: call.name,
           input: call.input,
-          output: outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr,
-          outputTruncated: outputStr.length > 1000,
-          fullOutputLength: outputStr.length,
+          output: traceOutput,
+          outputTruncated: !result.error && outputStr.length > 1000,
+          fullOutputLength: result.error ? traceOutput.length : outputStr.length,
           durationMs: toolDurationMs,
           sentToDiscord: config.tool_output_visible,
           error: result.error ? String(result.error) : undefined,
@@ -1878,13 +1992,16 @@ export class AgentLoop {
   
   /**
    * Build a continuation request with accumulated output as prefill
+   * Also handles MCP tool result images - these need to be added as user turns
+   * since Anthropic only allows images in user messages.
    */
   private buildInlineContinuationRequest(
     baseRequest: any,
     accumulatedOutput: string,
-    config: BotConfig
+    config: BotConfig,
+    toolResultImages?: Array<{ toolName: string; images: Array<{ data: string; mimeType: string }> }>
   ): any {
-    if (!accumulatedOutput) {
+    if (!accumulatedOutput && (!toolResultImages || toolResultImages.length === 0)) {
       return baseRequest
     }
     
@@ -1898,21 +2015,65 @@ export class AgentLoop {
     }
     
     // Find the last message (should be empty bot message for completion)
-    const lastMsg = request.messages[request.messages.length - 1]
+    const lastMsgIndex = request.messages.length - 1
+    const lastMsg = request.messages[lastMsgIndex]
     // Bot's participant name in LLM context is always config.name
     
     if (lastMsg && lastMsg.participant === config.name) {
       // Replace the last empty message with accumulated output
-      request.messages[request.messages.length - 1] = {
+      request.messages[lastMsgIndex] = {
         ...lastMsg,
         content: [{ type: 'text', text: trimmedOutput }],
       }
-    } else {
+    } else if (trimmedOutput) {
       // Add accumulated output as new message
       request.messages.push({
         participant: config.name,
         content: [{ type: 'text', text: trimmedOutput }],
       })
+    }
+    
+    // Add tool result images as user turn messages
+    // These need to be inserted BEFORE the bot's continuation so the model can see them
+    // The middleware will handle converting these to proper user turns with images
+    if (toolResultImages && toolResultImages.length > 0) {
+      const imageMessages: any[] = []
+      
+      for (const { toolName, images } of toolResultImages) {
+        if (images.length === 0) continue
+        
+        // Create image content blocks
+        const imageContent: any[] = [
+          { type: 'text', text: `[Tool result images from ${toolName}]` }
+        ]
+        
+        for (const img of images) {
+          imageContent.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              data: img.data,
+              media_type: img.mimeType,
+            },
+          })
+        }
+        
+        imageMessages.push({
+          participant: `System<[${toolName}]`,
+          content: imageContent,
+        })
+      }
+      
+      if (imageMessages.length > 0) {
+        // Insert image messages BEFORE the last (bot continuation) message
+        const insertIndex = request.messages.length - 1
+        request.messages.splice(insertIndex, 0, ...imageMessages)
+        
+        logger.debug({ 
+          imageMessageCount: imageMessages.length,
+          totalImages: toolResultImages.reduce((sum, t) => sum + t.images.length, 0)
+        }, 'Inserted MCP tool result images into continuation request')
+      }
     }
     
     return request

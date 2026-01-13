@@ -276,9 +276,13 @@ export class LLMMiddleware {
     // Flush any remaining conversation, insert tools near end
     // Note: By this point, we've already passed the cache marker (if any),
     // so all remaining content is uncached
+    
+    // Add tools if we have them - regardless of conversation length
+    const hasTools = request.tools && request.tools.length > 0
+    
     if (currentConversation.length > 0) {
-      if (request.tools && request.tools.length > 0 && currentConversation.length > 10) {
-        // Insert tools ~10 messages from the end
+      if (hasTools && currentConversation.length > 10) {
+        // Long remaining buffer - insert tools ~10 messages from the end
         const splitPoint = currentConversation.length - 10
         const beforeTools = currentConversation.slice(0, splitPoint)
         const afterTools = currentConversation.slice(splitPoint)
@@ -304,13 +308,29 @@ export class LLMMiddleware {
             content: afterTools.map(e => e.text).join(joiner),
           })
         }
+      } else if (hasTools) {
+        // Short remaining buffer but we have tools - add tools first, then conversation
+        messages.push({
+          role: 'user',
+          content: this.formatToolsForPrefill(request.tools),
+        })
+        messages.push({
+          role: 'assistant',
+          content: currentConversation.map(e => e.text).join(joiner),
+        })
       } else {
-        // Short conversation - just add everything (no cache_control - we're past marker or none exists)
+        // No tools - just add conversation
         messages.push({
           role: 'assistant',
           content: currentConversation.map(e => e.text).join(joiner),
         })
       }
+    } else if (hasTools) {
+      // No remaining conversation but we have tools - still need to add them
+      messages.push({
+        role: 'user',
+        content: this.formatToolsForPrefill(request.tools),
+      })
     }
 
     // Anthropic API rejects assistant prefill ending with trailing whitespace

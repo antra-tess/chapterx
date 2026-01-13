@@ -1070,6 +1070,61 @@ export class DiscordConnector {
   }
 
   /**
+   * Send a message with an arbitrary file attachment (from Buffer)
+   * Used for uploading files downloaded from URLs (videos, etc.)
+   */
+  async sendFileAttachment(
+    channelId: string,
+    fileBuffer: Buffer,
+    filename: string,
+    _contentType: string,  // Reserved for future use (e.g., content-type headers)
+    caption?: string,
+    replyToMessageId?: string
+  ): Promise<string[]> {
+    return retryDiscord(async () => {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+
+      if (!channel || !channel.isTextBased()) {
+        logger.warn({ channelId }, 'Cannot send file: channel not text-based')
+        return []
+      }
+
+      const resolvedCaption = caption ? await this.resolveMentions(caption, channelId) : ''
+
+      const options: any = {
+        content: resolvedCaption,
+        files: [{
+          name: filename,
+          attachment: fileBuffer,
+        }],
+      }
+
+      if (replyToMessageId) {
+        try {
+          options.reply = { messageReference: replyToMessageId }
+          const sent = await channel.send(options)
+          logger.debug({ channelId, filename, size: fileBuffer.length, replyTo: replyToMessageId }, 'Sent file attachment')
+          return [sent.id]
+        } catch (error: any) {
+          // If reply fails (message deleted), send without reply
+          if (error.code === 10008 || error.message?.includes('Unknown message')) {
+            logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
+            delete options.reply
+            const sent = await channel.send(options)
+            return [sent.id]
+          } else {
+            throw error
+          }
+        }
+      } else {
+        const sent = await channel.send(options)
+        logger.debug({ channelId, filename, size: fileBuffer.length }, 'Sent file attachment')
+        return [sent.id]
+      }
+    }, this.options.maxBackoffMs)
+  }
+
+  /**
    * Send a webhook message
    * For tool output, creates/reuses a webhook in the channel
    * Falls back to regular message if webhooks aren't supported (e.g., threads)
