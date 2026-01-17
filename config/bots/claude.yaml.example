@@ -74,3 +74,9 @@ max_queued_replies: 1  # Max queued replies before dropping
 #   url: "http://localhost:3100/api/v1"
 #   # token: "..."  # Optional: uses SOMA_TOKEN env var if not set
 
+# Membrane integration (experimental)
+# When enabled, uses the membrane library for LLM calls instead of built-in providers.
+# This provides unified handling of prefill transforms, caching, and provider routing.
+# Requires the membrane npm package to be installed.
+# use_membrane: true
+

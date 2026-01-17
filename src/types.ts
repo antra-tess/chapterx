@@ -216,6 +216,15 @@ export interface BotConfig {
   
   // Soma integration (credit system)
   soma?: SomaConfig
+  
+  // Membrane integration (experimental)
+  // When true, uses membrane library for LLM calls instead of built-in providers
+  use_membrane?: boolean
+  
+  // Membrane shadow mode (for validation)
+  // When true, runs both old middleware and membrane in parallel, logs differences
+  // If use_membrane is also true, returns membrane result; otherwise returns old result
+  membrane_shadow_mode?: boolean
 }
 
 /**

@@ -20,6 +20,7 @@ import { OpenRouterProvider } from './llm/providers/openrouter.js'
 import { ToolSystem } from './tools/system.js'
 import { ApiServer } from './api/server.js'
 import { logger } from './utils/logger.js'
+import { createMembraneFromVendorConfigs } from './llm/membrane/index.js'
 
 async function main() {
   try {
@@ -199,6 +200,17 @@ async function main() {
 
     // Set bot's Discord user ID for mention detection
     agentLoop.setBotUserId(botUserId)
+    
+    // Initialize membrane (optional - used when bot config has use_membrane: true)
+    try {
+      const membrane = createMembraneFromVendorConfigs(vendorConfigs, botName)
+      agentLoop.setMembrane(membrane)
+      logger.info({ botName }, 'Membrane initialized for agent loop')
+    } catch (error) {
+      // Membrane is optional - if it fails to initialize (e.g., no API keys),
+      // the bot can still function with built-in providers
+      logger.warn({ error }, 'Membrane initialization skipped (not required)')
+    }
 
     // Start API server if configured
     let apiServer: ApiServer | null = null

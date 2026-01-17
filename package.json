@@ -23,6 +23,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "membrane": "github:antra-tess/membrane#main",
     "@anthropic-ai/sdk": "^0.32.1",
     "sharp": "^0.33.5",
     "@aws-sdk/client-bedrock-runtime": "^3.709.0",
