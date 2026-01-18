@@ -353,12 +353,12 @@ async function main() {
         oldTokens: {
           input: oldResult.usage?.inputTokens || 0,
           output: oldResult.usage?.outputTokens || 0,
-          cacheRead: oldResult.usage?.cacheReadInputTokens || 0,
+          cacheRead: oldResult.usage?.cacheReadTokens || 0,
         },
         membraneTokens: {
           input: newResult.usage?.inputTokens || 0,
           output: newResult.usage?.outputTokens || 0,
-          cacheRead: newResult.usage?.cacheReadInputTokens || 0,
+          cacheRead: newResult.usage?.cacheReadTokens || 0,
         },
         oldDuration,
         membraneDuration: newDuration,
@@ -374,7 +374,7 @@ async function main() {
       }
       
       console.log(`  ⏱️  OLD=${oldDuration}ms, NEW=${newDuration}ms`);
-      console.log(`  📊 Cache: OLD=${oldResult.usage?.cacheReadInputTokens || 0}, NEW=${newResult.usage?.cacheReadInputTokens || 0}`);
+      console.log(`  📊 Cache: OLD=${oldResult.usage?.cacheReadTokens || 0}, NEW=${newResult.usage?.cacheReadTokens || 0}`);
       
     } catch (error) {
       console.log(`  ❌ Error: ${error instanceof Error ? error.message : error}`);

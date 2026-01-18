@@ -303,13 +303,13 @@ Remember: Always be helpful, accurate, and respectful.`;
   const oldResult: CachingTestResult = {
     pathway: 'old',
     call1: {
-      cacheCreation: old1.usage?.cacheCreationInputTokens || 0,
-      cacheRead: old1.usage?.cacheReadInputTokens || 0,
+      cacheCreation: old1.usage?.cacheCreationTokens || 0,
+      cacheRead: old1.usage?.cacheReadTokens || 0,
       inputTokens: old1.usage?.inputTokens || 0,
     },
     call2: {
-      cacheCreation: old2.usage?.cacheCreationInputTokens || 0,
-      cacheRead: old2.usage?.cacheReadInputTokens || 0,
+      cacheCreation: old2.usage?.cacheCreationTokens || 0,
+      cacheRead: old2.usage?.cacheReadTokens || 0,
       inputTokens: old2.usage?.inputTokens || 0,
     },
     cachingWorking: false,
@@ -331,13 +331,13 @@ Remember: Always be helpful, accurate, and respectful.`;
   const membraneResult: CachingTestResult = {
     pathway: 'membrane',
     call1: {
-      cacheCreation: new1.usage?.cacheCreationInputTokens || 0,
-      cacheRead: new1.usage?.cacheReadInputTokens || 0,
+      cacheCreation: new1.usage?.cacheCreationTokens || 0,
+      cacheRead: new1.usage?.cacheReadTokens || 0,
       inputTokens: new1.usage?.inputTokens || 0,
     },
     call2: {
-      cacheCreation: new2.usage?.cacheCreationInputTokens || 0,
-      cacheRead: new2.usage?.cacheReadInputTokens || 0,
+      cacheCreation: new2.usage?.cacheCreationTokens || 0,
+      cacheRead: new2.usage?.cacheReadTokens || 0,
       inputTokens: new2.usage?.inputTokens || 0,
     },
     cachingWorking: false,
@@ -460,10 +460,10 @@ function compareResults(
   }
   
   // Extract cache info
-  const oldCacheRead = oldResult.usage?.cacheReadInputTokens || 0;
-  const oldCacheCreation = oldResult.usage?.cacheCreationInputTokens || 0;
-  const newCacheRead = newResult.usage?.cacheReadInputTokens || 0;
-  const newCacheCreation = newResult.usage?.cacheCreationInputTokens || 0;
+  const oldCacheRead = oldResult.usage?.cacheReadTokens || 0;
+  const oldCacheCreation = oldResult.usage?.cacheCreationTokens || 0;
+  const newCacheRead = newResult.usage?.cacheReadTokens || 0;
+  const newCacheCreation = newResult.usage?.cacheCreationTokens || 0;
   
   return {
     testName,
