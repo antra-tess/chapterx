@@ -86,14 +86,17 @@ export class OpenAIImageProvider implements LLMProvider {
       // Log response
       const responseRef = this.logResponseToFile(data)
 
+      // Type the response data
+      const responseData = data as { data?: Array<{ b64_json?: string }> }
+
       logger.debug({
         model: request.model,
-        hasImage: !!data.data?.[0]?.b64_json,
+        hasImage: !!responseData.data?.[0]?.b64_json,
         durationMs,
       }, 'Received OpenAI Image response')
 
       // Extract image from response
-      const imageData = data.data?.[0]?.b64_json
+      const imageData = responseData.data?.[0]?.b64_json
       if (!imageData) {
         throw new LLMError('No image data in OpenAI Image API response')
       }
@@ -134,8 +137,11 @@ export class OpenAIImageProvider implements LLMProvider {
             cacheCreationTokens: 0,
             cacheReadTokens: 0,
           },
-          requestRef,
-          responseRef
+          request.model,
+          {
+            requestBodyRef: requestRef,
+            responseBodyRef: responseRef,
+          }
         )
       }
 

@@ -13,7 +13,7 @@
  * - list_visible_images: List all images the bot can see
  */
 
-import { ToolPlugin, PluginTool, PluginContext, VisibleImage } from './types.js'
+import { ToolPlugin, PluginTool, PluginContext } from './types.js'
 import { createLogger } from '../../utils/logger.js'
 
 const logger = createLogger({ plugin: 'share-image' })
