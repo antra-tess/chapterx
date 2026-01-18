@@ -3,12 +3,18 @@
  * 
  * Factory function for creating a Membrane instance configured for chapterx.
  * Handles:
- * - Provider adapter creation (Anthropic, OpenRouter)
+ * - Provider adapter creation (Anthropic, OpenRouter, OpenAI, OpenAI-Compatible)
  * - Model routing (based on model name patterns)
  * - Tracing hook integration
  */
 
-import { Membrane, AnthropicAdapter, OpenRouterAdapter } from 'membrane';
+import { 
+  Membrane, 
+  AnthropicAdapter, 
+  OpenRouterAdapter,
+  OpenAIAdapter,
+  OpenAICompatibleAdapter,
+} from 'membrane';
 import type { ProviderAdapter, MembraneConfig } from 'membrane';
 import { createTracingHooks } from './hooks.js';
 import { logger } from '../../utils/logger.js';
@@ -29,6 +35,30 @@ export interface MembraneFactoryConfig {
    * If not provided, falls back to OPENROUTER_API_KEY env var
    */
   openrouterApiKey?: string;
+  
+  /**
+   * OpenAI API key
+   * If not provided, falls back to OPENAI_API_KEY env var
+   */
+  openaiApiKey?: string;
+  
+  /**
+   * OpenAI base URL (optional, for Azure or custom endpoints)
+   */
+  openaiBaseUrl?: string;
+  
+  /**
+   * OpenAI-compatible provider configuration
+   * For local inference servers or third-party OpenAI-compatible APIs
+   */
+  openaiCompatible?: {
+    /** API key for the compatible endpoint */
+    apiKey: string;
+    /** Base URL (required, e.g., "http://localhost:8080/v1") */
+    baseUrl: string;
+    /** Provider name for logging (default: 'openai-compatible') */
+    name?: string;
+  };
   
   /**
    * Bot/assistant name for prefill mode
@@ -58,10 +88,17 @@ export interface MembraneFactoryConfig {
  * 
  * Routing rules:
  * - claude-* → Anthropic (direct API is preferred for Claude)
+ * - gpt-*, o1-*, o3-*, o4-* → OpenAI (direct API)
  * - provider/model → OpenRouter (any model with provider prefix, e.g. anthropic/claude-3-opus)
- * - Everything else → Anthropic as fallback
+ * - local:* → OpenAI-compatible (local inference)
+ * - Everything else → Anthropic as fallback, then OpenRouter, then OpenAI
  */
 function getAdapterForModel(modelName: string, adapters: Map<string, ProviderAdapter>): ProviderAdapter | undefined {
+  // Local models go to OpenAI-compatible
+  if (modelName.startsWith('local:') || modelName.startsWith('openai-compatible:')) {
+    return adapters.get('openai-compatible');
+  }
+  
   // OpenRouter models have a provider prefix (e.g., "anthropic/claude-3-opus")
   if (modelName.includes('/')) {
     return adapters.get('openrouter');
@@ -72,8 +109,21 @@ function getAdapterForModel(modelName: string, adapters: Map<string, ProviderAda
     return adapters.get('anthropic');
   }
   
-  // Fallback to Anthropic if available, otherwise OpenRouter
-  return adapters.get('anthropic') ?? adapters.get('openrouter');
+  // OpenAI models go to OpenAI
+  if (modelName.startsWith('gpt-') || 
+      modelName.startsWith('o1-') || 
+      modelName.startsWith('o3-') || 
+      modelName.startsWith('o4-') ||
+      modelName.startsWith('gpt5') ||
+      modelName.startsWith('chatgpt-')) {
+    return adapters.get('openai');
+  }
+  
+  // Fallback chain: Anthropic → OpenRouter → OpenAI → OpenAI-compatible
+  return adapters.get('anthropic') 
+    ?? adapters.get('openrouter') 
+    ?? adapters.get('openai')
+    ?? adapters.get('openai-compatible');
 }
 
 // ============================================================================
@@ -206,11 +256,46 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
     logger.debug('Membrane: No OpenRouter API key provided, adapter not created');
   }
   
+  // Create OpenAI adapter if API key is available
+  const openaiKey = config.openaiApiKey ?? process.env.OPENAI_API_KEY;
+  if (openaiKey) {
+    try {
+      const openaiAdapter = new OpenAIAdapter({
+        apiKey: openaiKey,
+        baseURL: config.openaiBaseUrl,
+      });
+      adapters.set('openai', openaiAdapter);
+      logger.info('Membrane: OpenAI adapter initialized');
+    } catch (error) {
+      logger.error({ error }, 'Failed to create OpenAI adapter');
+    }
+  } else {
+    logger.debug('Membrane: No OpenAI API key provided, adapter not created');
+  }
+  
+  // Create OpenAI-compatible adapter if configured
+  if (config.openaiCompatible) {
+    try {
+      const compatibleAdapter = new OpenAICompatibleAdapter({
+        apiKey: config.openaiCompatible.apiKey,
+        baseURL: config.openaiCompatible.baseUrl,
+        providerName: config.openaiCompatible.name,
+      });
+      adapters.set('openai-compatible', compatibleAdapter);
+      logger.info({ 
+        name: config.openaiCompatible.name ?? 'openai-compatible',
+        baseUrl: config.openaiCompatible.baseUrl,
+      }, 'Membrane: OpenAI-compatible adapter initialized');
+    } catch (error) {
+      logger.error({ error }, 'Failed to create OpenAI-compatible adapter');
+    }
+  }
+  
   // Require at least one adapter
   if (adapters.size === 0) {
     throw new Error(
       'Membrane: No provider adapters could be created. ' +
-      'Please provide at least one of: anthropicApiKey, openrouterApiKey'
+      'Please provide at least one of: anthropicApiKey, openrouterApiKey, openaiApiKey, openaiCompatible'
     );
   }
   
@@ -248,6 +333,12 @@ export { RoutingAdapter };
  * Create membrane from vendor configs (for integration with main.ts)
  * 
  * This extracts API keys from the vendor config structure used by chapterx.
+ * 
+ * Supported vendor config keys:
+ * - anthropic_api_key → Anthropic adapter
+ * - openrouter_api_key → OpenRouter adapter  
+ * - openai_api_key + openai_base_url → OpenAI adapter
+ * - openai_compatible_api_key + openai_compatible_base_url → OpenAI-compatible adapter
  */
 export function createMembraneFromVendorConfigs(
   vendorConfigs: Record<string, { config: Record<string, string> }>,
@@ -256,8 +347,11 @@ export function createMembraneFromVendorConfigs(
   // Extract API keys from vendor configs
   let anthropicApiKey: string | undefined;
   let openrouterApiKey: string | undefined;
+  let openaiApiKey: string | undefined;
+  let openaiBaseUrl: string | undefined;
+  let openaiCompatible: MembraneFactoryConfig['openaiCompatible'] | undefined;
   
-  for (const [, vendorConfig] of Object.entries(vendorConfigs)) {
+  for (const [vendorName, vendorConfig] of Object.entries(vendorConfigs)) {
     const config = vendorConfig.config;
     
     if (config?.anthropic_api_key && !anthropicApiKey) {
@@ -267,11 +361,28 @@ export function createMembraneFromVendorConfigs(
     if (config?.openrouter_api_key && !openrouterApiKey) {
       openrouterApiKey = config.openrouter_api_key;
     }
+    
+    if (config?.openai_api_key && !openaiApiKey) {
+      openaiApiKey = config.openai_api_key;
+      openaiBaseUrl = config.openai_base_url;
+    }
+    
+    // OpenAI-compatible (for local inference or third-party compatible APIs)
+    if (config?.openai_compatible_base_url && !openaiCompatible) {
+      openaiCompatible = {
+        apiKey: config.openai_compatible_api_key ?? 'not-needed',
+        baseUrl: config.openai_compatible_base_url,
+        name: vendorName,
+      };
+    }
   }
   
   return createMembrane({
     anthropicApiKey,
     openrouterApiKey,
+    openaiApiKey,
+    openaiBaseUrl,
+    openaiCompatible,
     assistantName,
   });
 }
