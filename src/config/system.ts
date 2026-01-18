@@ -282,6 +282,11 @@ export class ConfigSystem {
         url: config.soma.url || '',
         token: config.soma.token,  // Optional: uses SOMA_TOKEN env var if not set
       } : undefined,
+      
+      // Membrane integration
+      use_membrane: config.use_membrane ?? false,
+      membrane_shadow_mode: config.membrane_shadow_mode ?? false,
+      participant_stop_sequences: config.participant_stop_sequences ?? false,  // Default: false (allows frags/quotes)
     }
   }
 

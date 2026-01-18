@@ -57,6 +57,7 @@ interface NormalizedRequest {
   tools?: MembraneToolDefinition[];
   toolMode?: ToolMode;
   stopSequences?: string[] | { sequences: string[] };
+  maxParticipantsForStop?: number;
 }
 
 type MembraneStopReason =
@@ -406,6 +407,10 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     // Explicitly set tool mode based on model to work around RoutingAdapter issue
     // Membrane's auto-detection checks adapter.name which is 'routing' for RoutingAdapter
     toolMode: resolveToolModeForModel(request.config.model),
+    // Control participant-based stop sequences:
+    // - If participant_stop_sequences is false (default), disable them (set to 0)
+    // - If participant_stop_sequences is true, use membrane default (don't set)
+    maxParticipantsForStop: request.config.participant_stop_sequences ? undefined : 0,
   };
   
   // Handle stop sequences

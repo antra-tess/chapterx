@@ -37,6 +37,13 @@ export interface MembraneFactoryConfig {
   assistantName: string;
   
   /**
+   * Maximum participants for auto-generated stop sequences in prefill mode.
+   * Set to 0 to disable participant-based stop sequences (allows frags/quotes).
+   * Default: 10
+   */
+  maxParticipantsForStop?: number;
+  
+  /**
    * Enable debug logging
    */
   debug?: boolean;
@@ -215,6 +222,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
   // membrane's updated types. The implementation is correct, just type mismatch.
   const membraneConfig: MembraneConfig = {
     assistantParticipant: config.assistantName,
+    maxParticipantsForStop: config.maxParticipantsForStop,
     hooks: createTracingHooks() as any,
     debug: config.debug,
   };
