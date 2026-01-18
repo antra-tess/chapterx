@@ -52,7 +52,7 @@ export {
   RoutingAdapter,
 } from './factory.js';
 
-export type { MembraneFactoryConfig } from './factory.js';
+export type { MembraneFactoryConfig, OpenAICompatibleConfig } from './factory.js';
 
 // Hooks - tracing integration
 export {
