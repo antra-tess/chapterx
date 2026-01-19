@@ -91,16 +91,34 @@ export class ContextBuilder {
       totalAfterFilter: messages.length,
     }, 'Messages after dot filtering')
 
+    // 2.5. Pre-determine cache marker for image selection
+    // IMPORTANT: We need to know where the cache boundary WILL BE before selecting images.
+    // If we wait until after image selection, images might be selected from the prefix
+    // and break caching. This calculates the marker that determineCacheMarker will use.
+    let imageSelectionMarker = lastCacheMarker
+    if (!imageSelectionMarker && messages.length > 0) {
+      // On first activation (no existing marker), calculate where new marker will be
+      // This mirrors the logic in determineCacheMarker for new markers
+      const buffer = 20
+      const markerIndex = Math.max(0, messages.length - buffer)
+      imageSelectionMarker = messages[markerIndex]?.id ?? null
+      logger.debug({
+        calculatedMarker: imageSelectionMarker,
+        markerIndex,
+        messagesLength: messages.length,
+      }, 'Pre-calculated cache marker for image selection (first activation)')
+    }
+
     // 3. Convert to participant messages (limits applied later on final context)
     // Pass botDiscordUsername so we can normalize bot's own messages to use config.name
-    // Pass lastCacheMarker to anchor image selection for cache stability
+    // Pass imageSelectionMarker to anchor image selection for cache stability
     let participantMessages = await this.formatMessages(
       messages,
       discordContext.images,
       discordContext.documents,
       config,
       botDiscordUsername,
-      lastCacheMarker
+      imageSelectionMarker  // Use pre-calculated marker, not just lastCacheMarker
     )
     
     // Debug: log last few participant message IDs
