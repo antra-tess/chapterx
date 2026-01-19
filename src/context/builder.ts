@@ -93,12 +93,14 @@ export class ContextBuilder {
 
     // 3. Convert to participant messages (limits applied later on final context)
     // Pass botDiscordUsername so we can normalize bot's own messages to use config.name
+    // Pass lastCacheMarker to anchor image selection for cache stability
     let participantMessages = await this.formatMessages(
       messages,
       discordContext.images,
       discordContext.documents,
       config,
-      botDiscordUsername
+      botDiscordUsername,
+      lastCacheMarker
     )
     
     // Debug: log last few participant message IDs
@@ -689,7 +691,8 @@ export class ContextBuilder {
     images: CachedImage[],
     documents: CachedDocument[],
     config: BotConfig,
-    botDiscordUsername?: string
+    botDiscordUsername?: string,
+    cacheMarkerMessageId?: string | null
   ): Promise<ParticipantMessage[]> {
     const participantMessages: ParticipantMessage[] = []
 
@@ -711,26 +714,66 @@ export class ContextBuilder {
     const max_images = config.max_images || 5
     const maxTotalBase64Bytes = 15 * 1024 * 1024  // 8 MB total base64 data for images
     
+    // Find cache marker position for image selection anchoring
+    // Two-tier image selection for cache stability:
+    // 1. Images BEFORE/AT cache marker: select deterministically (stable for caching)
+    // 2. Images AFTER cache marker: always include (they're in ephemeral portion anyway)
+    const cacheMarkerIndex = cacheMarkerMessageId 
+      ? messages.findIndex(m => m.id === cacheMarkerMessageId)
+      : -1
+    
     logger.debug({
       messageCount: messages.length,
       cachedImages: images.length,
       imageUrls: images.map(i => i.url),
       include_images: config.include_images,
       max_images,
-      maxTotalImageMB: maxTotalBase64Bytes / 1024 / 1024
-    }, 'Starting formatMessages with images')
+      maxTotalImageMB: maxTotalBase64Bytes / 1024 / 1024,
+      cacheMarkerMessageId,
+      cacheMarkerIndex,
+    }, 'Starting formatMessages with two-tier image selection')
 
-    // PRE-SELECT which messages get images by iterating BACKWARDS (newest first)
-    // This ensures recent images take priority over old ones
+    // PRE-SELECT which messages get images using two-tier approach:
+    // Tier 1 (cached prefix): Select up to max_images from at/before cache marker - STABLE
+    // Tier 2 (ephemeral suffix): Include ALL images after cache marker - these don't affect cache
     const messagesWithImages = new Set<string>()
     if (config.include_images) {
-      let imageCount = 0
+      let prefixImageCount = 0
       let totalBase64Size = 0
       
-      for (let i = messages.length - 1; i >= 0 && imageCount < max_images; i--) {
+      // TIER 2: First, always include images AFTER the cache marker (ephemeral portion)
+      // These don't affect caching since they're after the cache boundary
+      if (cacheMarkerIndex >= 0) {
+        for (let i = cacheMarkerIndex + 1; i < messages.length; i++) {
+          const msg = messages[i]!
+          for (const attachment of msg.attachments) {
+            if (attachment.contentType?.startsWith('image/')) {
+              const cached = imageMap.get(attachment.url)
+              if (cached) {
+                const base64Size = cached.data.toString('base64').length
+                if (totalBase64Size + base64Size <= maxTotalBase64Bytes) {
+                  messagesWithImages.add(msg.id)
+                  totalBase64Size += base64Size
+                  logger.debug({ 
+                    messageId: msg.id,
+                    imageSizeMB: (base64Size / 1024 / 1024).toFixed(2),
+                    totalMB: (totalBase64Size / 1024 / 1024).toFixed(2),
+                    tier: 'ephemeral',
+                  }, 'Including image from ephemeral suffix (after cache marker)')
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      // TIER 1: Select up to max_images from cached prefix (at or before marker)
+      // Iterate backwards from marker to get "newest within prefix" images
+      const prefixEndIndex = cacheMarkerIndex >= 0 ? cacheMarkerIndex + 1 : messages.length
+      for (let i = prefixEndIndex - 1; i >= 0 && prefixImageCount < max_images; i--) {
         const msg = messages[i]!
         for (const attachment of msg.attachments) {
-          if (imageCount >= max_images) break
+          if (prefixImageCount >= max_images) break
           
           if (attachment.contentType?.startsWith('image/')) {
             const cached = imageMap.get(attachment.url)
@@ -739,23 +782,27 @@ export class ContextBuilder {
               
               if (totalBase64Size + base64Size <= maxTotalBase64Bytes) {
                 messagesWithImages.add(msg.id)
-                imageCount++
+                prefixImageCount++
                 totalBase64Size += base64Size
                 logger.debug({ 
                   messageId: msg.id,
                   imageSizeMB: (base64Size / 1024 / 1024).toFixed(2),
                   totalMB: (totalBase64Size / 1024 / 1024).toFixed(2),
-                  imageCount
-                }, 'Pre-selected image (newest-first)')
+                  prefixImageCount,
+                  tier: 'cached-prefix',
+                }, 'Pre-selected image from cached prefix (stable)')
               }
             }
           }
         }
       }
+      
       logger.debug({ 
-        selectedCount: messagesWithImages.size, 
-        totalMB: (totalBase64Size / 1024 / 1024).toFixed(2) 
-      }, 'Pre-selected images for inclusion')
+        selectedCount: messagesWithImages.size,
+        prefixImages: prefixImageCount,
+        totalMB: (totalBase64Size / 1024 / 1024).toFixed(2),
+        hasCacheMarker: cacheMarkerIndex >= 0,
+      }, 'Two-tier image selection complete')
     }
 
     // Now process messages in order, only including pre-selected images
