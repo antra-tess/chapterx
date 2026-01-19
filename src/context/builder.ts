@@ -715,51 +715,66 @@ export class ContextBuilder {
     const maxTotalBase64Bytes = 15 * 1024 * 1024  // 8 MB total base64 data for images
     
     // Find cache marker position for image selection anchoring
-    // Two-tier image selection for cache stability:
-    // 1. Images BEFORE/AT cache marker: select deterministically (stable for caching)
-    // 2. Images AFTER cache marker: always include (they're in ephemeral portion anyway)
+    // Two-tier image selection for cache stability + instant visibility:
+    // 1. Images BEFORE/AT cache marker (Tier 1): select up to max_images - STABLE for caching
+    // 2. Images AFTER cache marker (Tier 2): select up to max_ephemeral_images - rolling window
+    //
+    // On context roll, the cache marker moves forward. Images that were in Tier 2 (ephemeral)
+    // become candidates for Tier 1 (cached). Since we select newest-first within Tier 1,
+    // these recently-visible images become the new cached prefix - ensuring continuity.
     const cacheMarkerIndex = cacheMarkerMessageId 
       ? messages.findIndex(m => m.id === cacheMarkerMessageId)
       : -1
+    
+    // Separate limits for cached vs ephemeral images
+    const maxPrefixImages = max_images  // Stable images in cached prefix
+    const maxEphemeralImages = config.max_ephemeral_images ?? max_images  // Images in rolling window
     
     logger.debug({
       messageCount: messages.length,
       cachedImages: images.length,
       imageUrls: images.map(i => i.url),
       include_images: config.include_images,
-      max_images,
+      maxPrefixImages,
+      maxEphemeralImages,
       maxTotalImageMB: maxTotalBase64Bytes / 1024 / 1024,
       cacheMarkerMessageId,
       cacheMarkerIndex,
     }, 'Starting formatMessages with two-tier image selection')
 
     // PRE-SELECT which messages get images using two-tier approach:
-    // Tier 1 (cached prefix): Select up to max_images from at/before cache marker - STABLE
-    // Tier 2 (ephemeral suffix): Include ALL images after cache marker - these don't affect cache
+    // Tier 1 (cached prefix): Select up to maxPrefixImages from at/before cache marker - STABLE
+    // Tier 2 (ephemeral suffix): Select up to maxEphemeralImages after cache marker - ROLLING
     const messagesWithImages = new Set<string>()
     if (config.include_images) {
       let prefixImageCount = 0
+      let ephemeralImageCount = 0
       let totalBase64Size = 0
       
-      // TIER 2: First, always include images AFTER the cache marker (ephemeral portion)
+      // TIER 2: Select up to maxEphemeralImages AFTER the cache marker (rolling window)
       // These don't affect caching since they're after the cache boundary
+      // Select newest first (iterate backwards from end) so oldest ephemeral images drop first
       if (cacheMarkerIndex >= 0) {
-        for (let i = cacheMarkerIndex + 1; i < messages.length; i++) {
+        for (let i = messages.length - 1; i > cacheMarkerIndex && ephemeralImageCount < maxEphemeralImages; i--) {
           const msg = messages[i]!
           for (const attachment of msg.attachments) {
+            if (ephemeralImageCount >= maxEphemeralImages) break
+            
             if (attachment.contentType?.startsWith('image/')) {
               const cached = imageMap.get(attachment.url)
               if (cached) {
                 const base64Size = cached.data.toString('base64').length
                 if (totalBase64Size + base64Size <= maxTotalBase64Bytes) {
                   messagesWithImages.add(msg.id)
+                  ephemeralImageCount++
                   totalBase64Size += base64Size
                   logger.debug({ 
                     messageId: msg.id,
                     imageSizeMB: (base64Size / 1024 / 1024).toFixed(2),
                     totalMB: (totalBase64Size / 1024 / 1024).toFixed(2),
+                    ephemeralImageCount,
                     tier: 'ephemeral',
-                  }, 'Including image from ephemeral suffix (after cache marker)')
+                  }, 'Selected image from ephemeral rolling window (after cache marker)')
                 }
               }
             }
@@ -767,13 +782,14 @@ export class ContextBuilder {
         }
       }
       
-      // TIER 1: Select up to max_images from cached prefix (at or before marker)
+      // TIER 1: Select up to maxPrefixImages from cached prefix (at or before marker)
       // Iterate backwards from marker to get "newest within prefix" images
+      // This ensures continuity on roll: images that were just in Tier 2 become Tier 1
       const prefixEndIndex = cacheMarkerIndex >= 0 ? cacheMarkerIndex + 1 : messages.length
-      for (let i = prefixEndIndex - 1; i >= 0 && prefixImageCount < max_images; i--) {
+      for (let i = prefixEndIndex - 1; i >= 0 && prefixImageCount < maxPrefixImages; i--) {
         const msg = messages[i]!
         for (const attachment of msg.attachments) {
-          if (prefixImageCount >= max_images) break
+          if (prefixImageCount >= maxPrefixImages) break
           
           if (attachment.contentType?.startsWith('image/')) {
             const cached = imageMap.get(attachment.url)
@@ -800,6 +816,7 @@ export class ContextBuilder {
       logger.debug({ 
         selectedCount: messagesWithImages.size,
         prefixImages: prefixImageCount,
+        ephemeralImages: ephemeralImageCount,
         totalMB: (totalBase64Size / 1024 / 1024).toFixed(2),
         hasCacheMarker: cacheMarkerIndex >= 0,
       }, 'Two-tier image selection complete')

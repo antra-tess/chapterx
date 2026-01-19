@@ -169,7 +169,8 @@ export interface BotConfig {
   
   // Image config
   include_images: boolean
-  max_images: number
+  max_images: number  // Max images in cached prefix (stable across calls)
+  max_ephemeral_images?: number  // Max images in rolling window after cache marker (default: max_images)
   
   // Text attachment config
   include_text_attachments: boolean
