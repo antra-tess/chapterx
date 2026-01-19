@@ -1006,17 +1006,28 @@ export class AgentLoop {
           logger.debug({ channelId, oldestMessageId: fetchedOldestId }, 'Initialized cached starting point for cache stability')
         } else if (cacheOldestId && fetchedOldestId) {
           const cacheIdx = discordContext.messages.findIndex(m => m.id === cacheOldestId)
+          const historyWasUsed = !!discordContext.inheritanceInfo?.historyOriginChannelId
           
-          if (cacheIdx > 0) {
-            // Cache marker is NEWER than fetched oldest - .history brought in older context
-            // Update cache marker to include the older context instead of trimming it away
+          if (cacheIdx > 0 && historyWasUsed) {
+            // .history command brought in older context - expand cache marker to include it
+            // This is expected behavior: .history intentionally loads historical messages
             logger.debug({
               oldCacheMarker: cacheOldestId,
               newCacheMarker: fetchedOldestId,
               olderMessagesIncluded: cacheIdx,
+              historyOrigin: discordContext.inheritanceInfo?.historyOriginChannelId,
             }, 'Expanding cache marker to include .history context')
             this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
-            // No trimming needed - keep all fetched messages
+          } else if (cacheIdx > 0) {
+            // No .history used, but fetch overshot - trim older messages for cache stability
+            // This is overshoot from connector's batch fetching, not intentional context expansion
+            logger.debug({
+              cacheMarker: cacheOldestId,
+              fetchedOldest: fetchedOldestId,
+              trimmingCount: cacheIdx,
+              totalBefore: discordContext.messages.length,
+            }, 'Trimming fetch overshoot to maintain cache stability')
+            discordContext.messages = discordContext.messages.slice(cacheIdx)
           } else if (cacheIdx === -1) {
             // Cached oldest message no longer in fetch - cache stability is broken
             logger.warn({
