@@ -225,6 +225,41 @@ export class LLMMiddleware {
             content: [contentBlock],
           })
           currentConversation = []
+        } else if (promptCachingEnabled) {
+          // BUG FIX: If currentConversation is empty (e.g., images caused early flush),
+          // we need to retroactively add cache_control to the most recent assistant message.
+          // Otherwise the large text block flushed for images won't be cached!
+          for (let j = messages.length - 1; j >= 0; j--) {
+            const prevMsg = messages[j]
+            if (prevMsg.role === 'assistant') {
+              const content = prevMsg.content
+              if (typeof content === 'string') {
+                // Convert string content to array with cache_control
+                prevMsg.content = [{
+                  type: 'text',
+                  text: content,
+                  cache_control: { type: 'ephemeral' }
+                }]
+                logger.debug({ 
+                  messageIndex: j, 
+                  contentLength: content.length 
+                }, 'Added cache_control to previous assistant message (image-induced flush recovery)')
+              } else if (Array.isArray(content)) {
+                // Find the last text block and add cache_control
+                for (let k = content.length - 1; k >= 0; k--) {
+                  if (content[k].type === 'text' && !content[k].cache_control) {
+                    content[k].cache_control = { type: 'ephemeral' }
+                    logger.debug({ 
+                      messageIndex: j, 
+                      blockIndex: k 
+                    }, 'Added cache_control to previous assistant content block (image-induced flush recovery)')
+                    break
+                  }
+                }
+              }
+              break
+            }
+          }
         }
         passedCacheMarker = true
         logger.debug({ messageIndex: i, totalMessages: request.messages.length }, 'Cache marker found - switching to uncached mode')
