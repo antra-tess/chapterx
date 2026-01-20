@@ -80,7 +80,7 @@ export class OpenAIImageProvider implements LLMProvider {
         throw new LLMError(`OpenAI Image API error: ${response.status} ${errorText}`)
       }
 
-      const data = await response.json()
+      const data = await response.json() as { data?: { b64_json?: string }[] }
       const durationMs = Date.now() - startTime
 
       // Log response
@@ -134,8 +134,8 @@ export class OpenAIImageProvider implements LLMProvider {
             cacheCreationTokens: 0,
             cacheReadTokens: 0,
           },
-          requestRef,
-          responseRef
+          request.model,
+          { requestBodyRef: requestRef, responseBodyRef: responseRef }
         )
       }
 
