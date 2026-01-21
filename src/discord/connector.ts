@@ -34,6 +34,7 @@ export interface FetchContextParams {
   firstMessageId?: string  // Optional: Stop when this message is encountered
   authorized_roles?: string[]
   pinnedConfigs?: string[]  // Optional: Pre-fetched pinned configs (skips fetchPinned call)
+  maxImages?: number  // Optional: Cap image fetching to avoid RAM bloat (default: unlimited)
 }
 
 export class DiscordConnector {
@@ -163,7 +164,7 @@ export class DiscordConnector {
    * Fetch context from Discord (messages, configs, images)
    */
   async fetchContext(params: FetchContextParams): Promise<DiscordContext> {
-    const { channelId, depth, targetMessageId, firstMessageId, authorized_roles } = params
+    const { channelId, depth, targetMessageId, firstMessageId, authorized_roles, maxImages } = params
 
     // Profiling helper
     const timings: Record<string, number> = {}
@@ -350,13 +351,20 @@ export class DiscordConnector {
       const images: CachedImage[] = []
       const documents: CachedDocument[] = []
       let newImagesDownloaded = 0
-      logger.debug({ messageCount: messages.length }, 'Checking messages for attachments')
+      logger.debug({ messageCount: messages.length, maxImages }, 'Checking messages for attachments')
+      
+      // Track whether we've hit the image cap to avoid unnecessary processing
+      const imageLimitReached = () => maxImages !== undefined && images.length >= maxImages
       
       for (const msg of messages) {
         const attachments = Array.from(msg.attachments.values())
         
         for (const attachment of attachments) {
           if (attachment.contentType?.startsWith('image/')) {
+            // Skip image fetching if we've already hit the cap
+            if (imageLimitReached()) {
+              continue
+            }
             const wasInCache = this.imageCache.has(attachment.url) || this.urlToFilename.has(attachment.url)
             const cached = await this.cacheImage(attachment.url, attachment.contentType)
             if (cached) {

@@ -19,6 +19,7 @@ export interface MessageExportRequest {
     messages?: number
     characters?: number
   }
+  maxImages?: number  // Max images to fetch (default: 50)
 }
 
 export interface MessageExportResponse {
@@ -259,7 +260,8 @@ export class ApiServer {
     // - Recursively handles .history commands during traversal
     // - Downloads and caches images
     // - Converts to DiscordMessage format
-    logger.debug({ channelId, targetMessageId: lastMessageId, firstMessageId, depth: maxFetch }, 'Calling fetchContext')
+    const maxImages = request.maxImages ?? 50  // Default to 50 to prevent RAM bloat
+    logger.debug({ channelId, targetMessageId: lastMessageId, firstMessageId, depth: maxFetch, maxImages }, 'Calling fetchContext')
     let context
     try {
       context = await this.connector.fetchContext({
@@ -267,6 +269,7 @@ export class ApiServer {
         depth: maxFetch,
         targetMessageId: lastMessageId,  // Start from the 'last' URL
         firstMessageId,  // Stop at 'first' URL if provided
+        maxImages,
       })
     } catch (error: any) {
       if (error.code === 50001) {
