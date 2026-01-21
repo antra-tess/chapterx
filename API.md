@@ -72,7 +72,8 @@ Export Discord conversation history with full metadata. Automatically processes 
   "recencyWindow": {
     "messages": 400,
     "characters": 100000
-  }
+  },
+  "ignoreHistory": false
 }
 ```
 
@@ -83,6 +84,9 @@ Export Discord conversation history with full metadata. Automatically processes 
   - `messages`: Maximum number of messages (default: 50)
   - `characters`: Maximum total characters
   - If omitted entirely, defaults to 50 messages
+- `ignoreHistory` (optional): Skip `.history` command processing (default: **true**)
+  - When `true` (default), fetches raw messages without following `.history` redirects or clearing context
+  - Set to `false` to process `.history` commands during traversal (matches bot inference behavior)
 
 **Response:**
 ```json

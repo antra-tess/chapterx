@@ -20,6 +20,7 @@ export interface MessageExportRequest {
     characters?: number
   }
   maxImages?: number  // Max images to fetch (default: 50)
+  ignoreHistory?: boolean  // Skip .history command processing (raw fetch)
 }
 
 export interface MessageExportResponse {
@@ -257,11 +258,12 @@ export class ApiServer {
     const maxFetch = recencyWindow.messages ? recencyWindow.messages + 100 : 1000
 
     // Use connector.fetchContext() which automatically:
-    // - Recursively handles .history commands during traversal
+    // - Recursively handles .history commands during traversal (unless ignoreHistory)
     // - Downloads and caches images
     // - Converts to DiscordMessage format
     const maxImages = request.maxImages ?? 50  // Default to 50 to prevent RAM bloat
-    logger.debug({ channelId, targetMessageId: lastMessageId, firstMessageId, depth: maxFetch, maxImages }, 'Calling fetchContext')
+    const ignoreHistory = request.ignoreHistory ?? true  // Default to true for raw export (skip .history processing)
+    logger.debug({ channelId, targetMessageId: lastMessageId, firstMessageId, depth: maxFetch, maxImages, ignoreHistory }, 'Calling fetchContext')
     let context
     try {
       context = await this.connector.fetchContext({
@@ -270,6 +272,7 @@ export class ApiServer {
         targetMessageId: lastMessageId,  // Start from the 'last' URL
         firstMessageId,  // Stop at 'first' URL if provided
         maxImages,
+        ignoreHistory,  // Skip .history processing for raw export
       })
     } catch (error: any) {
       if (error.code === 50001) {

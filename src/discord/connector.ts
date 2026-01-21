@@ -35,6 +35,7 @@ export interface FetchContextParams {
   authorized_roles?: string[]
   pinnedConfigs?: string[]  // Optional: Pre-fetched pinned configs (skips fetchPinned call)
   maxImages?: number  // Optional: Cap image fetching to avoid RAM bloat (default: unlimited)
+  ignoreHistory?: boolean  // Optional: Skip .history command processing (raw fetch)
 }
 
 export class DiscordConnector {
@@ -164,7 +165,7 @@ export class DiscordConnector {
    * Fetch context from Discord (messages, configs, images)
    */
   async fetchContext(params: FetchContextParams): Promise<DiscordContext> {
-    const { channelId, depth, targetMessageId, firstMessageId, authorized_roles, maxImages } = params
+    const { channelId, depth, targetMessageId, firstMessageId, authorized_roles, maxImages, ignoreHistory } = params
 
     // Profiling helper
     const timings: Record<string, number> = {}
@@ -199,7 +200,8 @@ export class DiscordConnector {
         channelId: channel.id, 
         targetMessageId, 
         depth,
-        isThread: channel.isThread()
+        isThread: channel.isThread(),
+        ignoreHistory
       }, 'ABOUT TO CALL fetchMessagesRecursive')
       
       startProfile('messagesFetch')
@@ -208,7 +210,8 @@ export class DiscordConnector {
         targetMessageId,
         undefined,  // Let .history commands define their own boundaries
         depth,
-        authorized_roles
+        authorized_roles,
+        ignoreHistory
       )
       endProfile('messagesFetch')
       
@@ -238,7 +241,8 @@ export class DiscordConnector {
             threadStartMessageId,  // End at the message that started the thread
             undefined,
             Math.max(0, depth - messages.length),  // Remaining message budget
-            authorized_roles
+            authorized_roles,
+            ignoreHistory
           )
           
           logger.debug({
@@ -471,7 +475,8 @@ export class DiscordConnector {
     startFromId: string | undefined,
     stopAtId: string | undefined,
     maxMessages: number,
-    authorizedRoles?: string[]
+    authorizedRoles?: string[],
+    ignoreHistory?: boolean
   ): Promise<Message[]> {
     const results: Message[] = []
     let currentBefore = startFromId
@@ -554,8 +559,8 @@ export class DiscordConnector {
           return results
         }
 
-        // Check for .history command
-        if (message.content?.startsWith('.history')) {
+        // Check for .history command (skip if ignoreHistory is set)
+        if (message.content?.startsWith('.history') && !ignoreHistory) {
           logger.debug({ messageId: message.id, content: message.content }, 'Found .history command during traversal')
 
           // Check authorization
@@ -640,7 +645,8 @@ export class DiscordConnector {
                   histLastId,      // End point (include this message and older)
                   histFirstId,     // Start point (stop when reached, or undefined)
                   maxMessages - results.length - batchResults.length,  // Account for current batch
-                  authorizedRoles
+                  authorizedRoles,
+                  ignoreHistory    // Pass through (though this path only runs when ignoreHistory is false)
                 )
 
                 logger.debug({ 
