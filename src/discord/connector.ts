@@ -356,7 +356,10 @@ export class DiscordConnector {
       // Track whether we've hit the image cap to avoid unnecessary processing
       const imageLimitReached = () => maxImages !== undefined && images.length >= maxImages
       
-      for (const msg of messages) {
+      // Iterate newest-first so image cap keeps recent images (context builder wants recent ones)
+      // Messages array is chronological (oldest-first), so we reverse for image fetching
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i]!
         const attachments = Array.from(msg.attachments.values())
         
         for (const attachment of attachments) {
