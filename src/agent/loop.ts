@@ -855,7 +855,7 @@ export class AgentLoop {
         // Load config if not already loaded
         if (!config) {
           try {
-            const configFetch = await this.connector.fetchContext({ channelId, depth: 10 })
+            const configFetch = await this.connector.fetchContext({ channelId, depth: 10, maxImages: 0 })
             const inheritedPinnedConfigs = await this.collectPinnedConfigsWithInheritance(
               channelId,
               configFetch.pinnedConfigs
@@ -902,7 +902,7 @@ export class AgentLoop {
       if (!config) {
         // Load config once for this batch
         try {
-          const configFetch = await this.connector.fetchContext({ channelId, depth: 10 })
+          const configFetch = await this.connector.fetchContext({ channelId, depth: 10, maxImages: 0 })
           const inheritedPinnedConfigs = await this.collectPinnedConfigsWithInheritance(
             channelId,
             configFetch.pinnedConfigs
@@ -998,6 +998,9 @@ export class AgentLoop {
       
       startProfile('fetchContext')
       // 3. Fetch context with calculated depth (messages + images), reusing pinned configs
+      // Cap image fetching to prevent RAM bloat in image-heavy channels
+      // Use 2x max_images to give context builder selection room while preventing worst-case loading
+      const maxImagesFetch = Math.max((preConfig.max_images || 5) * 2, 10)
       const discordContext = await this.connector.fetchContext({
         channelId,
         depth: fetchDepth,
@@ -1007,6 +1010,7 @@ export class AgentLoop {
         firstMessageId: promptCachingEnabled ? (state.cacheOldestMessageId || undefined) : undefined,
         authorized_roles: [],  // Will apply after loading config
         pinnedConfigs,  // Reuse pre-fetched pinned configs (avoids second API call)
+        maxImages: maxImagesFetch,  // Prevents loading all images from image-heavy channels
       })
       endProfile('fetchContext')
 
