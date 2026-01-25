@@ -30,7 +30,7 @@
     "@types/express": "^5.0.5",
     "discord.js": "^14.16.3",
     "express": "^5.1.0",
-    "membrane": "github:antra-tess/membrane#main",
+    "membrane": "github:antra-tess/membrane#tool-and-cache",
     "openai": "^4.73.1",
     "pino": "^9.5.0",
     "pino-pretty": "^13.0.0",
