@@ -11,6 +11,7 @@ import { getCurrentTrace } from '../../trace/index.js';
 import {
   toMembraneRequest,
   fromMembraneResponse,
+  fromMembraneContentBlock,
   type NormalizedRequest,
   type NormalizedResponse,
 } from './adapter.js';
@@ -194,25 +195,121 @@ export class MembraneProvider implements LLMProvider {
    * Stream a request with tool execution support
    * 
    * This provides access to membrane's streaming capabilities with
-   * tool execution callbacks.
+   * tool execution callbacks. Returns extended result with tool info.
    */
   async stream(
     request: LLMRequest,
     options: StreamOptions = {}
-  ): Promise<LLMCompletion> {
-    const normalizedRequest = toMembraneRequest(request);
+  ): Promise<StreamingCompletionResult> {
+    const trace = getCurrentTrace();
+    const callId = trace?.startLLMCall(trace.getLLMCallCount());
     
-    // Cast to any because our local types may not exactly match membrane's updated types
-    const response = await this.membrane.stream(normalizedRequest as any, {
-      onChunk: options.onChunk,
-      onToolCalls: options.onToolCalls,
-      onPreToolContent: options.onPreToolContent,
-      onUsage: options.onUsage,
-      maxToolDepth: options.maxToolDepth ?? 10,
-      signal: options.signal,
-    });
-    
-    return fromMembraneResponse(response as any);
+    try {
+      const normalizedRequest = toMembraneRequest(request);
+      
+      // Cast to any because our local types may not exactly match membrane's updated types
+      const response = await this.membrane.stream(normalizedRequest as any, {
+        onChunk: options.onChunk,
+        onToolCalls: options.onToolCalls,
+        onPreToolContent: options.onPreToolContent,
+        onUsage: options.onUsage,
+        maxToolDepth: options.maxToolDepth ?? 10,
+        signal: options.signal,
+      });
+      
+      // Check for aborted response
+      const isAborted = (response as any).aborted === true;
+      
+      if (isAborted) {
+        // Handle aborted response
+        const abortedResponse = response as any;
+        const completion: LLMCompletion = {
+          content: abortedResponse.partialContent?.map(fromMembraneContentBlock) ?? [],
+          stopReason: 'end_turn', // Best available for aborted
+          usage: abortedResponse.partialUsage ?? { inputTokens: 0, outputTokens: 0 },
+          model: request.config.model,
+          raw: undefined,
+        };
+        
+        // Record aborted completion to trace (use end_turn as closest match)
+        if (trace && callId) {
+          trace.completeLLMCall(
+            callId,
+            {
+              messageCount: request.messages.length,
+              systemPromptLength: request.system_prompt?.length ?? 0,
+              hasTools: !!request.tools && request.tools.length > 0,
+              toolCount: request.tools?.length ?? 0,
+              temperature: request.config.temperature,
+              maxTokens: request.config.max_tokens,
+              stopSequences: request.stop_sequences,
+            },
+            {
+              stopReason: 'end_turn',
+              contentBlocks: completion.content.length,
+              textLength: abortedResponse.rawAssistantText?.length ?? 0,
+              toolUseCount: abortedResponse.toolCalls?.length ?? 0,
+            },
+            completion.usage,
+            completion.model,
+          );
+        }
+        
+        return {
+          completion,
+          rawAssistantText: abortedResponse.rawAssistantText ?? '',
+          toolCalls: abortedResponse.toolCalls ?? [],
+          toolResults: abortedResponse.toolResults ?? [],
+          aborted: true,
+          abortReason: abortedResponse.reason ?? 'user',
+        };
+      }
+      
+      // Normal completion
+      const normalResponse = response as NormalizedResponse;
+      const completion = fromMembraneResponse(normalResponse);
+      
+      // Record to trace
+      if (trace && callId) {
+        trace.completeLLMCall(
+          callId,
+          {
+            messageCount: request.messages.length,
+            systemPromptLength: request.system_prompt?.length ?? 0,
+            hasTools: !!request.tools && request.tools.length > 0,
+            toolCount: request.tools?.length ?? 0,
+            temperature: request.config.temperature,
+            maxTokens: request.config.max_tokens,
+            stopSequences: request.stop_sequences,
+          },
+          {
+            stopReason: completion.stopReason,
+            contentBlocks: completion.content.length,
+            textLength: normalResponse.rawAssistantText?.length ?? 0,
+            toolUseCount: normalResponse.toolCalls?.length ?? 0,
+          },
+          completion.usage,
+          completion.model,
+        );
+      }
+      
+      return {
+        completion,
+        rawAssistantText: normalResponse.rawAssistantText ?? '',
+        toolCalls: normalResponse.toolCalls ?? [],
+        toolResults: normalResponse.toolResults ?? [],
+        aborted: false,
+      };
+      
+    } catch (error) {
+      if (trace && callId) {
+        trace.failLLMCall(callId, {
+          message: error instanceof Error ? error.message : String(error),
+          retryCount: 0,
+        });
+      }
+      throw error;
+    }
   }
   
   // ==========================================================================
@@ -281,6 +378,60 @@ export class MembraneProvider implements LLMProvider {
 // Types
 // ============================================================================
 
+/**
+ * Tool call info from membrane streaming
+ */
+export interface MembraneToolCallInfo {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+
+/**
+ * Tool result info from membrane streaming
+ */
+export interface MembraneToolResultInfo {
+  toolUseId: string;
+  content: string | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; data: string; mediaType: string } }>;
+  isError?: boolean;
+}
+
+/**
+ * Extended completion result from streaming with tool info
+ */
+export interface StreamingCompletionResult {
+  /** Standard completion info */
+  completion: LLMCompletion;
+  
+  /** 
+   * Raw assistant output text including all XML (tool calls, results, thinking).
+   * Use this for verbatim prefill continuation or for extracting context.
+   */
+  rawAssistantText: string;
+  
+  /**
+   * All tool calls executed during this streaming session.
+   * Useful for persistence/logging without re-parsing.
+   */
+  toolCalls: MembraneToolCallInfo[];
+  
+  /**
+   * All tool results from this streaming session.
+   * Useful for persistence/logging.
+   */
+  toolResults: MembraneToolResultInfo[];
+  
+  /**
+   * Whether the stream was aborted (user cancellation, timeout, error)
+   */
+  aborted: boolean;
+  
+  /**
+   * Abort reason if aborted
+   */
+  abortReason?: 'user' | 'timeout' | 'error';
+}
+
 export interface StreamOptions {
   /** Called for each text chunk received */
   onChunk?: (chunk: string) => void;
@@ -288,8 +439,8 @@ export interface StreamOptions {
   /** Called when tool calls are detected */
   onToolCalls?: (
     calls: Array<{ id: string; name: string; input: Record<string, unknown> }>,
-    context: { depth: number; accumulated: string }
-  ) => Promise<Array<{ toolUseId: string; content: string; isError?: boolean }>>;
+    context: { depth: number; accumulated: string; previousResults: MembraneToolResultInfo[] }
+  ) => Promise<Array<{ toolUseId: string; content: string | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; data: string; mediaType: string } }>; isError?: boolean }>>;
   
   /** Called with pre-tool content before executing tools */
   onPreToolContent?: (text: string) => Promise<void>;

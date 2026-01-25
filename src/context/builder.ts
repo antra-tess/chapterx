@@ -20,6 +20,14 @@ import {
 import { Activation, Completion, MessageContext } from '../activation/index.js'
 import { logger } from '../utils/logger.js'
 import sharp from 'sharp'
+import {
+  shouldRoll,
+  calculateCharacters,
+  truncateToCharacterLimit,
+  truncateToMessageLimit,
+  determineCacheMarker,
+  findFallbackCacheMarker,
+} from './rolling.js'
 
 // Anthropic's per-image base64 limit is 5MB
 const MAX_IMAGE_BASE64_BYTES = 5 * 1024 * 1024
@@ -208,8 +216,8 @@ export class ContextBuilder {
     participantMessages.push(...finalMessages)
     }
 
-    // 6. Determine cache marker
-    let cacheMarker = this.determineCacheMarker(messages, lastCacheMarker, didTruncate, config.rolling_threshold)
+    // 6. Determine cache marker using membrane's pattern
+    let cacheMarker = this.determineCacheMarkerFromMessages(messages, lastCacheMarker, didTruncate)
 
     // Apply cache marker to appropriate message
     // IMPORTANT: The marker was selected from raw messages, but some messages may have been
@@ -219,48 +227,20 @@ export class ContextBuilder {
       let msgWithMarker = participantMessages.find((m) => m.messageId === cacheMarker)
       
       if (!msgWithMarker) {
-        // Marker message was merged/filtered - find a valid fallback
-        // IMPORTANT: Prefer non-bot messages as fallback since bot messages can get merged
-        // with adjacent bot messages in future calls, causing instability
-        const buffer = 20
-        const searchStart = Math.max(0, participantMessages.length - 1 - buffer)
-        const searchEnd = Math.max(0, participantMessages.length - 1 - buffer - 20) // Look back 20 more
+        // Marker message was merged/filtered - find a valid fallback using helper
+        const fallbackMarker = findFallbackCacheMarker(participantMessages, config.name)
         
-        // First, try to find a non-bot message (user message) for stability
-        let fallbackMsg: typeof participantMessages[0] | undefined
-        let fallbackIndex = -1
-        
-        // Search backwards from buffer position, prefer user messages
-        for (let i = searchStart; i >= searchEnd && i >= 0; i--) {
-          const msg = participantMessages[i]
-          if (msg?.messageId) {
-            // Check if this is likely a user message (not the bot itself)
-            // Bot messages have participant === config.name, user messages don't
-            const isBotMsg = msg.participant === config.name
-            
-            if (!isBotMsg) {
-              // Found a user message - use it (stable, won't be merged)
-              fallbackMsg = msg
-              fallbackIndex = i
-              break
-            } else if (!fallbackMsg) {
-              // First bot message found - use as backup
-              fallbackMsg = msg
-              fallbackIndex = i
-            }
-          }
-        }
-        
-        if (fallbackMsg?.messageId) {
+        if (fallbackMarker) {
+          const fallbackMsg = participantMessages.find(m => m.messageId === fallbackMarker)
+          
           logger.warn({
             originalMarker: cacheMarker,
-            fallbackMarker: fallbackMsg.messageId,
-            fallbackIndex,
-            fallbackParticipant: fallbackMsg.participant,
+            fallbackMarker,
+            fallbackParticipant: fallbackMsg?.participant,
             totalMessages: participantMessages.length,
           }, 'Cache marker was orphaned (merged/filtered) - using fallback')
           
-          cacheMarker = fallbackMsg.messageId
+          cacheMarker = fallbackMarker
           msgWithMarker = fallbackMsg
         } else {
           logger.warn({
@@ -581,51 +561,42 @@ export class ContextBuilder {
   /**
    * Apply limits on assembled context (after images and tools added)
    * This is the ONLY place limits are enforced - accounts for total payload size
+   * 
+   * Uses membrane's rolling logic pattern via ./rolling.ts helpers.
    */
   private applyLimits(
     messages: ParticipantMessage[],
     messagesSinceRoll: number,
     config: BotConfig
   ): { messages: ParticipantMessage[], didTruncate: boolean, messagesRemoved?: number } {
-    const shouldRoll = messagesSinceRoll >= config.rolling_threshold
+    // Calculate total characters (excludes images - they have separate limits)
+    const totalChars = calculateCharacters(messages)
     
-    // Calculate total size of FINAL context (text + tool results only)
-    // Images are NOT counted here - they have separate limits (max_images, 3MB total)
-    let totalChars = 0
-    for (const msg of messages) {
-      for (const block of msg.content) {
-        if (block.type === 'text') {
-          totalChars += (block as any).text.length
-        } else if (block.type === 'tool_result') {
-          const toolBlock = block as any
-          const content = typeof toolBlock.content === 'string' 
-            ? toolBlock.content 
-            : JSON.stringify(toolBlock.content)
-          totalChars += content.length
-        }
-        // Images not counted - handled separately with max_images and 3MB size limit
-      }
-    }
+    // Use membrane's rolling decision logic
+    const rollDecision = shouldRoll(messagesSinceRoll, totalChars, config)
     
-    const hardMaxCharacters = config.hard_max_characters || 500000
-    const normalLimit = config.recency_window_characters || 100000  // Default normal limit
+    const normalLimit = config.recency_window_characters || 100000
+    const messageLimit = config.recency_window_messages || Infinity
     
-    // ALWAYS enforce hard maximum (even when not rolling)
-    // When exceeded, truncate to NORMAL limit (not hard max) to reset cache properly
-    if (totalChars > hardMaxCharacters) {
+    // Hard limit exceeded - force truncation to normal limit
+    if (rollDecision.hardLimitExceeded) {
       logger.warn({
         totalChars,
-        hardMax: hardMaxCharacters,
+        hardMax: config.hard_max_characters || 500000,
         normalLimit,
         messageCount: messages.length
       }, 'HARD LIMIT EXCEEDED - Truncating to normal limit and forcing roll')
       
-      const result = this.truncateToLimit(messages, normalLimit, true)
-      return { ...result, messagesRemoved: messages.length - result.messages.length }
+      const result = truncateToCharacterLimit(messages, normalLimit)
+      return { 
+        messages: result.messages, 
+        didTruncate: true, 
+        messagesRemoved: result.removed 
+      }
     }
     
-    // If not rolling yet, allow normal limits to be exceeded (for cache efficiency)
-    if (!shouldRoll) {
+    // Not rolling yet - keep all messages for cache efficiency
+    if (!rollDecision.shouldRoll) {
       logger.debug({
         messagesSinceRoll,
         threshold: config.rolling_threshold,
@@ -636,129 +607,56 @@ export class ContextBuilder {
       return { messages, didTruncate: false, messagesRemoved: 0 }
     }
     
-    // Time to roll - check normal limits
-    const messageLimit = config.recency_window_messages || Infinity
-    
-    // Apply character limit
+    // Time to roll - apply limits
+    // Character limit
     if (totalChars > normalLimit) {
       logger.info({
         totalChars,
         limit: normalLimit,
-        messageCount: messages.length
+        messageCount: messages.length,
+        reason: rollDecision.reason
       }, 'Rolling: Character limit exceeded, truncating final context')
-      const result = this.truncateToLimit(messages, normalLimit, true)
-      return { ...result, messagesRemoved: messages.length - result.messages.length }
+      
+      const result = truncateToCharacterLimit(messages, normalLimit)
+      return { 
+        messages: result.messages, 
+        didTruncate: true, 
+        messagesRemoved: result.removed 
+      }
     }
     
-    // Apply message count limit
+    // Message count limit
     if (messages.length > messageLimit) {
       logger.info({
         messageCount: messages.length,
         limit: messageLimit,
-        keptChars: totalChars
+        keptChars: totalChars,
+        reason: rollDecision.reason
       }, 'Rolling: Message count limit exceeded, truncating')
-      const removed = messages.length - messageLimit
+      
+      const result = truncateToMessageLimit(messages, messageLimit)
       return { 
-        messages: messages.slice(messages.length - messageLimit), 
-        didTruncate: true,
-        messagesRemoved: removed,
+        messages: result.messages, 
+        didTruncate: true, 
+        messagesRemoved: result.removed 
       }
     }
     
     return { messages, didTruncate: false, messagesRemoved: 0 }
   }
-  
-  /**
-   * Helper to truncate messages to character limit (works on ParticipantMessage[])
-   */
-  private truncateToLimit(
-    messages: ParticipantMessage[], 
-    charLimit: number,
-    isHardLimit: boolean
-  ): { messages: ParticipantMessage[], didTruncate: boolean } {
-    let keptChars = 0
-    let cutoffIndex = messages.length
-    
-    // Count from end backwards
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i]!
-      let msgSize = 0
-      
-      for (const block of msg.content) {
-        if (block.type === 'text') {
-          msgSize += (block as any).text.length
-        } else if (block.type === 'tool_result') {
-          const toolBlock = block as any
-          const content = typeof toolBlock.content === 'string' 
-            ? toolBlock.content 
-            : JSON.stringify(toolBlock.content)
-          msgSize += content.length
-        }
-        // Images are NOT counted - they have separate limits (max_images, 5MB per image)
-        // Counting base64 data would cause over-aggressive truncation
-      }
-      
-      if (keptChars + msgSize > charLimit) {
-        cutoffIndex = i + 1
-        break
-      }
-      
-      keptChars += msgSize
-    }
-    
-    const truncated = messages.slice(cutoffIndex)
-    
-    if (cutoffIndex > 0) {
-      logger.warn({
-        removed: cutoffIndex,
-        kept: truncated.length,
-        keptChars,
-        limitType: isHardLimit ? 'HARD' : 'normal',
-        charLimit
-      }, `Truncated final context to ${isHardLimit ? 'HARD' : 'normal'} limit`)
-    }
-    
-    return { messages: truncated, didTruncate: cutoffIndex > 0 }
-  }
 
-  private determineCacheMarker(
+  /**
+   * Determine cache marker position using membrane's pattern.
+   * Delegates to ./rolling.ts helpers.
+   */
+  private determineCacheMarkerFromMessages(
     messages: DiscordMessage[],
     lastMarker: string | null,
-    didRoll: boolean,
-    _rollingThreshold: number = 50
+    didRoll: boolean
   ): string | null {
-    if (messages.length === 0) {
-      return null
-    }
-
-    // If we didn't roll, keep the same marker if it's still in the message list
-    if (!didRoll && lastMarker) {
-      const markerStillExists = messages.some((m) => m.id === lastMarker)
-      if (markerStillExists) {
-        logger.debug({ lastMarker, messagesLength: messages.length }, 'Keeping existing cache marker')
-        return lastMarker
-      }
-    }
-
-    // If we rolled or marker is invalid, place new marker
-    // Place marker at: length - buffer (~20 messages from end)
-    // This ensures:
-    // 1. Initially after roll: ~20 recent messages uncached (for dynamic content)
-    // 2. As messages accumulate: uncached grows (20 → 30 → ... → 70 at next roll)
-    // 3. Cached portion stays STABLE until next roll
-    const buffer = 20
-    const index = Math.max(0, messages.length - buffer)
-    
-    const markerId = messages[index]!.id
-    logger.debug({ 
-      index, 
-      messagesLength: messages.length, 
-      buffer,
-      markerId,
-      didRoll
-    }, 'Setting new cache marker')
-    
-    return markerId
+    // Extract message IDs and delegate to helper
+    const messageIds = messages.map(m => m.id)
+    return determineCacheMarker(messageIds, lastMarker, didRoll)
   }
 
   private async formatMessages(
