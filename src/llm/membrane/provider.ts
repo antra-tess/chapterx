@@ -192,26 +192,27 @@ export class MembraneProvider implements LLMProvider {
   
   /**
    * Stream a request with tool execution support
-   * 
+   *
    * This provides access to membrane's streaming capabilities with
-   * tool execution callbacks.
+   * tool execution callbacks including enriched chunk metadata and block events.
    */
   async stream(
     request: LLMRequest,
     options: StreamOptions = {}
   ): Promise<LLMCompletion> {
     const normalizedRequest = toMembraneRequest(request);
-    
+
     // Cast to any because our local types may not exactly match membrane's updated types
     const response = await this.membrane.stream(normalizedRequest as any, {
       onChunk: options.onChunk,
+      onBlock: options.onBlock,
       onToolCalls: options.onToolCalls,
       onPreToolContent: options.onPreToolContent,
       onUsage: options.onUsage,
       maxToolDepth: options.maxToolDepth ?? 10,
       signal: options.signal,
     });
-    
+
     return fromMembraneResponse(response as any);
   }
   
@@ -281,25 +282,61 @@ export class MembraneProvider implements LLMProvider {
 // Types
 // ============================================================================
 
+/**
+ * Metadata for each streamed chunk
+ * Matches membrane's ChunkMeta interface
+ */
+export interface ChunkMeta {
+  /** Which membrane block this chunk belongs to */
+  blockIndex: number;
+  /** Type of block: 'text', 'thinking', 'tool_call', 'tool_result' */
+  type: 'text' | 'thinking' | 'tool_call' | 'tool_result';
+  /** Whether this chunk should be shown to users (false for thinking, tool internals) */
+  visible: boolean;
+  /** For tool_call blocks: 'name', 'input', or undefined */
+  toolCallPart?: 'name' | 'input';
+  /** For tool_call/tool_result: the tool use ID */
+  toolId?: string;
+}
+
+/**
+ * Block lifecycle events
+ */
+export interface BlockEvent {
+  event: 'block_start' | 'block_complete';
+  blockIndex: number;
+  type: 'text' | 'thinking' | 'tool_call' | 'tool_result';
+  /** Full block content (only on block_complete) */
+  content?: string;
+}
+
 export interface StreamOptions {
-  /** Called for each text chunk received */
-  onChunk?: (chunk: string) => void;
-  
+  /**
+   * Called for each text chunk received with enriched metadata.
+   * Note: XML tags from prefill mode are NOT included - only actual content.
+   */
+  onChunk?: (text: string, meta: ChunkMeta) => void;
+
+  /**
+   * Called on block lifecycle events (start, complete).
+   */
+  onBlock?: (event: BlockEvent) => void;
+
   /** Called when tool calls are detected */
   onToolCalls?: (
     calls: Array<{ id: string; name: string; input: Record<string, unknown> }>,
     context: { depth: number; accumulated: string }
   ) => Promise<Array<{ toolUseId: string; content: string; isError?: boolean }>>;
-  
+
   /** Called with pre-tool content before executing tools */
   onPreToolContent?: (text: string) => Promise<void>;
-  
+
   /** Called with usage updates */
   onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
-  
+
   /** Maximum tool execution depth */
   maxToolDepth?: number;
-  
+
   /** Abort signal */
   signal?: AbortSignal;
 }

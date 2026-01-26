@@ -27,7 +27,8 @@ import { PluginContextFactory, ContextInjection } from '../tools/plugins/index.j
 import { setResourceAccessor } from '../tools/plugins/mcp-resources.js'
 import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.js'
 import { MembraneProvider } from '../llm/membrane/index.js'
-// Use any for Membrane type to avoid version mismatch issues between 
+import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
+// Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
 type Membrane = any
 
@@ -53,6 +54,9 @@ export class AgentLoop {
   
   // Membrane integration (optional)
   private membraneProvider?: MembraneProvider
+
+  // TTS relay integration (optional)
+  private ttsRelayClient?: TTSRelayClient
 
   constructor(
     private botId: string,
@@ -84,6 +88,75 @@ export class AgentLoop {
   setMembrane(membrane: Membrane): void {
     this.membraneProvider = new MembraneProvider(membrane, this.botId)
     logger.info({ botId: this.botId }, 'Membrane provider set')
+  }
+
+  /**
+   * Set up TTS relay client for streaming text to local TTS clients.
+   * Requires membrane to be enabled for streaming support.
+   */
+  async setTTSRelay(config: {
+    url: string
+    token: string
+    reconnectIntervalMs?: number
+  }): Promise<void> {
+    if (this.ttsRelayClient) {
+      this.ttsRelayClient.disconnect()
+    }
+
+    this.ttsRelayClient = new TTSRelayClient({
+      url: config.url,
+      botId: this.botId,
+      token: config.token,
+      reconnectIntervalMs: config.reconnectIntervalMs,
+    })
+
+    // Set up interruption handler
+    this.ttsRelayClient.onInterruption((event: InterruptionEvent) => {
+      this.handleTTSInterruption(event)
+    })
+
+    await this.ttsRelayClient.connect()
+    logger.info({ botId: this.botId, url: config.url }, 'TTS relay connected')
+  }
+
+  /**
+   * Handle interruption events from TTS clients.
+   * The spokenText is used to identify which message to edit - we find the recent
+   * message in the channel that starts with the spoken text and truncate it.
+   */
+  private async handleTTSInterruption(event: InterruptionEvent): Promise<void> {
+    const spokenText = event.spokenText.trim()
+
+    logger.info(
+      {
+        botId: this.botId,
+        channelId: event.channelId,
+        reason: event.reason,
+        spokenLength: spokenText.length,
+      },
+      'TTS interruption received'
+    )
+
+    // Abort the stream and record the interrupted text
+    if (this.ttsStreamContext && this.ttsStreamContext.channelId === event.channelId) {
+      this.ttsStreamContext.interruptedText = spokenText
+      this.ttsStreamContext.abortController.abort()
+      logger.info(
+        { channelId: event.channelId, spokenLength: spokenText.length },
+        'Aborted stream - will post interrupted text'
+      )
+    }
+  }
+
+  /**
+   * Disconnect TTS relay client
+   */
+  disconnectTTSRelay(): void {
+    if (this.ttsRelayClient) {
+      this.ttsRelayClient.disconnect()
+      this.ttsRelayClient = undefined
+      logger.info({ botId: this.botId }, 'TTS relay disconnected')
+    }
   }
 
   /**
@@ -1638,30 +1711,123 @@ export class AgentLoop {
   }
 
   /**
+   * Context for TTS streaming - passed to completeLLM when we want to stream to TTS
+   */
+  private ttsStreamContext?: {
+    channelId: string
+    userId: string
+    username: string
+    abortController: AbortController
+    interruptedText?: string  // If set, stream was interrupted - use this as the response
+  }
+
+  /**
    * Make an LLM completion request, routing to membrane if enabled
-   * 
+   *
    * This is the main routing point for the membrane integration.
-   * 
+   *
    * Modes:
    * - use_membrane: false → old middleware only
    * - use_membrane: true → membrane only
    * - membrane_shadow_mode: true → run both, log differences, use old result
    * - membrane_shadow_mode: true + use_membrane: true → run both, use membrane result
+   *
+   * When TTS relay is connected and ttsStreamContext is set, streams chunks
+   * to the relay for real-time text-to-speech.
    */
   private async completeLLM(request: any, config: BotConfig): Promise<any> {
     // Shadow mode: run both paths and compare
     if (config.membrane_shadow_mode && this.membraneProvider) {
       return this.completeLLMWithShadow(request, config)
     }
-    
+
+    // Check if we should stream to TTS
+    const shouldStreamToTTS =
+      config.use_membrane &&
+      this.membraneProvider &&
+      config.tts_relay?.enabled &&
+      this.ttsRelayClient?.isConnected() &&
+      this.ttsStreamContext
+
+    // Stream mode: use membrane.stream() with TTS callbacks
+    if (shouldStreamToTTS) {
+      logger.debug({ model: request.config?.model }, 'Using membrane stream for LLM with TTS')
+      return this.completeLLMWithTTSStream(request, config)
+    }
+
     // Normal mode: route based on use_membrane flag
     if (config.use_membrane && this.membraneProvider) {
       logger.debug({ model: request.config?.model }, 'Using membrane for LLM completion')
       return this.membraneProvider.completeFromLLMRequest(request)
     }
-    
+
     // Fall back to built-in middleware
     return this.llmMiddleware.complete(request)
+  }
+
+  /**
+   * Complete LLM request with streaming to TTS relay
+   */
+  private async completeLLMWithTTSStream(request: any, _config: BotConfig): Promise<any> {
+    const ctx = this.ttsStreamContext!
+    const relay = this.ttsRelayClient!
+
+    try {
+      const result = await this.membraneProvider!.stream(request, {
+        signal: ctx.abortController.signal,
+        onChunk: (text, meta) => {
+          logger.debug({ text: text.substring(0, 50), meta }, 'TTS chunk metadata from membrane')
+          relay.sendChunk({
+            channelId: ctx.channelId,
+            userId: ctx.userId,
+            username: ctx.username,
+            text,
+            blockIndex: meta?.blockIndex ?? 0,
+            blockType: meta?.type ?? 'text',
+            visible: meta?.visible ?? true,
+          })
+        },
+        onBlock: (event) => {
+          logger.debug({ event }, 'TTS block event from membrane')
+          if (event?.event === 'block_start') {
+            relay.sendBlockStart({
+              channelId: ctx.channelId,
+              userId: ctx.userId,
+              username: ctx.username,
+              blockIndex: event.blockIndex ?? 0,
+              blockType: event.type ?? 'text',
+            })
+          } else if (event?.event === 'block_complete') {
+            relay.sendBlockComplete({
+              channelId: ctx.channelId,
+              userId: ctx.userId,
+              username: ctx.username,
+              blockIndex: event.blockIndex ?? 0,
+              blockType: event.type ?? 'text',
+              content: event.content || '',
+            })
+          }
+        },
+      })
+      return result
+    } catch (error: any) {
+      // Check if this was an abort due to TTS interruption
+      if (ctx.interruptedText && (error.name === 'AbortError' || ctx.abortController.signal.aborted)) {
+        logger.info(
+          { channelId: ctx.channelId, textLength: ctx.interruptedText.length },
+          'Stream aborted due to TTS interruption, using interrupted text'
+        )
+        // Return a synthetic completion with just the interrupted text
+        // Format matches what fromMembraneResponse returns
+        return {
+          content: [{ type: 'text', text: ctx.interruptedText }],
+          stopReason: 'interrupted',
+          usage: { inputTokens: 0, outputTokens: 0 },
+          model: 'interrupted',
+        }
+      }
+      throw error
+    }
   }
   
   /**
@@ -1868,14 +2034,24 @@ export class AgentLoop {
     
     // Keep track of the base request (without accumulated output)
     // Add </function_calls> as stop sequence so we can intercept and execute tools
-    const baseRequest = { 
+    const baseRequest = {
       ...llmRequest,
       stop_sequences: [
         ...(llmRequest.stop_sequences || []),
         AgentLoop.FUNC_CALLS_CLOSE
       ]
     }
-    
+
+    // Set up TTS streaming context if relay is enabled and connected
+    if (config.tts_relay?.enabled && this.ttsRelayClient?.isConnected() && this.botUserId) {
+      this.ttsStreamContext = {
+        channelId,
+        userId: this.botUserId,
+        username: config.name,
+        abortController: new AbortController(),
+      }
+    }
+
     while (toolDepth < maxToolDepth) {
       // Build continuation request with accumulated output as prefill
       // Include any MCP tool result images so the model can see them
@@ -2408,7 +2584,10 @@ export class AgentLoop {
     
     // 11. Build final completion text for trace
     const fullCompletionText = accumulatedOutput + suffixText
-    
+
+    // Clean up TTS streaming context
+    this.ttsStreamContext = undefined
+
     return {
       completion: {
         content: [{ type: 'text', text: displayText + suffixText }],

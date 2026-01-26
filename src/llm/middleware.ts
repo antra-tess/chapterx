@@ -231,6 +231,7 @@ export class LLMMiddleware {
           // Otherwise the large text block flushed for images won't be cached!
           for (let j = messages.length - 1; j >= 0; j--) {
             const prevMsg = messages[j]
+            if (!prevMsg) continue
             if (prevMsg.role === 'assistant') {
               const content = prevMsg.content
               if (typeof content === 'string') {

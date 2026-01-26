@@ -212,6 +212,24 @@ async function main() {
       logger.warn({ error }, 'Membrane initialization skipped (not required)')
     }
 
+    // Initialize TTS relay if configured in bot config
+    const botConfigOnly = configSystem.loadBotConfigOnly(botName)
+    if (botConfigOnly.tts_relay?.enabled) {
+      try {
+        await agentLoop.setTTSRelay({
+          url: botConfigOnly.tts_relay.url,
+          token: botConfigOnly.tts_relay.token,
+          reconnectIntervalMs: botConfigOnly.tts_relay.reconnect_interval_ms,
+        })
+        logger.info({
+          url: botConfigOnly.tts_relay.url,
+          botName
+        }, 'TTS relay initialized')
+      } catch (error) {
+        logger.error({ error }, 'Failed to initialize TTS relay')
+      }
+    }
+
     // Start API server if configured
     let apiServer: ApiServer | null = null
     const apiPort = process.env.API_PORT ? parseInt(process.env.API_PORT) : 3000
