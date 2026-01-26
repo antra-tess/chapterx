@@ -33,8 +33,8 @@ recent_participant_count: 10
 include_images: true
 max_images: 5
 
-# Tool configuration - disabled for simpler testing
-tools_enabled: false
+# Tool configuration
+tools_enabled: true
 tool_output_visible: false
 max_tool_depth: 3
 tool_plugins: ['config', 'notes', 'inject']

@@ -1776,39 +1776,70 @@ export class AgentLoop {
       const result = await this.membraneProvider!.stream(request, {
         signal: ctx.abortController.signal,
         onChunk: (text, meta) => {
-          logger.debug({ text: text.substring(0, 50), meta }, 'TTS chunk metadata from membrane')
+          // Log with explicit visibility tracking for debugging thinking detection
+          const blockType = meta?.type ?? 'text'
+          const visible = meta?.visible ?? true
+          logger.info({
+            textPreview: text.substring(0, 80),
+            blockIndex: meta?.blockIndex,
+            blockType,
+            visible,
+            hasThinkingTag: text.includes('<thinking>') || text.includes('</thinking>'),
+          }, `TTS chunk: type=${blockType} visible=${visible}`)
+
           relay.sendChunk({
             channelId: ctx.channelId,
             userId: ctx.userId,
             username: ctx.username,
             text,
             blockIndex: meta?.blockIndex ?? 0,
-            blockType: meta?.type ?? 'text',
-            visible: meta?.visible ?? true,
+            blockType,
+            visible,
           })
         },
         onBlock: (event) => {
-          logger.debug({ event }, 'TTS block event from membrane')
+          // Log block events to see if thinking blocks are separate
+          // Note: membrane BlockEvent uses event.index and event.block.type/content
+          const blockIndex = event?.index ?? 0
+          const blockType = event?.block?.type ?? 'text'
+          // content only exists on block_complete events
+          const blockContent = (event?.block as any)?.content ?? ''
+
+          logger.info({
+            eventType: event?.event,
+            blockIndex,
+            blockType,
+            contentPreview: blockContent.substring(0, 80),
+          }, `TTS block: ${event?.event} type=${blockType}`)
+
           if (event?.event === 'block_start') {
             relay.sendBlockStart({
               channelId: ctx.channelId,
               userId: ctx.userId,
               username: ctx.username,
-              blockIndex: event.blockIndex ?? 0,
-              blockType: event.type ?? 'text',
+              blockIndex,
+              blockType,
             })
           } else if (event?.event === 'block_complete') {
             relay.sendBlockComplete({
               channelId: ctx.channelId,
               userId: ctx.userId,
               username: ctx.username,
-              blockIndex: event.blockIndex ?? 0,
-              blockType: event.type ?? 'text',
-              content: event.content || '',
+              blockIndex,
+              blockType,
+              content: blockContent,
             })
           }
         },
       })
+
+      // Log final result to see content block types
+      logger.info({
+        contentBlockCount: result?.content?.length,
+        contentBlockTypes: result?.content?.map((b: any) => b.type),
+        stopReason: result?.stopReason,
+      }, 'TTS stream complete - membrane result summary')
+
       return result
     } catch (error: any) {
       // Check if this was an abort due to TTS interruption
@@ -2115,8 +2146,10 @@ export class AgentLoop {
         // The check later will return early
       }
       
-      // Prepend thinking tag if it was actually prefilled
-      if (thinkingWasPrefilled && accumulatedOutput === '') {
+      // Prepend thinking tag if it was actually prefilled (non-membrane only)
+      // When using membrane, extended thinking API handles this and the adapter
+      // wraps thinking blocks in <thinking> tags, so we don't prepend here
+      if (thinkingWasPrefilled && accumulatedOutput === '' && !config.use_membrane) {
         const firstTextBlock = completion.content.find((c: any) => c.type === 'text') as any
         if (firstTextBlock?.text) {
           firstTextBlock.text = '<thinking>' + firstTextBlock.text

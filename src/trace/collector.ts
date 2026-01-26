@@ -233,7 +233,11 @@ export class TraceCollector {
     model: string,
     options?: {
       requestBodyRef?: string
+      requestBodyRefs?: string[]
       responseBodyRef?: string
+      responseBodyRefs?: string[]
+      membraneRequestRef?: string
+      membraneResponseRef?: string
       error?: LLMCallInfo['error']
     }
   ): void {
@@ -241,7 +245,7 @@ export class TraceCollector {
       console.warn(`LLM call ${callId} not found in current trace`)
       return
     }
-    
+
     const call: LLMCallInfo = {
       callId,
       depth: this.currentLLMCall.depth,
@@ -251,11 +255,16 @@ export class TraceCollector {
       request,
       response,
       tokenUsage,
-      requestBodyRef: options?.requestBodyRef,
-      responseBodyRef: options?.responseBodyRef,
+      // Keep requestBodyRef for backwards compat (first request), add requestBodyRefs for all
+      requestBodyRef: options?.requestBodyRef ?? options?.requestBodyRefs?.[0],
+      requestBodyRefs: options?.requestBodyRefs,
+      responseBodyRef: options?.responseBodyRef ?? options?.responseBodyRefs?.[options?.responseBodyRefs?.length - 1],
+      responseBodyRefs: options?.responseBodyRefs,
+      membraneRequestRef: options?.membraneRequestRef,
+      membraneResponseRef: options?.membraneResponseRef,
       error: options?.error,
     }
-    
+
     this.llmCalls.push(call)
     this.currentLLMCall = undefined
   }
@@ -264,10 +273,11 @@ export class TraceCollector {
    * Record an LLM call error
    */
   failLLMCall(
-    callId: string, 
+    callId: string,
     error: LLMCallInfo['error'],
     options?: {
       requestBodyRef?: string
+      requestBodyRefs?: string[]
       model?: string
       request?: LLMCallInfo['request']
     }
@@ -275,7 +285,7 @@ export class TraceCollector {
     if (!this.currentLLMCall || this.currentLLMCall.callId !== callId) {
       return
     }
-    
+
     const call: LLMCallInfo = {
       callId,
       depth: this.currentLLMCall.depth,
@@ -288,7 +298,8 @@ export class TraceCollector {
         hasTools: false,
         toolCount: 0,
       },
-      requestBodyRef: options?.requestBodyRef,
+      requestBodyRef: options?.requestBodyRef ?? options?.requestBodyRefs?.[0],
+      requestBodyRefs: options?.requestBodyRefs,
       response: {
         stopReason: 'end_turn',
         contentBlocks: 0,
@@ -301,7 +312,7 @@ export class TraceCollector {
       },
       error,
     }
-    
+
     this.llmCalls.push(call)
     this.currentLLMCall = undefined
   }
@@ -424,7 +435,11 @@ export function traceCompleteLLMCall(
   model: string,
   options?: {
     requestBodyRef?: string
+    requestBodyRefs?: string[]
     responseBodyRef?: string
+    responseBodyRefs?: string[]
+    membraneRequestRef?: string
+    membraneResponseRef?: string
   }
 ): void {
   getCurrentTrace()?.completeLLMCall(callId, request, response, tokenUsage, model, options)

@@ -248,9 +248,12 @@ export interface LLMCallInfo {
     apiBaseUrl?: string  // LLM API endpoint URL for debugging
   }
   
-  /** Full request body - stored separately for size */
+  /** Full request body - stored separately for size (first request only, for backwards compat) */
   requestBodyRef?: string  // Path to full request JSON
-  
+
+  /** All request bodies in tool loop - stored separately for size */
+  requestBodyRefs?: string[]  // Paths to all request JSONs in order
+
   /** Response summary */
   response: {
     stopReason: 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | 'refusal'
@@ -259,9 +262,18 @@ export interface LLMCallInfo {
     toolUseCount: number
   }
   
-  /** Full response body - stored separately for size */
+  /** Full response body - stored separately for size (final response only, for backwards compat) */
   responseBodyRef?: string  // Path to full response JSON
-  
+
+  /** All raw LLM response bodies in tool loop - stored separately for size */
+  responseBodyRefs?: string[]  // Paths to all response JSONs in order
+
+  /** Membrane normalized request - stored separately for size */
+  membraneRequestRef?: string  // Path to membrane request JSON
+
+  /** Membrane normalized response - stored separately for size */
+  membraneResponseRef?: string  // Path to membrane response JSON
+
   /** Token usage */
   tokenUsage: {
     inputTokens: number

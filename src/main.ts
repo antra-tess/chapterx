@@ -200,12 +200,16 @@ async function main() {
 
     // Set bot's Discord user ID for mention detection
     agentLoop.setBotUserId(botUserId)
-    
+
+    // Load bot config early to get the display name for membrane
+    const botConfigOnly = configSystem.loadBotConfigOnly(botName)
+    const membraneAssistantName = botConfigOnly.name || botName
+
     // Initialize membrane (optional - used when bot config has use_membrane: true)
     try {
-      const membrane = createMembraneFromVendorConfigs(vendorConfigs, botName)
+      const membrane = createMembraneFromVendorConfigs(vendorConfigs, membraneAssistantName)
       agentLoop.setMembrane(membrane)
-      logger.info({ botName }, 'Membrane initialized for agent loop')
+      logger.info({ assistantName: membraneAssistantName }, 'Membrane initialized for agent loop')
     } catch (error) {
       // Membrane is optional - if it fails to initialize (e.g., no API keys),
       // the bot can still function with built-in providers
@@ -213,7 +217,6 @@ async function main() {
     }
 
     // Initialize TTS relay if configured in bot config
-    const botConfigOnly = configSystem.loadBotConfigOnly(botName)
     if (botConfigOnly.tts_relay?.enabled) {
       try {
         await agentLoop.setTTSRelay({

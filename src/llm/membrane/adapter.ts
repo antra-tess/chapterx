@@ -209,9 +209,36 @@ export function fromMembraneMessage(msg: NormalizedMessage): ParticipantMessage 
 
 /**
  * Convert array of chapterx messages to membrane format
+ *
+ * Filters out empty assistant messages at the end - these are added by chapterx
+ * context builder for its own prefill mechanism, but membrane handles prefill internally.
  */
 export function toMembraneMessages(messages: ParticipantMessage[]): NormalizedMessage[] {
-  return messages.map(toMembraneMessage);
+  // Filter out trailing empty assistant messages (chapterx prefill placeholder)
+  // These are messages with empty text content used to start bot completion
+  let filteredMessages = messages;
+
+  while (filteredMessages.length > 0) {
+    const lastMsg = filteredMessages[filteredMessages.length - 1];
+    if (!lastMsg) break;
+
+    // Check if it's an empty message (only text blocks with empty/whitespace text)
+    const isEmptyMessage = lastMsg.content.every(block => {
+      if (block.type === 'text') {
+        return !block.text || block.text.trim() === '';
+      }
+      return false; // Non-text blocks are not "empty"
+    });
+
+    if (isEmptyMessage && lastMsg.content.length > 0) {
+      // Remove trailing empty message
+      filteredMessages = filteredMessages.slice(0, -1);
+    } else {
+      break; // Stop when we hit a non-empty message
+    }
+  }
+
+  return filteredMessages.map(toMembraneMessage);
 }
 
 /**
@@ -392,11 +419,15 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     frequencyPenalty: request.config.frequency_penalty,
   };
   
-  // Handle thinking mode
+  // Enable extended thinking when prefill_thinking is set
+  // Membrane will use the API's thinking feature and return thinking blocks
   if (request.config.prefill_thinking) {
     config.thinking = {
       enabled: true,
+      budgetTokens: 10000,  // Default budget for extended thinking
     };
+    // Log that thinking is enabled for debugging
+    console.log('[adapter] Thinking enabled:', { model: request.config.model, thinking: config.thinking });
   }
   
   const normalizedRequest: NormalizedRequest = {
