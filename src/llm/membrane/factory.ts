@@ -14,8 +14,8 @@ import {
   OpenRouterAdapter,
   OpenAIAdapter,
   OpenAICompatibleAdapter,
-} from 'membrane';
-import type { ProviderAdapter, MembraneConfig } from 'membrane';
+} from '@antra_tessera/membrane';
+import type { ProviderAdapter, MembraneConfig } from '@antra_tessera/membrane';
 import { createTracingHooks } from './hooks.js';
 import { logger } from '../../utils/logger.js';
 

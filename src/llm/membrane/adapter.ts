@@ -16,7 +16,7 @@ import type {
 
 // NOTE: membrane types are defined locally until membrane is installed
 // Once `npm install membrane@github:antra-tess/membrane#main` is run,
-// these can be replaced with: import type { ... } from 'membrane';
+// these can be replaced with: import type { ... } from '@antra_tessera/membrane';
 
 // ============================================================================
 // Membrane Types (local definitions until package is installed)
