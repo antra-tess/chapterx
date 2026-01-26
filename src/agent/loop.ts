@@ -1831,6 +1831,64 @@ export class AgentLoop {
             })
           }
         },
+        // Execute tools and record to trace
+        onToolCalls: async (calls, _context) => {
+          const results: Array<{ toolUseId: string; content: string; isError?: boolean }> = []
+
+          for (const call of calls) {
+            const toolStartTime = Date.now()
+            const result = await this.toolSystem.executeTool(call)
+            const toolDurationMs = Date.now() - toolStartTime
+
+            // Format output string
+            const outputStr = typeof result.output === 'string'
+              ? result.output
+              : JSON.stringify(result.output)
+
+            // Build result content
+            let content: string
+            let isError = false
+            if (result.error) {
+              content = `Error executing ${call.name}: ${result.error}`
+              isError = true
+            } else {
+              content = outputStr
+              // Note: image handling for TTS mode could be added here if needed
+            }
+
+            // Record to trace
+            const traceOutput = result.error
+              ? `[ERROR] ${result.error}`
+              : (outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr)
+            traceToolExecution({
+              toolCallId: call.id,
+              toolName: call.name,
+              input: call.input,
+              output: traceOutput,
+              outputTruncated: !result.error && outputStr.length > 1000,
+              fullOutputLength: result.error ? traceOutput.length : outputStr.length,
+              durationMs: toolDurationMs,
+              sentToDiscord: false, // TTS mode doesn't send tool output to Discord
+              error: result.error ? String(result.error) : undefined,
+              imageCount: result.images?.length,
+            })
+
+            logger.debug({
+              toolName: call.name,
+              durationMs: toolDurationMs,
+              hasError: !!result.error,
+              outputLength: outputStr.length,
+            }, 'TTS stream tool executed')
+
+            results.push({
+              toolUseId: call.id,
+              content,
+              isError,
+            })
+          }
+
+          return results
+        },
       })
 
       // Log final result to see content block types
