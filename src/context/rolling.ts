@@ -9,7 +9,7 @@ import {
   shouldRoll as membranesShouldRoll,
   type ContextState,
   type ContextConfig,
-} from 'membrane';
+} from '@antra_tessera/membrane';
 import type { BotConfig, ParticipantMessage } from '../types.js';
 import { logger } from '../utils/logger.js';
 
