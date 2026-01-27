@@ -1,16 +1,26 @@
-# StrangeOpus4.5 - Local test bot for prompt caching
+# StrangeOpus4.5 - Test bot with TTS relay enabled
 name: StrangeOpus4.5
 innerName: StrangeOpus4.5
 
 # Model configuration
 mode: prefill
 prefill_thinking: true
-debug_thinking: false
+debug_thinking: true
 preserve_thinking_context: true
 continuation_model: claude-opus-4-5-20251101
 temperature: 1.0
 max_tokens: 16384
 top_p: 1.0
+
+# Membrane integration - required for TTS streaming
+use_membrane: true
+
+# TTS Relay - streams chunks to local TTS client
+tts_relay:
+  enabled: true
+  url: "ws://localhost:8800/bot"
+  token: "dev-bot-token"
+  reconnect_interval_ms: 5000
 
 # Context configuration
 recency_window_messages: 400
@@ -26,7 +36,7 @@ max_images: 5
 # Tool configuration
 tools_enabled: true
 tool_output_visible: false
-max_tool_depth: 20
+max_tool_depth: 3
 tool_plugins: ['config', 'notes', 'inject']
 plugin_config:
   notes:
@@ -40,7 +50,6 @@ llm_retries: 3
 discord_backoff_max: 32000
 
 # Activation settings
-reply_on_random: 500
-reply_on_name: false
+reply_on_random: 0
+reply_on_name: true
 max_queued_replies: 1
-

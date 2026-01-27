@@ -1249,23 +1249,129 @@ export class DiscordConnector {
       try {
         const channel = await this.client.channels.fetch(channelId) as TextChannel
         const message = await channel.messages.fetch(messageId)
-        
+
         // Check if bot has permission to delete messages
         const permissions = channel.permissionsFor(this.client.user!)
         if (!permissions?.has('ManageMessages')) {
           logger.error({ channelId, messageId }, 'Bot lacks MANAGE_MESSAGES permission to delete message')
           throw new Error('Missing MANAGE_MESSAGES permission')
         }
-        
+
         await message.delete()
         logger.info({ channelId, messageId, author: message.author?.username }, 'Successfully deleted m command message')
       } catch (error: any) {
-        logger.error({ 
-          error: error.message, 
+        logger.error({
+          error: error.message,
           code: error.code,
-          channelId, 
-          messageId 
+          channelId,
+          messageId
         }, 'Failed to delete message')
+        throw error
+      }
+    }, this.options.maxBackoffMs)
+  }
+
+  /**
+   * Edit a message by ID
+   */
+  async editMessage(channelId: string, messageId: string, newContent: string): Promise<void> {
+    return retryDiscord(async () => {
+      try {
+        const channel = await this.client.channels.fetch(channelId) as TextChannel
+        if (!channel || !channel.isTextBased()) {
+          throw new DiscordError(`Channel ${channelId} not found`)
+        }
+
+        const message = await channel.messages.fetch(messageId)
+
+        // Can only edit own messages
+        if (message.author.id !== this.client.user?.id) {
+          throw new DiscordError(`Cannot edit message ${messageId} - not authored by bot`)
+        }
+
+        await message.edit(newContent)
+        logger.debug({ channelId, messageId, newLength: newContent.length }, 'Edited message')
+      } catch (error: any) {
+        logger.error({
+          error: error.message,
+          code: error.code,
+          channelId,
+          messageId
+        }, 'Failed to edit message')
+        throw error
+      }
+    }, this.options.maxBackoffMs)
+  }
+
+  /**
+   * Find a recent bot message by content prefix and edit it.
+   * Used for TTS interruption - finds the message that starts with the spoken text
+   * and truncates it to only contain what was actually spoken.
+   *
+   * @param channelId - The channel to search in
+   * @param contentPrefix - The content the message should start with
+   * @param newContent - The new content to replace with (usually same as contentPrefix)
+   * @param maxMessages - How many recent messages to search (default: 20)
+   * @returns true if message was found and edited, false otherwise
+   */
+  async findAndEditBotMessage(
+    channelId: string,
+    contentPrefix: string,
+    newContent: string,
+    maxMessages: number = 20
+  ): Promise<boolean> {
+    return retryDiscord(async () => {
+      try {
+        const channel = await this.client.channels.fetch(channelId) as TextChannel
+        if (!channel || !channel.isTextBased()) {
+          throw new DiscordError(`Channel ${channelId} not found`)
+        }
+
+        const botUserId = this.client.user?.id
+        if (!botUserId) {
+          throw new DiscordError('Bot user ID not available')
+        }
+
+        // Fetch recent messages
+        const messages = await channel.messages.fetch({ limit: maxMessages })
+
+        // Find the bot's message that starts with contentPrefix
+        // Trim whitespace and try both exact match and trimmed match
+        const trimmedPrefix = contentPrefix.trim()
+        const targetMessage = messages.find(msg => {
+          if (msg.author.id !== botUserId) return false
+          const content = msg.content
+          // Try exact match first
+          if (content.startsWith(contentPrefix)) return true
+          // Try trimmed match
+          if (content.startsWith(trimmedPrefix)) return true
+          // Try if message content trimmed matches prefix trimmed
+          if (content.trim().startsWith(trimmedPrefix)) return true
+          return false
+        })
+
+        if (!targetMessage) {
+          logger.warn(
+            { channelId, prefixLength: contentPrefix.length, searched: messages.size },
+            'Could not find bot message matching content prefix'
+          )
+          return false
+        }
+
+        // Edit the message
+        await targetMessage.edit(newContent)
+        logger.info(
+          { channelId, messageId: targetMessage.id, oldLength: targetMessage.content.length, newLength: newContent.length },
+          'Found and edited bot message by content prefix'
+        )
+        return true
+      } catch (error: any) {
+        logger.error({
+          error: error.message,
+          code: error.code,
+          channelId,
+          prefixLength: contentPrefix.length
+        }, 'Failed to find and edit bot message')
         throw error
       }
     }, this.options.maxBackoffMs)

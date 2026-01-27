@@ -146,6 +146,18 @@ function loadResponseBody(ref: string): any {
   return JSON.parse(readFileSync(path, 'utf-8'))
 }
 
+function loadMembraneRequestBody(ref: string): any {
+  const path = join(LOGS_DIR, 'membrane-requests', ref)
+  if (!existsSync(path)) return null
+  return JSON.parse(readFileSync(path, 'utf-8'))
+}
+
+function loadMembraneResponseBody(ref: string): any {
+  const path = join(LOGS_DIR, 'membrane-responses', ref)
+  if (!existsSync(path)) return null
+  return JSON.parse(readFileSync(path, 'utf-8'))
+}
+
 function getChannelName(channelId: string): string {
   return channelNameCache.get(channelId) || channelId
 }
@@ -345,7 +357,33 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
       sendJson(req, res, body)
       return
     }
-    
+
+    // GET /api/membrane-request/<ref>
+    if (path.startsWith('/api/membrane-request/')) {
+      const ref = path.split('/')[3]
+      const body = loadMembraneRequestBody(ref!)
+      if (!body) {
+        res.statusCode = 404
+        res.end(JSON.stringify({ error: 'Membrane request body not found' }))
+        return
+      }
+      sendJson(req, res, body)
+      return
+    }
+
+    // GET /api/membrane-response/<ref>
+    if (path.startsWith('/api/membrane-response/')) {
+      const ref = path.split('/')[3]
+      const body = loadMembraneResponseBody(ref!)
+      if (!body) {
+        res.statusCode = 404
+        res.end(JSON.stringify({ error: 'Membrane response body not found' }))
+        return
+      }
+      sendJson(req, res, body)
+      return
+    }
+
     // GET /api/channels - List known channels
     if (path === '/api/channels') {
       const channels = Array.from(channelNameCache.entries()).map(([id, name]) => ({
@@ -1211,7 +1249,7 @@ const HTML = `<!DOCTYPE html>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
           <h2>Trace: \${t.traceId}</h2>
           <div style="display: flex; gap: 8px;">
-            \${t.llmCalls?.length > 0 ? \`<button onclick="viewRequest('\${t.llmCalls[0].requestBodyRef}')" class="view-json-btn" title="View first LLM request">📤 View Request</button>\` : ''}
+            \${t.llmCalls?.length > 0 ? \`<button onclick="viewRequest('\${t.llmCalls[0].requestBodyRef || (t.llmCalls[0].requestBodyRefs && t.llmCalls[0].requestBodyRefs[0])}')" class="view-json-btn" title="View first LLM request">📤 View Request</button>\` : ''}
             <button onclick="copyTraceLink()" class="view-json-btn" title="Copy shareable link">📋 Copy Link</button>
           </div>
         </div>
@@ -1389,9 +1427,15 @@ const HTML = `<!DOCTYPE html>
               <div class="llm-call">
                 <div class="llm-call-header">
                   <strong>Call #\${call.depth}</strong>
-                  <div>
-                    <button class="view-json-btn" onclick="viewRequest('\${call.requestBodyRef}')">View Request</button>
-                    <button class="view-json-btn" onclick="viewResponse('\${call.responseBodyRef}')">View Response</button>
+                  <div style="display: flex; flex-wrap: wrap; gap: 4px;">
+                    \${call.requestBodyRefs && call.requestBodyRefs.length > 1
+                      ? call.requestBodyRefs.map((ref, idx) => \`<button class="view-json-btn" onclick="viewRequest('\${ref}')" title="Raw LLM API request \${idx + 1}">Req \${idx + 1}</button>\`).join('')
+                      : \`<button class="view-json-btn" onclick="viewRequest('\${call.requestBodyRef || (call.requestBodyRefs && call.requestBodyRefs[0])}')" title="Raw LLM API request">Request</button>\`}
+                    \${call.responseBodyRefs && call.responseBodyRefs.length > 1
+                      ? call.responseBodyRefs.map((ref, idx) => \`<button class="view-json-btn" onclick="viewResponse('\${ref}')" title="Raw LLM API response \${idx + 1}">Resp \${idx + 1}</button>\`).join('')
+                      : \`<button class="view-json-btn" onclick="viewResponse('\${call.responseBodyRef || (call.responseBodyRefs && call.responseBodyRefs[0])}')" title="Raw LLM API response">Response</button>\`}
+                    \${call.membraneRequestRef ? \`<button class="view-json-btn" onclick="viewMembraneRequest('\${call.membraneRequestRef}')" title="Membrane normalized request" style="background: #4f46e5;">Membrane Req</button>\` : ''}
+                    \${call.membraneResponseRef ? \`<button class="view-json-btn" onclick="viewMembraneResponse('\${call.membraneResponseRef}')" title="Membrane normalized response" style="background: #4f46e5;">Membrane Resp</button>\` : ''}
                   </div>
                 </div>
                 <div class="llm-call-stats">
@@ -1403,6 +1447,7 @@ const HTML = `<!DOCTYPE html>
                   \${call.tokenUsage.cacheCreationTokens ? \`<span style="color: #f59e0b;">Cache created: \${formatTokens(call.tokenUsage.cacheCreationTokens)}</span>\` : ''}
                   <span>Stop: \${call.response.stopReason}</span>
                   \${call.response.toolUseCount > 0 ? \`<span>Tools: \${call.response.toolUseCount}</span>\` : ''}
+                  \${call.requestBodyRefs && call.requestBodyRefs.length > 1 ? \`<span style="color: #8b5cf6;">Tool loop: \${call.requestBodyRefs.length} calls</span>\` : ''}
                 </div>
                 \${call.error ? \`<div style="color: var(--error); margin-top: 8px;">Error: \${call.error.message}</div>\` : ''}
               </div>
@@ -1527,7 +1572,21 @@ const HTML = `<!DOCTYPE html>
       const data = await res.json();
       showJsonModal('LLM Response', data);
     }
-    
+
+    async function viewMembraneRequest(ref) {
+      if (!ref) { alert('No membrane request stored'); return; }
+      const res = await apiFetch('/api/membrane-request/' + ref);
+      const data = await res.json();
+      showJsonModal('Membrane Request', data);
+    }
+
+    async function viewMembraneResponse(ref) {
+      if (!ref) { alert('No membrane response stored'); return; }
+      const res = await apiFetch('/api/membrane-response/' + ref);
+      const data = await res.json();
+      showJsonModal('Membrane Response', data);
+    }
+
     function viewFullConfig() {
       if (!currentTrace?.config) { alert('No config stored for this trace'); return; }
       showJsonModal('Bot Configuration', currentTrace.config);
@@ -1579,17 +1638,212 @@ const HTML = `<!DOCTYPE html>
     }
     
     function renderFormattedLLMData(title, data) {
-      if (title.includes('Request')) {
+      if (title.includes('Membrane Request')) {
+        return renderFormattedMembraneRequest(data);
+      } else if (title.includes('Membrane Response')) {
+        return renderFormattedMembraneResponse(data);
+      } else if (title.includes('Request')) {
         return renderFormattedRequest(data);
       } else {
         return renderFormattedResponse(data);
       }
     }
-    
+
+    function renderFormattedMembraneRequest(data) {
+      let html = '';
+
+      // Config section
+      if (data.config) {
+        html += \`
+          <div style="margin-bottom: 20px; padding: 12px; background: var(--bg); border-radius: 8px; border-left: 3px solid #8b5cf6;">
+            <div style="font-weight: 600; color: #8b5cf6; margin-bottom: 8px;">⚙️ Config</div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; font-size: 0.85rem;">
+              <span>Model: <strong>\${data.config.model || 'default'}</strong></span>
+              <span>Max tokens: <strong>\${data.config.maxTokens || 'default'}</strong></span>
+              <span>Temperature: <strong>\${data.config.temperature ?? 'default'}</strong></span>
+              \${data.config.thinking ? \`<span>Thinking: <strong>\${JSON.stringify(data.config.thinking)}</strong></span>\` : ''}
+            </div>
+          </div>
+        \`;
+      }
+
+      // System prompt
+      if (data.system) {
+        html += \`
+          <div style="margin-bottom: 20px;">
+            <div style="font-weight: 600; color: var(--accent); margin-bottom: 8px; display: flex; justify-content: space-between;">
+              <span>📋 System Prompt</span>
+              <span style="color: var(--text-muted); font-weight: normal;">\${data.system.length} chars</span>
+            </div>
+            <div style="background: var(--bg); padding: 16px; border-radius: 8px; border-left: 3px solid #6366f1; white-space: pre-wrap; font-family: inherit; line-height: 1.6; max-height: 300px; overflow-y: auto;">\${escapeHtml(data.system)}</div>
+          </div>
+        \`;
+      }
+
+      // Messages (membrane format uses participant instead of role)
+      if (data.messages && data.messages.length > 0) {
+        html += \`<div style="font-weight: 600; color: var(--accent); margin-bottom: 12px;">💬 Messages (\${data.messages.length})</div>\`;
+
+        for (const msg of data.messages) {
+          const participant = msg.participant || 'unknown';
+          const isAssistant = participant.toLowerCase().includes('claude') || participant.toLowerCase().includes('assistant') || participant.toLowerCase().includes('bot');
+          const roleColor = isAssistant ? '#6366f1' : '#22c55e';
+          const roleIcon = isAssistant ? '🤖' : '👤';
+
+          // Check for cache_control in metadata
+          const hasCache = msg.metadata?.cacheControl;
+          const cacheBadge = hasCache ? '<span style="background: #10b981; color: white; font-size: 0.65rem; padding: 2px 6px; border-radius: 3px; margin-left: 8px;">📍 CACHED</span>' : '';
+          const cacheHighlight = hasCache ? 'border: 2px solid #10b981; box-shadow: 0 0 8px rgba(16, 185, 129, 0.3);' : '';
+
+          // Extract text content
+          let content = '';
+          if (Array.isArray(msg.content)) {
+            for (const block of msg.content) {
+              if (block.type === 'text') content += block.text;
+              else if (block.type === 'image') content += '[Image]';
+              else if (block.type === 'tool_use') content += \`[Tool: \${block.name}]\`;
+              else if (block.type === 'tool_result') content += \`[Tool Result]\`;
+            }
+          }
+
+          html += \`
+            <div style="margin-bottom: 16px; background: var(--bg); border-radius: 8px; overflow: hidden; \${cacheHighlight}">
+              <div style="padding: 8px 12px; background: var(--bg-tertiary); border-left: 3px solid \${roleColor}; display: flex; justify-content: space-between; align-items: center;">
+                <span>\${roleIcon} <strong style="color: \${roleColor};">\${participant}</strong>\${cacheBadge}</span>
+                <span style="color: var(--text-muted); font-size: 0.8rem;">\${content.length} chars</span>
+              </div>
+              <div style="padding: 12px; white-space: pre-wrap; font-family: inherit; line-height: 1.6; max-height: 400px; overflow-y: auto;">\${escapeHtml(content.trim())}</div>
+            </div>
+          \`;
+        }
+      }
+
+      // Tools
+      if (data.tools && data.tools.length > 0) {
+        html += \`
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div style="font-weight: 600; color: var(--warning); margin-bottom: 12px;">🔧 Tools (\${data.tools.length})</div>
+            <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+              \${data.tools.map(t => \`<span style="background: var(--bg-tertiary); padding: 4px 12px; border-radius: 4px; font-size: 0.85rem;">\${t.name}</span>\`).join('')}
+            </div>
+          </div>
+        \`;
+      }
+
+      // Other fields
+      const renderedKeys = new Set(['system', 'messages', 'config', 'tools', 'toolMode', 'stopSequences', 'maxParticipantsForStop']);
+      const otherKeys = Object.keys(data).filter(k => !renderedKeys.has(k));
+      if (otherKeys.length > 0) {
+        html += \`
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div style="font-weight: 600; color: var(--warning); margin-bottom: 12px;">📦 Other Fields (\${otherKeys.length})</div>
+            \${otherKeys.map(key => \`
+              <div style="margin-bottom: 12px;">
+                <div style="color: var(--accent); font-size: 0.85rem; margin-bottom: 4px;">\${key}:</div>
+                <div style="background: var(--bg); padding: 12px; border-radius: 4px; white-space: pre-wrap; font-family: monospace; font-size: 0.85rem; max-height: 200px; overflow-y: auto;">\${escapeHtml(typeof data[key] === 'string' ? data[key] : JSON.stringify(data[key], null, 2))}</div>
+              </div>
+            \`).join('')}
+          </div>
+        \`;
+      }
+
+      return html;
+    }
+
+    function renderFormattedMembraneResponse(data) {
+      let html = '';
+
+      // Content blocks
+      if (data.content && data.content.length > 0) {
+        html += \`<div style="font-weight: 600; color: var(--accent); margin-bottom: 12px;">📝 Content Blocks (\${data.content.length})</div>\`;
+
+        for (const block of data.content) {
+          if (block.type === 'text') {
+            html += \`
+              <div style="margin-bottom: 16px;">
+                <div style="font-size: 0.75rem; color: var(--accent); margin-bottom: 8px; display: flex; justify-content: space-between;">
+                  <span>TEXT</span>
+                  <span style="color: var(--text-muted);">\${block.text?.length || 0} chars</span>
+                </div>
+                <div style="background: var(--bg); padding: 16px; border-radius: 8px; border-left: 3px solid #6366f1; white-space: pre-wrap; line-height: 1.6;">\${escapeHtml(block.text || '')}</div>
+              </div>
+            \`;
+          } else if (block.type === 'tool_use') {
+            html += \`
+              <div style="margin-bottom: 16px;">
+                <div style="font-size: 0.75rem; color: var(--warning); margin-bottom: 8px;">🔧 TOOL USE: \${block.name}</div>
+                <div style="background: var(--bg); padding: 12px; border-radius: 8px; border-left: 3px solid #f59e0b;">
+                  <div style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 8px;">ID: \${block.id}</div>
+                  <pre style="margin: 0; white-space: pre-wrap;">\${escapeHtml(JSON.stringify(block.input, null, 2))}</pre>
+                </div>
+              </div>
+            \`;
+          } else {
+            html += \`
+              <div style="margin-bottom: 16px;">
+                <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px;">\${block.type?.toUpperCase() || 'UNKNOWN'}</div>
+                <div style="background: var(--bg); padding: 12px; border-radius: 8px; white-space: pre-wrap; font-family: monospace; font-size: 0.85rem;">\${escapeHtml(JSON.stringify(block, null, 2))}</div>
+              </div>
+            \`;
+          }
+        }
+      }
+
+      // Details section
+      if (data.details) {
+        html += \`
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div style="font-weight: 600; color: var(--accent); margin-bottom: 12px;">📊 Details</div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; font-size: 0.85rem;">
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Stop Reason</div>
+                <strong>\${data.details.stop?.reason || data.stopReason || 'unknown'}</strong>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Model</div>
+                <strong>\${data.details.model?.actual || 'unknown'}</strong>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Duration</div>
+                <strong>\${data.details.timing?.totalDurationMs || 0}ms</strong>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Attempts</div>
+                <strong>\${data.details.timing?.attempts || 1}</strong>
+              </div>
+            </div>
+          </div>
+        \`;
+      }
+
+      // Usage
+      if (data.usage || data.details?.usage) {
+        const usage = data.details?.usage || data.usage;
+        html += \`
+          <div style="margin-top: 16px;">
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; font-size: 0.85rem;">
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Input Tokens</div>
+                <strong>\${usage.inputTokens?.toLocaleString() || 0}</strong>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Output Tokens</div>
+                <strong>\${usage.outputTokens?.toLocaleString() || 0}</strong>
+              </div>
+              \${usage.cacheReadTokens ? \`<div style="background: var(--bg); padding: 12px; border-radius: 4px;"><div style="color: #10b981; margin-bottom: 4px;">Cache Read</div><strong>\${usage.cacheReadTokens?.toLocaleString()}</strong></div>\` : ''}
+              \${usage.cacheCreationTokens ? \`<div style="background: var(--bg); padding: 12px; border-radius: 4px;"><div style="color: #f59e0b; margin-bottom: 4px;">Cache Created</div><strong>\${usage.cacheCreationTokens?.toLocaleString()}</strong></div>\` : ''}
+            </div>
+          </div>
+        \`;
+      }
+
+      return html;
+    }
+
     function renderFormattedRequest(data) {
       let html = '';
       const renderedKeys = new Set(['system', 'messages', 'tools', 'model', 'max_tokens', 'temperature']);
-      
+
       if (data.system) {
         // System can be string or array with cache_control
         const isArraySystem = Array.isArray(data.system);

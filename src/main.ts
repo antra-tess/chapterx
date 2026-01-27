@@ -200,16 +200,37 @@ async function main() {
 
     // Set bot's Discord user ID for mention detection
     agentLoop.setBotUserId(botUserId)
-    
+
+    // Load bot config early to get the display name for membrane
+    const botConfigOnly = configSystem.loadBotConfigOnly(botName)
+    const membraneAssistantName = botConfigOnly.name || botName
+
     // Initialize membrane (optional - used when bot config has use_membrane: true)
     try {
-      const membrane = createMembraneFromVendorConfigs(vendorConfigs, botName)
+      const membrane = createMembraneFromVendorConfigs(vendorConfigs, membraneAssistantName)
       agentLoop.setMembrane(membrane)
-      logger.info({ botName }, 'Membrane initialized for agent loop')
+      logger.info({ assistantName: membraneAssistantName }, 'Membrane initialized for agent loop')
     } catch (error) {
       // Membrane is optional - if it fails to initialize (e.g., no API keys),
       // the bot can still function with built-in providers
       logger.warn({ error }, 'Membrane initialization skipped (not required)')
+    }
+
+    // Initialize TTS relay if configured in bot config
+    if (botConfigOnly.tts_relay?.enabled) {
+      try {
+        await agentLoop.setTTSRelay({
+          url: botConfigOnly.tts_relay.url,
+          token: botConfigOnly.tts_relay.token,
+          reconnectIntervalMs: botConfigOnly.tts_relay.reconnect_interval_ms,
+        })
+        logger.info({
+          url: botConfigOnly.tts_relay.url,
+          botName
+        }, 'TTS relay initialized')
+      } catch (error) {
+        logger.error({ error }, 'Failed to initialize TTS relay')
+      }
     }
 
     // Start API server if configured

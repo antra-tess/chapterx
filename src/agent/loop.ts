@@ -8,6 +8,7 @@ import { ChannelStateManager } from './state-manager.js'
 import { DiscordConnector } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
+import { LLMMiddleware } from '../llm/middleware.js'
 import { ToolSystem } from '../tools/system.js'
 import { Event, BotConfig, DiscordMessage, ToolCall, ToolResult } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
@@ -26,7 +27,8 @@ import { PluginContextFactory, ContextInjection } from '../tools/plugins/index.j
 import { setResourceAccessor } from '../tools/plugins/mcp-resources.js'
 import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.js'
 import { MembraneProvider } from '../llm/membrane/index.js'
-// Use any for Membrane type to avoid version mismatch issues between 
+import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
+// Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
 type Membrane = any
 
@@ -53,6 +55,9 @@ export class AgentLoop {
   // Membrane integration (optional)
   private membraneProvider?: MembraneProvider
 
+  // TTS relay integration (optional)
+  private ttsRelayClient?: TTSRelayClient
+
   constructor(
     private botId: string,
     private queue: EventQueue,
@@ -60,6 +65,7 @@ export class AgentLoop {
     private stateManager: ChannelStateManager,
     private configSystem: ConfigSystem,
     private contextBuilder: ContextBuilder,
+    private llmMiddleware: LLMMiddleware,
     private toolSystem: ToolSystem,
     cacheDir: string = './cache'
   ) {
@@ -82,6 +88,75 @@ export class AgentLoop {
   setMembrane(membrane: Membrane): void {
     this.membraneProvider = new MembraneProvider(membrane, this.botId)
     logger.info({ botId: this.botId }, 'Membrane provider set')
+  }
+
+  /**
+   * Set up TTS relay client for streaming text to local TTS clients.
+   * Requires membrane to be enabled for streaming support.
+   */
+  async setTTSRelay(config: {
+    url: string
+    token: string
+    reconnectIntervalMs?: number
+  }): Promise<void> {
+    if (this.ttsRelayClient) {
+      this.ttsRelayClient.disconnect()
+    }
+
+    this.ttsRelayClient = new TTSRelayClient({
+      url: config.url,
+      botId: this.botId,
+      token: config.token,
+      reconnectIntervalMs: config.reconnectIntervalMs,
+    })
+
+    // Set up interruption handler
+    this.ttsRelayClient.onInterruption((event: InterruptionEvent) => {
+      this.handleTTSInterruption(event)
+    })
+
+    await this.ttsRelayClient.connect()
+    logger.info({ botId: this.botId, url: config.url }, 'TTS relay connected')
+  }
+
+  /**
+   * Handle interruption events from TTS clients.
+   * The spokenText is used to identify which message to edit - we find the recent
+   * message in the channel that starts with the spoken text and truncate it.
+   */
+  private async handleTTSInterruption(event: InterruptionEvent): Promise<void> {
+    const spokenText = event.spokenText.trim()
+
+    logger.info(
+      {
+        botId: this.botId,
+        channelId: event.channelId,
+        reason: event.reason,
+        spokenLength: spokenText.length,
+      },
+      'TTS interruption received'
+    )
+
+    // Abort the stream and record the interrupted text
+    if (this.ttsStreamContext && this.ttsStreamContext.channelId === event.channelId) {
+      this.ttsStreamContext.interruptedText = spokenText
+      this.ttsStreamContext.abortController.abort()
+      logger.info(
+        { channelId: event.channelId, spokenLength: spokenText.length },
+        'Aborted stream - will post interrupted text'
+      )
+    }
+  }
+
+  /**
+   * Disconnect TTS relay client
+   */
+  disconnectTTSRelay(): void {
+    if (this.ttsRelayClient) {
+      this.ttsRelayClient.disconnect()
+      this.ttsRelayClient = undefined
+      logger.info({ botId: this.botId }, 'TTS relay disconnected')
+    }
   }
 
   /**
@@ -209,12 +284,29 @@ export class AgentLoop {
     return segments
   }
   
-  // NOTE: extractAllInvisible() removed - only used by legacy finalizeInlineExecution
-
+  /**
+   * Extract ALL invisible content from a chunk, preserving order.
+   * This is a compatibility helper - prefer parseIntoSegments for proper segment-based sending.
+   */
+  private extractAllInvisible(fullChunk: string): string {
+    const segments = this.parseIntoSegments(fullChunk)
+    
+    // Collect all prefixes and the suffix
+    let allInvisible = ''
+    for (const seg of segments) {
+      allInvisible += seg.prefix
+    }
+    // Add suffix from last segment if present
+    if (segments.length > 0 && segments[segments.length - 1]!.suffix) {
+      allInvisible += segments[segments.length - 1]!.suffix
+    }
+    
+    return allInvisible
+  }
+  
   /**
    * Truncate segments at a given position in the combined visible text.
    * Returns segments up to (and including partial) that position.
-   * Used for mid-response hallucination truncation.
    */
   private truncateSegmentsAtPosition(segments: ContentSegment[], position: number): ContentSegment[] {
     const result: ContentSegment[] = []
@@ -244,7 +336,7 @@ export class AgentLoop {
     
     return result
   }
-
+  
   /**
    * Send segments to Discord, preserving invisible content associations.
    * Each segment's visible text is sent as a Discord message (may be chunked if >2000 chars).
@@ -1370,15 +1462,9 @@ export class AgentLoop {
         imagesFetched: discordContext.images.length,
       }, '⏱️  PROFILING: Pre-LLM phase timings (ms)')
 
-      // 6. Call LLM (with inline tool execution via membrane)
-      // Membrane handles all tool parsing, continuation, false-positive detection
+      // 6. Call LLM (with inline tool execution)
       startProfile('llmCall')
       
-      if (!this.membraneProvider) {
-        throw new Error('Membrane provider required for tool execution. Ensure setMembrane() was called.')
-      }
-      
-      logger.debug({ model: contextResult.request.config?.model }, 'Using membrane tool loop')
       const { 
         completion, 
         toolCallIds, 
@@ -1386,13 +1472,13 @@ export class AgentLoop {
         fullCompletionText,
         sentMessageIds: inlineSentMessageIds,
         messageContexts: inlineMessageContexts
-      } = await this.executeWithMembraneTools(
-        contextResult.request,
-        config,
+      } = await this.executeWithInlineTools(
+        contextResult.request, 
+        config, 
         channelId,
         triggeringMessageId || '',
         activation?.id,
-        discordContext.messages
+        discordContext.messages  // For post-hoc participant truncation
       )
       endProfile('llmCall')
 
@@ -1624,53 +1710,398 @@ export class AgentLoop {
     }
   }
 
-  // ============================================================================
-  // DEPRECATED CODE REMOVED
-  // The following methods were excised as part of membrane tool use migration:
-  // - completeLLM() - membrane.stream() handles LLM calls directly
-  // - completeLLMWithShadow() - shadow mode validation no longer needed  
-  // - logShadowComparison() - shadow mode helper
-  // - extractTextFromCompletion() - shadow mode helper
-  // - calculateSimilarity() - shadow mode helper
-  // - executeWithInlineTools() - replaced by executeWithMembraneTools()
-  // - FUNC_CALLS_CLOSE constant - membrane handles stop sequences
-  // ============================================================================
-
-  // ============================================================================
-  // LEGACY TOOL EXECUTION CODE REMOVED
-  // ============================================================================
-  // Methods excised as part of membrane tool use migration:
-  // - completeLLM(), completeLLMWithShadow(), logShadowComparison()
-  // - FUNC_CALLS_CLOSE constant, executeWithInlineTools(), finalizeInlineExecution()
-  // - buildInlineContinuationRequest(), wasThinkingPrefilled(), detectUnclosedXmlTag()
-  // - continueCompletionAfterStopSequence(), extractAllInvisible(), truncateSegmentsAtPosition()
-  //
-  // Membrane now handles: tool parsing, false-positive detection, continuation,
-  // and result injection via its streaming API with onToolCalls callback.
-  // ============================================================================
+  /**
+   * Context for TTS streaming - passed to completeLLM when we want to stream to TTS
+   */
+  private ttsStreamContext?: {
+    channelId: string
+    userId: string
+    username: string
+    abortController: AbortController
+    interruptedText?: string  // If set, stream was interrupted - use this as the response
+  }
 
   /**
-   * Execute with membrane's tool loop.
-   * 
-   * This method uses membrane's streaming with onToolCalls callback to handle
-   * the tool execution loop. Membrane handles:
-   * - XML tool parsing
-   * - False-positive stop sequence detection
-   * - Tool result injection
-   * - Continuation management
-   * 
-   * ChapterX handles:
-   * - Tool execution (MCP plugins, system tools)
-   * - Discord progressive sending
-   * - Tool result persistence
+   * Make an LLM completion request, routing to membrane if enabled
+   *
+   * This is the main routing point for the membrane integration.
+   *
+   * Modes:
+   * - use_membrane: false → old middleware only
+   * - use_membrane: true → membrane only
+   * - membrane_shadow_mode: true → run both, log differences, use old result
+   * - membrane_shadow_mode: true + use_membrane: true → run both, use membrane result
+   *
+   * When TTS relay is connected and ttsStreamContext is set, streams chunks
+   * to the relay for real-time text-to-speech.
    */
-  private async executeWithMembraneTools(
+  private async completeLLM(request: any, config: BotConfig): Promise<any> {
+    // Shadow mode: run both paths and compare
+    if (config.membrane_shadow_mode && this.membraneProvider) {
+      return this.completeLLMWithShadow(request, config)
+    }
+
+    // Check if we should stream to TTS
+    const shouldStreamToTTS =
+      config.use_membrane &&
+      this.membraneProvider &&
+      config.tts_relay?.enabled &&
+      this.ttsRelayClient?.isConnected() &&
+      this.ttsStreamContext
+
+    // Stream mode: use membrane.stream() with TTS callbacks
+    if (shouldStreamToTTS) {
+      logger.debug({ model: request.config?.model }, 'Using membrane stream for LLM with TTS')
+      return this.completeLLMWithTTSStream(request, config)
+    }
+
+    // Normal mode: route based on use_membrane flag
+    if (config.use_membrane && this.membraneProvider) {
+      logger.debug({ model: request.config?.model }, 'Using membrane for LLM completion')
+      return this.membraneProvider.completeFromLLMRequest(request)
+    }
+
+    // Fall back to built-in middleware
+    return this.llmMiddleware.complete(request)
+  }
+
+  /**
+   * Complete LLM request with streaming to TTS relay
+   */
+  private async completeLLMWithTTSStream(request: any, _config: BotConfig): Promise<any> {
+    const ctx = this.ttsStreamContext!
+    const relay = this.ttsRelayClient!
+
+    try {
+      const result = await this.membraneProvider!.stream(request, {
+        signal: ctx.abortController.signal,
+        onChunk: (text, meta) => {
+          // Log with explicit visibility tracking for debugging thinking detection
+          const blockType = meta?.type ?? 'text'
+          const visible = meta?.visible ?? true
+          logger.info({
+            textPreview: text.substring(0, 80),
+            blockIndex: meta?.blockIndex,
+            blockType,
+            visible,
+            hasThinkingTag: text.includes('<thinking>') || text.includes('</thinking>'),
+          }, `TTS chunk: type=${blockType} visible=${visible}`)
+
+          relay.sendChunk({
+            channelId: ctx.channelId,
+            userId: ctx.userId,
+            username: ctx.username,
+            text,
+            blockIndex: meta?.blockIndex ?? 0,
+            blockType,
+            visible,
+          })
+        },
+        onBlock: (event) => {
+          // Log block events to see if thinking blocks are separate
+          // Note: membrane BlockEvent uses event.index and event.block.type/content
+          const blockIndex = event?.index ?? 0
+          const blockType = event?.block?.type ?? 'text'
+          // content only exists on block_complete events
+          const blockContent = (event?.block as any)?.content ?? ''
+
+          logger.info({
+            eventType: event?.event,
+            blockIndex,
+            blockType,
+            contentPreview: blockContent.substring(0, 80),
+          }, `TTS block: ${event?.event} type=${blockType}`)
+
+          if (event?.event === 'block_start') {
+            relay.sendBlockStart({
+              channelId: ctx.channelId,
+              userId: ctx.userId,
+              username: ctx.username,
+              blockIndex,
+              blockType,
+            })
+          } else if (event?.event === 'block_complete') {
+            relay.sendBlockComplete({
+              channelId: ctx.channelId,
+              userId: ctx.userId,
+              username: ctx.username,
+              blockIndex,
+              blockType,
+              content: blockContent,
+            })
+          }
+        },
+        // Execute tools and record to trace
+        onToolCalls: async (calls, _context) => {
+          const results: Array<{ toolUseId: string; content: string; isError?: boolean }> = []
+
+          for (const call of calls) {
+            const toolStartTime = Date.now()
+            // Convert membrane's call format to ChapterX's ToolCall type
+            const cxCall: ToolCall = {
+              id: call.id,
+              name: call.name,
+              input: call.input as Record<string, any>,
+              messageId: '', // Not available in TTS stream context
+              timestamp: new Date(),
+              originalCompletionText: _context.accumulated || '',
+            }
+            const result = await this.toolSystem.executeTool(cxCall)
+            const toolDurationMs = Date.now() - toolStartTime
+
+            // Format output string
+            const outputStr = typeof result.output === 'string'
+              ? result.output
+              : JSON.stringify(result.output)
+
+            // Build result content
+            let content: string
+            let isError = false
+            if (result.error) {
+              content = `Error executing ${call.name}: ${result.error}`
+              isError = true
+            } else {
+              content = outputStr
+              // Note: image handling for TTS mode could be added here if needed
+            }
+
+            // Record to trace
+            const traceOutput = result.error
+              ? `[ERROR] ${result.error}`
+              : (outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr)
+            traceToolExecution({
+              toolCallId: call.id,
+              toolName: call.name,
+              input: call.input,
+              output: traceOutput,
+              outputTruncated: !result.error && outputStr.length > 1000,
+              fullOutputLength: result.error ? traceOutput.length : outputStr.length,
+              durationMs: toolDurationMs,
+              sentToDiscord: false, // TTS mode doesn't send tool output to Discord
+              error: result.error ? String(result.error) : undefined,
+              imageCount: result.images?.length,
+            })
+
+            logger.debug({
+              toolName: call.name,
+              durationMs: toolDurationMs,
+              hasError: !!result.error,
+              outputLength: outputStr.length,
+            }, 'TTS stream tool executed')
+
+            results.push({
+              toolUseId: call.id,
+              content,
+              isError,
+            })
+          }
+
+          return results
+        },
+      })
+
+      // Log final result to see content block types
+      logger.info({
+        contentBlockCount: result?.content?.length,
+        contentBlockTypes: result?.content?.map((b: any) => b.type),
+        stopReason: result?.stopReason,
+      }, 'TTS stream complete - membrane result summary')
+
+      return result
+    } catch (error: any) {
+      // Check if this was an abort due to TTS interruption
+      if (ctx.interruptedText && (error.name === 'AbortError' || ctx.abortController.signal.aborted)) {
+        logger.info(
+          { channelId: ctx.channelId, textLength: ctx.interruptedText.length },
+          'Stream aborted due to TTS interruption, using interrupted text'
+        )
+        // Return a synthetic completion with just the interrupted text
+        // Format matches what fromMembraneResponse returns
+        return {
+          content: [{ type: 'text', text: ctx.interruptedText }],
+          stopReason: 'interrupted',
+          usage: { inputTokens: 0, outputTokens: 0 },
+          model: 'interrupted',
+        }
+      }
+      throw error
+    }
+  }
+  
+  /**
+   * Shadow mode: run both old middleware and membrane, log differences
+   * 
+   * Useful for validation - ensures parity between old and new paths
+   * before fully switching to membrane.
+   */
+  private async completeLLMWithShadow(request: any, config: BotConfig): Promise<any> {
+    const model = request.config?.model || 'unknown'
+    
+    // Run old middleware
+    const oldStart = Date.now()
+    let oldResult: any
+    let oldError: Error | null = null
+    try {
+      oldResult = await this.llmMiddleware.complete(request)
+    } catch (err) {
+      oldError = err instanceof Error ? err : new Error(String(err))
+    }
+    const oldDuration = Date.now() - oldStart
+    
+    // Run membrane
+    const newStart = Date.now()
+    let newResult: any
+    let newError: Error | null = null
+    try {
+      newResult = await this.membraneProvider!.completeFromLLMRequest(request)
+    } catch (err) {
+      newError = err instanceof Error ? err : new Error(String(err))
+    }
+    const newDuration = Date.now() - newStart
+    
+    // Compare and log differences
+    this.logShadowComparison({
+      model,
+      oldResult,
+      newResult,
+      oldError,
+      newError,
+      oldDuration,
+      newDuration,
+    })
+    
+    // Return based on use_membrane preference
+    if (config.use_membrane) {
+      if (newError) throw newError
+      return newResult
+    } else {
+      if (oldError) throw oldError
+      return oldResult
+    }
+  }
+  
+  /**
+   * Log comparison between old middleware and membrane results
+   */
+  private logShadowComparison(data: {
+    model: string
+    oldResult: any
+    newResult: any
+    oldError: Error | null
+    newError: Error | null
+    oldDuration: number
+    newDuration: number
+  }): void {
+    const { model, oldResult, newResult, oldError, newError, oldDuration, newDuration } = data
+    const differences: string[] = []
+    
+    // Check for error mismatch
+    if (oldError && !newError) {
+      differences.push(`OLD errored but NEW succeeded: ${oldError.message}`)
+    } else if (!oldError && newError) {
+      differences.push(`NEW errored but OLD succeeded: ${newError.message}`)
+    } else if (oldError && newError) {
+      if (oldError.message !== newError.message) {
+        differences.push(`Different errors: OLD="${oldError.message}", NEW="${newError.message}"`)
+      }
+    }
+    
+    // Compare results if both succeeded
+    if (oldResult && newResult) {
+      // Extract text content
+      const oldText = this.extractTextFromCompletion(oldResult)
+      const newText = this.extractTextFromCompletion(newResult)
+      
+      // Normalize for comparison (trim, collapse whitespace)
+      const oldNorm = oldText.trim().replace(/\s+/g, ' ')
+      const newNorm = newText.trim().replace(/\s+/g, ' ')
+      
+      if (oldNorm !== newNorm) {
+        const similarity = this.calculateSimilarity(oldNorm, newNorm)
+        differences.push(`Text differs (${(similarity * 100).toFixed(1)}% similar)`)
+      }
+      
+      // Compare stop reason
+      if (oldResult.stopReason !== newResult.stopReason) {
+        differences.push(`Stop reason: OLD=${oldResult.stopReason}, NEW=${newResult.stopReason}`)
+      }
+      
+      // Compare token counts
+      const oldTokens = (oldResult.usage?.inputTokens || 0) + (oldResult.usage?.outputTokens || 0)
+      const newTokens = (newResult.usage?.inputTokens || 0) + (newResult.usage?.outputTokens || 0)
+      const tokenDiff = Math.abs(oldTokens - newTokens)
+      if (tokenDiff > 10) {
+        differences.push(`Tokens: OLD=${oldTokens}, NEW=${newTokens} (diff=${tokenDiff})`)
+      }
+    }
+    
+    // Log comparison
+    if (differences.length > 0) {
+      logger.warn({
+        model,
+        differences,
+        oldDuration,
+        newDuration,
+        durationDiff: newDuration - oldDuration,
+      }, 'Membrane shadow mode: differences detected')
+    } else {
+      logger.debug({
+        model,
+        oldDuration,
+        newDuration,
+        durationDiff: newDuration - oldDuration,
+      }, 'Membrane shadow mode: results match')
+    }
+  }
+  
+  /**
+   * Extract text content from completion result
+   */
+  private extractTextFromCompletion(result: any): string {
+    if (!result?.content) return ''
+    return result.content
+      .filter((c: any) => c.type === 'text')
+      .map((c: any) => c.text || '')
+      .join('')
+  }
+  
+  /**
+   * Calculate rough similarity between two strings (0-1)
+   */
+  private calculateSimilarity(a: string, b: string): number {
+    if (a === b) return 1
+    if (!a || !b) return 0
+    
+    // Use character-level Jaccard similarity as quick approximation
+    const setA = new Set(a.split(''))
+    const setB = new Set(b.split(''))
+    const intersection = new Set([...setA].filter(x => setB.has(x)))
+    const union = new Set([...setA, ...setB])
+    return intersection.size / union.size
+  }
+  
+  /**
+   * Execute with inline tool injection (Anthropic style)
+   * 
+   * Instead of making separate LLM calls for each tool use, this method:
+   * 1. Detects tool calls in the completion stream
+   * 2. Executes the tool immediately
+   * 3. Injects the result into the assistant's output
+   * 4. Continues the completion from there
+   * 
+   * This saves tokens by avoiding context re-sends and preserves the bot's
+   * "train of thought" across tool uses.
+   */
+  // Stop sequence for inline tool execution (assembled to avoid stop sequence in source)
+  private static readonly FUNC_CALLS_CLOSE = '</' + 'function_calls>'
+
+  private async executeWithInlineTools(
     llmRequest: any,
     config: BotConfig,
     channelId: string,
     triggeringMessageId: string,
     _activationId?: string,
-    discordMessages?: DiscordMessage[]
+    discordMessages?: DiscordMessage[]  // For post-hoc participant truncation
   ): Promise<{ 
     completion: any; 
     toolCallIds: string[]; 
@@ -1679,139 +2110,289 @@ export class AgentLoop {
     sentMessageIds: string[];
     messageContexts: Record<string, MessageContext>;
   }> {
-    if (!this.membraneProvider) {
-      throw new Error('Membrane provider not configured but executeWithMembraneTools called')
-    }
-    
+    let accumulatedOutput = ''
+    let toolDepth = 0
     const allToolCallIds: string[] = []
     const allPreambleMessageIds: string[] = []
     const allSentMessageIds: string[] = []
     const messageContexts: Record<string, MessageContext> = {}
+    const maxToolDepth = config.max_tool_depth
     const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
     
-    // Track accumulated visible content for progressive display
-    let currentChunkBuffer = ''
-    
-    // Track MCP tool result images for plugin context
+    // Track MCP tool result images for injection into continuation requests
+    // These accumulate across tool iterations so the model can see all images
     let pendingToolImages: Array<{ toolName: string; images: Array<{ data: string; mimeType: string }> }> = []
     
-    /**
-     * Send buffered content to Discord
-     */
-    const flushToDiscord = async (forceFlush: boolean = false) => {
-      // Parse buffer into segments and send visible content
-      if (!currentChunkBuffer) return
-      
-      // Only flush if we have significant content or are forcing
-      let segments = this.parseIntoSegments(currentChunkBuffer)
-      const visibleText = segments.map(s => s.visible).join('')
-      
-      // Flush when we have enough visible content or on force
-      if (forceFlush || visibleText.length > 50) {
-        if (segments.length > 0 && segments.some(s => s.visible.trim())) {
-          // Check for hallucinated participant in visible text
-          if (discordMessages) {
-            const truncResult = this.truncateAtParticipant(
-              visibleText,
-              discordMessages,
-              this.connector.getBotUsername() || config.name,
-              llmRequest.stop_sequences
-            )
-            if (truncResult.truncatedAt?.startsWith('start_hallucination:')) {
-              // Complete hallucination - don't send anything
-              logger.warn({ truncatedAt: truncResult.truncatedAt }, 'Detected hallucination in membrane output')
-              return
-            }
-            // Handle mid-response hallucination - truncate segments
-            if (truncResult.truncatedAt) {
-              logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncating output at participant hallucination')
-              segments = this.truncateSegmentsAtPosition(segments, truncResult.text.length)
-            }
-          }
-          
-          // Replace <@username> with <@USER_ID> for Discord mentions in segments
-          if (discordMessages) {
-            for (const segment of segments) {
-              segment.visible = await this.replaceMentions(segment.visible, discordMessages)
-            }
-          }
-          
-          const sendResult = await this.sendSegments(
-            channelId,
-            segments,
-            allSentMessageIds.length === 0 ? triggeringMessageId : undefined
-          )
-          allSentMessageIds.push(...sendResult.sentMessageIds)
-          
-          // Merge contexts
-          for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
-            messageContexts[msgId] = ctx
-          }
-        }
-        
-        // Reset buffer after flush
-        currentChunkBuffer = ''
+    // Check if thinking was actually prefilled (not in continuation mode)
+    const thinkingWasPrefilled = this.wasThinkingPrefilled(llmRequest, config)
+    
+    // Track context position for each message
+    // Each sent message will get a context chunk from contextStartPos to contextEndPos
+    let lastContextEndPos = 0
+    
+    // Keep track of the base request (without accumulated output)
+    // Add </function_calls> as stop sequence so we can intercept and execute tools
+    const baseRequest = {
+      ...llmRequest,
+      stop_sequences: [
+        ...(llmRequest.stop_sequences || []),
+        AgentLoop.FUNC_CALLS_CLOSE
+      ]
+    }
+
+    // Set up TTS streaming context if relay is enabled and connected
+    if (config.tts_relay?.enabled && this.ttsRelayClient?.isConnected() && this.botUserId) {
+      this.ttsStreamContext = {
+        channelId,
+        userId: this.botUserId,
+        username: config.name,
+        abortController: new AbortController(),
       }
     }
-    
-    /**
-     * onChunk callback - accumulate chunks for progressive display
-     */
-    const onChunk = (chunk: string) => {
-      currentChunkBuffer += chunk
-      // We'll flush in onPreToolContent or at the end
-    }
-    
-    /**
-     * onPreToolContent callback - send visible content before tool execution
-     */
-    const onPreToolContent = async (text: string) => {
-      // Parse and send any visible content before tool calls
-      await flushToDiscord(true)
+
+    while (toolDepth < maxToolDepth) {
+      // Build continuation request with accumulated output as prefill
+      // Include any MCP tool result images so the model can see them
+      const continuationRequest = this.buildInlineContinuationRequest(
+        baseRequest, 
+        accumulatedOutput,
+        config,
+        pendingToolImages.length > 0 ? pendingToolImages : undefined
+      )
       
-      logger.debug({ textLength: text.length }, 'Flushed pre-tool content to Discord')
-    }
-    
-    /**
-     * onToolCalls callback - execute tools and return results
-     */
-    const onToolCalls = async (
-      calls: Array<{ id: string; name: string; input: Record<string, unknown> }>,
-      context: { depth: number; accumulated: string; previousResults: Array<{ toolUseId: string; content: string | any[]; isError?: boolean }> }
-    ): Promise<Array<{ toolUseId: string; content: string | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; data: string; mediaType: string } }>; isError?: boolean }>> => {
+      // Get completion (routes to membrane if config.use_membrane is true)
+      let completion = await this.completeLLM(continuationRequest, config)
       
-      logger.debug({ toolCount: calls.length, depth: context.depth }, 'Membrane tool calls callback')
+      // Handle stop sequence continuation - only if we're inside an unclosed tag
+      if (completion.stopReason === 'stop_sequence' && config.mode === 'prefill') {
+        const completionText = completion.content
+          .filter((c: any) => c.type === 'text')
+          .map((c: any) => c.text)
+          .join('')
+        
+        const triggeredStopSequence = completion.raw?.stop_sequence
+        
+        // Check if we're inside an unclosed <function_calls> block
+        // If so, the stop sequence might be inside a tool parameter (e.g., a username)
+        // and we should continue to complete the tool call
+        const funcCallsOpen = (completionText.match(/<function_calls>/g) || []).length
+        const funcCallsClose = (completionText.match(/<\/function_calls>/g) || []).length
+        const insideFunctionCalls = funcCallsOpen > funcCallsClose
+        
+        // Only continue past stop sequences if we're inside an unclosed function_calls block
+        // or if we have an unclosed thinking tag and stopped on </function_calls>
+        if (insideFunctionCalls && triggeredStopSequence && 
+            triggeredStopSequence !== AgentLoop.FUNC_CALLS_CLOSE) {
+          // Inside a tool call, participant name in parameter - continue
+          logger.debug({ triggeredStopSequence }, 'Stop sequence inside function_calls, continuing')
+          completion = await this.continueCompletionAfterStopSequence(
+            continuationRequest,
+            completion,
+            triggeredStopSequence,
+            config,
+            thinkingWasPrefilled
+          )
+        } else if (triggeredStopSequence === AgentLoop.FUNC_CALLS_CLOSE) {
+          // Check for unclosed thinking tag - need to continue
+          // Only assume thinking is open if it was actually prefilled (not in continuation mode)
+          let unclosedTag = this.detectUnclosedXmlTag(completionText)
+          if (!unclosedTag && thinkingWasPrefilled && !completionText.includes('</thinking>')) {
+            unclosedTag = 'thinking'
+          }
+          if (unclosedTag) {
+            completion = await this.continueCompletionAfterStopSequence(
+              continuationRequest,
+              completion,
+              triggeredStopSequence,
+              config,
+              thinkingWasPrefilled
+            )
+          }
+        }
+        // If stopped on participant name OUTSIDE function_calls, don't continue
+        // The check later will return early
+      }
       
-      const results: Array<{ toolUseId: string; content: string | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; data: string; mediaType: string } }>; isError?: boolean }> = []
+      // Prepend thinking tag if it was actually prefilled (non-membrane only)
+      // When using membrane, extended thinking API handles this and the adapter
+      // wraps thinking blocks in <thinking> tags, so we don't prepend here
+      if (thinkingWasPrefilled && accumulatedOutput === '' && !config.use_membrane) {
+        const firstTextBlock = completion.content.find((c: any) => c.type === 'text') as any
+        if (firstTextBlock?.text) {
+          firstTextBlock.text = '<thinking>' + firstTextBlock.text
+        }
+      }
       
-      for (const call of calls) {
-        // Convert to ChapterX ToolCall format
-        const cxCall: ToolCall = {
-          id: call.id,
-          name: call.name,
-          input: call.input as Record<string, any>,
-          messageId: triggeringMessageId,
-          timestamp: new Date(),
-          originalCompletionText: context.accumulated,
+      // Get new completion text
+      const newText = completion.content
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.text)
+        .join('')
+      
+      accumulatedOutput += newText
+      
+      // If we stopped on </function_calls>, append it back (stop sequence consumes the matched text)
+      if (completion.stopReason === 'stop_sequence' && 
+          completion.raw?.stop_sequence === AgentLoop.FUNC_CALLS_CLOSE) {
+        accumulatedOutput += AgentLoop.FUNC_CALLS_CLOSE
+      }
+      
+      // If we stopped on a participant name (not function_calls), check if we should exit
+      // Only exit if we're NOT inside an unclosed function_calls block
+      if (completion.stopReason === 'stop_sequence' && 
+          completion.raw?.stop_sequence !== AgentLoop.FUNC_CALLS_CLOSE) {
+        // Check if we're inside an unclosed function_calls block
+        const funcCallsOpen = (accumulatedOutput.match(/<function_calls>/g) || []).length
+        const funcCallsClose = (accumulatedOutput.match(/<\/function_calls>/g) || []).length
+        const insideFunctionCalls = funcCallsOpen > funcCallsClose
+        
+        if (!insideFunctionCalls) {
+          // Not inside a tool call - model was about to hallucinate, exit
+          logger.debug({ 
+            stopSequence: completion.raw?.stop_sequence 
+          }, 'Stopped on participant name outside function_calls, returning')
+          
+          return this.finalizeInlineExecution({
+            accumulatedOutput,
+            pendingToolPersistence,
+            allToolCallIds,
+            allPreambleMessageIds,
+            allSentMessageIds,
+            messageContexts,
+            lastContextEndPos,
+            channelId,
+            triggeringMessageId,
+            config,
+            llmRequest,
+            discordMessages,
+            stopReason: completion.stopReason,
+          })
+        }
+        // Inside function_calls - the stop sequence was in a parameter, continue
+        logger.debug({ 
+          stopSequence: completion.raw?.stop_sequence 
+        }, 'Stopped on participant name inside function_calls, continuing to parse')
+      }
+      
+      // Try to parse Anthropic-style tool calls
+      const toolParse = this.toolSystem.parseAnthropicToolCalls(accumulatedOutput)
+      
+      if (!toolParse || toolParse.calls.length === 0) {
+        // No tool calls - check if incomplete (still generating)
+        if (this.toolSystem.hasIncompleteToolCall(accumulatedOutput)) {
+          // Incomplete tool call - need to continue
+          // This shouldn't happen with non-streaming, but handle it
+          logger.warn('Incomplete tool call detected in non-streaming mode')
         }
         
+        // Done - finalize and return
+        return this.finalizeInlineExecution({
+          accumulatedOutput,
+          pendingToolPersistence,
+          allToolCallIds,
+          allPreambleMessageIds,
+          allSentMessageIds,
+          messageContexts,
+          lastContextEndPos,
+          channelId,
+          triggeringMessageId,
+          config,
+          llmRequest,
+          discordMessages,
+          stopReason: completion.stopReason,
+        })
+      }
+      
+      // Execute tools and collect results
+      logger.debug({ 
+        toolCount: toolParse.calls.length, 
+        toolDepth 
+      }, 'Executing inline tools')
+      
+      // PROGRESSIVE DISPLAY: Send visible text before tool calls, split at invisible boundaries
+      // Parse beforeText into segments (preserves invisible content associations)
+      let segments = this.parseIntoSegments(toolParse.beforeText)
+      let sentMsgIdsThisRound: string[] = []
+      
+      // Check for hallucinated participant in combined visible text
+      if (segments.length > 0 && discordMessages && toolDepth === 0) {
+        const fullVisibleText = segments.map(s => s.visible).join('')
+        const truncResult = this.truncateAtParticipant(
+          fullVisibleText, 
+          discordMessages, 
+          this.connector.getBotUsername() || config.name, 
+          llmRequest.stop_sequences
+        )
+        if (truncResult.truncatedAt?.startsWith('start_hallucination:')) {
+          // Response started with another participant - complete hallucination
+          logger.warn({ truncatedAt: truncResult.truncatedAt }, 'Aborting inline execution - response started with hallucinated participant')
+          return this.finalizeInlineExecution({
+            accumulatedOutput: '',  // Discard everything
+            pendingToolPersistence,
+            allToolCallIds,
+            allPreambleMessageIds,
+            allSentMessageIds,
+            messageContexts,
+            lastContextEndPos,
+            channelId,
+            triggeringMessageId,
+            config,
+            llmRequest,
+            discordMessages,
+            stopReason: 'hallucination',
+          })
+        }
+        // Apply truncation to segments if needed
+        if (truncResult.truncatedAt) {
+          logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncating pre-tool text at participant')
+          segments = this.truncateSegmentsAtPosition(segments, truncResult.text.length)
+        }
+      }
+      
+      if (segments.length > 0) {
+        // Send segments, preserving invisible content associations
+        const sendResult = await this.sendSegments(
+          channelId,
+          segments,
+          toolDepth === 0 ? triggeringMessageId : undefined  // Only reply on first message
+        )
+        sentMsgIdsThisRound = sendResult.sentMessageIds
+        allSentMessageIds.push(...sentMsgIdsThisRound)
+        
+        // Merge contexts
+        for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
+          messageContexts[msgId] = ctx
+        }
+        
+        logger.debug({ 
+          messageIds: sentMsgIdsThisRound, 
+          segmentCount: segments.length 
+        }, 'Sent pre-tool segments to Discord')
+      }
+      
+      const resultsTexts: string[] = []
+      
+      for (const call of toolParse.calls) {
+        // Set messageId for tool cache interleaving
+        call.messageId = triggeringMessageId
+        
         const toolStartTime = Date.now()
-        const result = await this.toolSystem.executeTool(cxCall)
+        const result = await this.toolSystem.executeTool(call)
         const toolDurationMs = Date.now() - toolStartTime
         
         allToolCallIds.push(call.id)
         
-        // Build result content
-        let resultContent: string | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; data: string; mediaType: string } }>
-        let resultText: string
+        // Collect result for injection
+        const outputStr = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
         
+        // Build result text - include note about images if present
+        let resultText = ''
         if (result.error) {
           resultText = `Error executing ${call.name}: ${result.error}`
-          resultContent = resultText
         } else {
-          resultText = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
-          
-          // If images were returned, build structured content for membrane
+          resultText = outputStr
+          // If images were returned, collect them for injection into next LLM call
+          // and append a text note so the model knows images are available
           if (result.images && result.images.length > 0) {
             // Collect images for LLM context injection
             pendingToolImages.push({
@@ -1820,53 +2401,42 @@ export class AgentLoop {
             })
             
             // Update plugin context with new visible images
+            // MCP images come first (newest), then discord images
             const mcpVisibleImages = pendingToolImages.flatMap(({ toolName, images }) =>
               images.map((img, i) => ({
-                index: 0,
+                index: 0, // Will be re-indexed below
                 source: 'mcp_tool' as const,
                 sourceDetail: toolName,
                 data: img.data,
                 mimeType: img.mimeType,
                 description: `result ${i + 1} from ${toolName}`,
               }))
-            ).reverse()
+            ).reverse() // Most recent tool results first
             
+            // Get existing discord images from context
             const existingContext = this.toolSystem.getPluginContext()
             const discordImages = (existingContext?.visibleImages || [])
               .filter(img => img.source === 'discord')
             
+            // Combine and re-index
             const allVisibleImages = [...mcpVisibleImages, ...discordImages]
               .map((img, i) => ({ ...img, index: i + 1 }))
             
             this.toolSystem.setPluginContext({ visibleImages: allVisibleImages })
             
-            // Build structured content with images for membrane
-            const contentBlocks: Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; data: string; mediaType: string } }> = [
-              { type: 'text', text: resultText }
-            ]
-            
-            for (const img of result.images) {
-              contentBlocks.push({
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  data: img.data,
-                  mediaType: img.mimeType,
-                },
-              })
-            }
-            
-            resultContent = contentBlocks
-          } else {
-            resultContent = resultText
+            // Append text note about the images
+            const imageNote = result.images.map((img, i) => 
+              `[Image ${i + 1}: ${img.mimeType}]`
+            ).join('\n')
+            resultText += '\n\n' + imageNote
           }
         }
+        resultsTexts.push(resultText)
         
-        // Store for persistence
-        pendingToolPersistence.push({ call: cxCall, result })
+        // Store for later persistence (with final accumulatedOutput)
+        pendingToolPersistence.push({ call, result })
         
-        // Record to trace
-        const outputStr = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
+        // Record to trace - use error message as output when there's an error
         const traceOutput = result.error 
           ? `[ERROR] ${result.error}` 
           : (outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr)
@@ -1906,57 +2476,159 @@ export class AgentLoop {
                   img.data,
                   img.mimeType,
                   `.${config.name}<[${call.name}] image ${i + 1}/${result.images.length}`,
-                  undefined
+                  undefined  // No reply
                 )
+                logger.debug({ toolName: call.name, imageIndex: i }, 'Sent MCP tool image to Discord')
               } catch (err) {
                 logger.warn({ err, toolName: call.name, imageIndex: i }, 'Failed to send MCP tool image to Discord')
               }
             }
           }
         }
-        
-        results.push({
-          toolUseId: call.id,
-          content: resultContent,
-          isError: !!result.error,
-        })
       }
       
-      return results
+      // Inject results after the function_calls block
+      const resultsText = resultsTexts.join('\n\n---\n\n')
+      const newAccumulated = toolParse.beforeText + toolParse.fullMatch + 
+        this.toolSystem.formatToolResultForInjection('', resultsText)
+      
+      // Context tracking is now handled by sendSegments - the segments already have their 
+      // prefixes tracked. The tool call + results become invisible content that will be 
+      // the prefix of the next visible segment (when model continues).
+      // Update lastContextEndPos to track where we've processed.
+      if (sentMsgIdsThisRound.length > 0) {
+        // We've sent segments from beforeText. The tool call + results are new invisible
+        // content that will be picked up as prefix in the next iteration.
+        lastContextEndPos = newAccumulated.length
+      }
+      
+      accumulatedOutput = newAccumulated
+      
+      // After injecting, we need to continue and get the model's response to the tool results
+      // This will either be: more tool calls, final text, or stop on participant
+      toolDepth++
+      
+      // Continue to next iteration to see what the model generates after seeing tool results
+      // The loop will exit when:
+      // 1. No more tool calls are found (model finished or stopped on participant)
+      // 2. Max tool depth reached
     }
     
-    // Stream with membrane's tool loop
-    const streamResult = await this.membraneProvider.stream(llmRequest, {
-      onChunk,
-      onPreToolContent,
-      onToolCalls,
-      maxToolDepth: config.max_tool_depth,
+    logger.warn('Reached max inline tool depth')
+    
+    return this.finalizeInlineExecution({
+      accumulatedOutput,
+      pendingToolPersistence,
+      allToolCallIds,
+      allPreambleMessageIds,
+      allSentMessageIds,
+      messageContexts,
+      lastContextEndPos,
+      channelId,
+      triggeringMessageId,
+      config,
+      llmRequest,
+      discordMessages,
+      suffix: '[Max tool depth reached]',
     })
+  }
+  
+  
+  /**
+   * Finalize inline tool execution - truncate, persist, send remaining text, and build result.
+   * This ensures trace always matches what was actually sent to Discord.
+   */
+  private async finalizeInlineExecution(params: {
+    accumulatedOutput: string;
+    pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }>;
+    allToolCallIds: string[];
+    allPreambleMessageIds: string[];
+    allSentMessageIds: string[];
+    messageContexts: Record<string, MessageContext>;
+    lastContextEndPos: number;
+    channelId: string;
+    triggeringMessageId: string;
+    config: BotConfig;
+    llmRequest: any;
+    discordMessages?: DiscordMessage[];
+    suffix?: string;  // e.g., '[Max tool depth reached]'
+    stopReason?: string;
+  }): Promise<{
+    completion: any;
+    toolCallIds: string[];
+    preambleMessageIds: string[];
+    fullCompletionText: string;
+    sentMessageIds: string[];
+    messageContexts: Record<string, MessageContext>;
+    actualSentText: string;  // For trace validation
+  }> {
+    let { accumulatedOutput } = params
+    const { 
+      pendingToolPersistence, allToolCallIds, allPreambleMessageIds, 
+      allSentMessageIds, messageContexts, lastContextEndPos,
+      channelId, triggeringMessageId, config, llmRequest, discordMessages,
+      suffix, stopReason
+    } = params
     
-    // Flush any remaining content to Discord
-    await flushToDiscord(true)
+    // 1. Get remaining output (after what was already sent)
+    const remainingOutput = accumulatedOutput.slice(lastContextEndPos)
     
-    // Handle abort case
-    if (streamResult.aborted) {
-      logger.warn({ reason: streamResult.abortReason }, 'Membrane stream was aborted')
-      // Still persist what we have
+    // 2. Truncate at participant names (on the remaining output, preserving invisible)
+    let truncatedRemaining = remainingOutput
+    if (discordMessages && remainingOutput) {
+      const truncResult = this.truncateAtParticipant(
+        remainingOutput, 
+        discordMessages, 
+        this.connector.getBotUsername() || config.name, 
+        llmRequest.stop_sequences
+      )
+      if (truncResult.truncatedAt) {
+        logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated inline output at participant')
+        truncatedRemaining = truncResult.text
+        // Also truncate accumulatedOutput for persistence
+        accumulatedOutput = accumulatedOutput.slice(0, lastContextEndPos) + truncatedRemaining
+      }
     }
     
-    // Get the full raw text from membrane
-    const fullCompletionText = streamResult.rawAssistantText
-    
-    // Persist all tool calls with the final accumulated output
+    // 3. Persist all pending tool uses with the final (truncated) accumulated output
     for (const { call, result } of pendingToolPersistence) {
-      call.originalCompletionText = fullCompletionText
+      call.originalCompletionText = accumulatedOutput
       await this.toolSystem.persistToolUse(this.botId, channelId, call, result)
     }
     
-    // Extract thinking content and post debug messages
-    const { stripped, content: thinkingContent } = this.stripThinkingBlocks(this.toolSystem.stripToolXml(fullCompletionText))
+    // 4. Parse remaining output into segments
+    const suffixText = suffix ? `\n${suffix}` : ''
+    let segments = this.parseIntoSegments(truncatedRemaining + suffixText)
+    
+    // 5. Replace <@username> with <@USER_ID> for Discord mentions in segments
+    if (discordMessages) {
+      for (const segment of segments) {
+        segment.visible = await this.replaceMentions(segment.visible, discordMessages)
+      }
+    }
+    
+    // 6. Strip <reply:@username> prefix from first segment if present
+    const replyPattern = /^\s*<reply:@[^>]+>\s*/
+    if (segments.length > 0 && replyPattern.test(segments[0]!.visible)) {
+      segments[0]!.visible = segments[0]!.visible.replace(replyPattern, '').trim()
+      // Remove segment if it became empty
+      if (!segments[0]!.visible) {
+        // Move prefix to next segment or track as orphaned
+        if (segments.length > 1) {
+          segments[1]!.prefix = segments[0]!.prefix + segments[1]!.prefix
+        }
+        segments.shift()
+      }
+    }
+    
+    // 7. Extract thinking content and post debug messages BEFORE the visible response
+    const { stripped, content: thinkingContent } = this.stripThinkingBlocks(this.toolSystem.stripToolXml(accumulatedOutput))
     if (config.debug_thinking && thinkingContent.length > 0) {
       for (const thinking of thinkingContent) {
         if (thinking.trim()) {
           try {
+            // If thinking is short enough, post as dot-prefixed message
+            // Otherwise, post as text file attachment
             if (thinking.length <= 1900) {
               await this.connector.sendMessage(channelId, `.💭 ${thinking}`)
             } else {
@@ -1973,29 +2645,360 @@ export class AgentLoop {
       }
     }
     
-    // Build final completion for return
-    // Replace mentions in display text
+    // 8. Send segments to Discord
+    let actualSentText = ''
+    if (segments.length > 0) {
+      const sendResult = await this.sendSegments(
+        channelId, 
+        segments, 
+        allSentMessageIds.length === 0 ? triggeringMessageId : undefined
+      )
+      allSentMessageIds.push(...sendResult.sentMessageIds)
+      
+      // Merge contexts
+      for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
+        messageContexts[msgId] = ctx
+      }
+      
+      actualSentText = segments.map(s => s.visible).join('')
+    }
+    
+    // 9. Handle phantom invisible (only invisible content, no visible)
+    // This happens when the model outputs only thinking/tool results at the end
+    const allInvisible = this.extractAllInvisible(truncatedRemaining)
+    if (!segments.length && allInvisible && allSentMessageIds.length > 0) {
+      // Attach invisible as suffix to last sent message
+      const lastMsgId = allSentMessageIds[allSentMessageIds.length - 1]!
+      const existing = messageContexts[lastMsgId]
+      messageContexts[lastMsgId] = {
+        prefix: existing?.prefix ?? '',
+        suffix: (existing?.suffix || '') + allInvisible
+      }
+    }
+    
+    // 10. Calculate full display text for trace
     let displayText = stripped
     if (discordMessages) {
       displayText = await this.replaceMentions(displayText, discordMessages)
     }
     
+    // 11. Build final completion text for trace
+    const fullCompletionText = accumulatedOutput + suffixText
+
+    // Clean up TTS streaming context
+    this.ttsStreamContext = undefined
+
     return {
       completion: {
-        content: [{ type: 'text', text: displayText }],
-        stopReason: streamResult.completion.stopReason,
-        usage: streamResult.completion.usage,
-        model: streamResult.completion.model,
-        raw: streamResult.completion.raw,
+        content: [{ type: 'text', text: displayText + suffixText }],
+        stopReason: (stopReason || 'end_turn') as any,
+        usage: { inputTokens: 0, outputTokens: 0 },
+        model: '',
       },
       toolCallIds: allToolCallIds,
       preambleMessageIds: allPreambleMessageIds,
       fullCompletionText,
       sentMessageIds: allSentMessageIds,
       messageContexts,
+      actualSentText,
     }
   }
+  
+  /**
+   * Build a continuation request with accumulated output as prefill
+   * Also handles MCP tool result images - these need to be added as user turns
+   * since Anthropic only allows images in user messages.
+   */
+  private buildInlineContinuationRequest(
+    baseRequest: any,
+    accumulatedOutput: string,
+    config: BotConfig,
+    toolResultImages?: Array<{ toolName: string; images: Array<{ data: string; mimeType: string }> }>
+  ): any {
+    if (!accumulatedOutput && (!toolResultImages || toolResultImages.length === 0)) {
+      return baseRequest
+    }
+    
+    // Trim trailing whitespace - Anthropic API rejects assistant prefill ending with whitespace
+    const trimmedOutput = accumulatedOutput.trimEnd()
+    
+    // Clone the request
+    const request = {
+      ...baseRequest,
+      messages: [...baseRequest.messages],
+    }
+    
+    // Find the last message (should be empty bot message for completion)
+    const lastMsgIndex = request.messages.length - 1
+    const lastMsg = request.messages[lastMsgIndex]
+    // Bot's participant name in LLM context is always config.name
+    
+    if (lastMsg && lastMsg.participant === config.name) {
+      // Replace the last empty message with accumulated output
+      request.messages[lastMsgIndex] = {
+        ...lastMsg,
+        content: [{ type: 'text', text: trimmedOutput }],
+      }
+    } else if (trimmedOutput) {
+      // Add accumulated output as new message
+      request.messages.push({
+        participant: config.name,
+        content: [{ type: 'text', text: trimmedOutput }],
+      })
+    }
+    
+    // Add tool result images as user turn messages
+    // These need to be inserted BEFORE the bot's continuation so the model can see them
+    // The middleware will handle converting these to proper user turns with images
+    if (toolResultImages && toolResultImages.length > 0) {
+      const imageMessages: any[] = []
+      
+      for (const { toolName, images } of toolResultImages) {
+        if (images.length === 0) continue
+        
+        // Create image content blocks
+        const imageContent: any[] = [
+          { type: 'text', text: `[Tool result images from ${toolName}]` }
+        ]
+        
+        for (const img of images) {
+          imageContent.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              data: img.data,
+              media_type: img.mimeType,
+            },
+          })
+        }
+        
+        imageMessages.push({
+          participant: `System<[${toolName}]`,
+          content: imageContent,
+        })
+      }
+      
+      if (imageMessages.length > 0) {
+        // Insert image messages BEFORE the last (bot continuation) message
+        const insertIndex = request.messages.length - 1
+        request.messages.splice(insertIndex, 0, ...imageMessages)
+        
+        logger.debug({ 
+          imageMessageCount: imageMessages.length,
+          totalImages: toolResultImages.reduce((sum, t) => sum + t.images.length, 0)
+        }, 'Inserted MCP tool result images into continuation request')
+      }
+    }
+    
+    return request
+  }
 
+  /**
+   * Check if thinking was actually prefilled in the request.
+   * This must mirror the middleware's logic for determining continuation mode.
+   * 
+   * The middleware considers it a continuation if:
+   *   lastNonEmptyParticipant === botName || (prevIsBotMessage && !prevHasToolResult)
+   * 
+   * If it's a continuation, thinking is NOT prefilled.
+   */
+  private wasThinkingPrefilled(request: any, config: BotConfig): boolean {
+    // If prefill_thinking is disabled, thinking was never prefilled
+    if (!config.prefill_thinking) {
+      return false
+    }
+    
+    const messages = request.messages || []
+    if (messages.length === 0) {
+      return false
+    }
+    
+    const lastMsg = messages[messages.length - 1]
+    const botName = config.name
+    
+    // If last message is not from the bot, something is wrong
+    if (lastMsg.participant !== botName) {
+      return false
+    }
+    
+    // Check if last message has content
+    const lastContent = lastMsg.content || []
+    const lastHasContent = lastContent.some((c: any) => {
+      if (c.type === 'text') {
+        return c.text && c.text.trim().length > 0
+      }
+      return false
+    })
+    
+    const lastHasToolResult = lastContent.some((c: any) => c.type === 'tool_result')
+    
+    if (lastHasContent) {
+      // Last message already has content - thinking wasn't prefilled
+      return false
+    }
+    
+    // Last message is empty (completion placeholder).
+    // Mirror the middleware's continuation logic:
+    // isContinuation = isBotMessage && !hasToolResult && (lastNonEmptyParticipant === botName || (prevIsBotMessage && !prevHasToolResult))
+    
+    // Track lastNonEmptyParticipant like the middleware does
+    let lastNonEmptyParticipant: string | null = null
+    for (let i = 0; i < messages.length - 1; i++) {  // Exclude the last (empty) message
+      const msg = messages[i]
+      const content = msg.content || []
+      const hasContent = content.some((c: any) => {
+        if (c.type === 'text') return c.text && c.text.trim().length > 0
+        return false
+      })
+      const hasToolResult = content.some((c: any) => c.type === 'tool_result')
+      
+      if (hasContent && !hasToolResult) {
+        lastNonEmptyParticipant = msg.participant
+      }
+    }
+    
+    // Check previous message
+    const prevMsg = messages.length >= 2 ? messages[messages.length - 2] : null
+    const prevIsBotMessage = prevMsg && prevMsg.participant === botName
+    const prevContent = prevMsg?.content || []
+    const prevHasToolResult = prevContent.some((c: any) => c.type === 'tool_result')
+    
+    // Continuation if: lastNonEmptyParticipant was the bot OR prev message is from bot without tool result
+    const isContinuation = !lastHasToolResult && (
+      lastNonEmptyParticipant === botName ||
+      (prevIsBotMessage && !prevHasToolResult)
+    )
+    
+    // If it's a continuation, thinking was NOT prefilled
+    // If it's NOT a continuation, thinking WAS prefilled
+    return !isContinuation
+  }
+
+  /**
+   * Detect if there's an unclosed XML tag in the completion text.
+   * Checks for tool calls and thinking blocks.
+   * Returns the tag name if found, null otherwise.
+   */
+  private detectUnclosedXmlTag(text: string): string | null {
+    // Check for unclosed thinking tag first
+    const thinkingOpen = text.lastIndexOf('<thinking>')
+    const thinkingClose = text.lastIndexOf('</thinking>')
+    if (thinkingOpen !== -1 && thinkingOpen > thinkingClose) {
+      return 'thinking'
+    }
+    
+    // Check for unclosed tool call tags
+    const toolNames = this.toolSystem.getToolNames()
+    
+    for (const toolName of toolNames) {
+      const openTag = `<${toolName}>`
+      const closeTag = `</${toolName}>`
+      
+      const lastOpenIndex = text.lastIndexOf(openTag)
+      const lastCloseIndex = text.lastIndexOf(closeTag)
+      
+      // If there's an open tag after the last close tag (or no close tag), it's unclosed
+      if (lastOpenIndex !== -1 && lastOpenIndex > lastCloseIndex) {
+        return toolName
+      }
+    }
+    
+    return null
+  }
+
+  /**
+   * Continue a completion that was interrupted by a stop sequence mid-tool-call.
+   * Appends the stop sequence to the partial completion and continues.
+   */
+  private async continueCompletionAfterStopSequence(
+    originalRequest: any,
+    partialCompletion: any,
+    stopSequence: string,
+    config: BotConfig,
+    thinkingWasPrefilled: boolean = false,
+    maxContinuations: number = 5
+  ): Promise<any> {
+    let accumulatedText = partialCompletion.content
+      .filter((c: any) => c.type === 'text')
+      .map((c: any) => c.text)
+      .join('')
+    
+    let continuationCount = 0
+    let lastCompletion = partialCompletion
+    
+    while (continuationCount < maxContinuations) {
+      // Append the stop sequence that was triggered
+      accumulatedText += stopSequence
+      
+      // Create a continuation request with accumulated text as prefill
+      const continuationRequest = { ...originalRequest }
+      
+      // Find and update the last assistant message (the prefill)
+      const lastMessage = continuationRequest.messages[continuationRequest.messages.length - 1]
+      // Bot's participant name in LLM context is always config.name
+      if (lastMessage?.participant === config.name) {
+        // Append to existing prefill
+        const existingText = lastMessage.content
+          .filter((c: any) => c.type === 'text')
+          .map((c: any) => c.text)
+          .join('')
+        lastMessage.content = [{ type: 'text', text: existingText + accumulatedText }]
+      } else {
+        // Add new assistant message
+        continuationRequest.messages.push({
+          participant: config.name,
+          content: [{ type: 'text', text: accumulatedText }],
+        })
+      }
+      
+      logger.debug({ 
+        continuationCount: continuationCount + 1, 
+        accumulatedLength: accumulatedText.length,
+        stopSequence 
+      }, 'Continuing completion after stop sequence')
+      
+      const continuation = await this.completeLLM(continuationRequest, config)
+      
+      // Get continuation text
+      const continuationText = continuation.content
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.text)
+        .join('')
+      
+      accumulatedText += continuationText
+      lastCompletion = continuation
+      
+      // Check if we need to continue again
+      if (continuation.stopReason === 'stop_sequence') {
+        let unclosedTag = this.detectUnclosedXmlTag(accumulatedText)
+        // Only assume thinking is open if it was actually prefilled (not in continuation mode)
+        if (!unclosedTag && thinkingWasPrefilled && !accumulatedText.includes('</thinking>')) {
+          unclosedTag = 'thinking'
+        }
+        const newStopSequence = continuation.raw?.stop_sequence
+        
+        if (unclosedTag && newStopSequence) {
+          logger.debug({ unclosedTag, newStopSequence }, 'Still mid-XML-block, continuing again')
+          stopSequence = newStopSequence
+          continuationCount++
+          continue
+        }
+      }
+      
+      // Done continuing
+      break
+    }
+    
+    if (continuationCount >= maxContinuations) {
+      logger.warn({ maxContinuations }, 'Reached max continuations for stop sequence recovery')
+    }
+    
+    // Return a merged completion with accumulated text
+    return {
+      ...lastCompletion,
+      content: [{ type: 'text', text: accumulatedText }],
+    }
+  }
 
   /**
    * Truncate completion text if the model starts speaking as another participant.

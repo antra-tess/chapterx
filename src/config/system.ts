@@ -53,6 +53,32 @@ export class ConfigSystem {
   }
 
   /**
+   * Load bot-level config only (for startup initialization like TTS relay)
+   * This loads without guild/channel context - just shared + bot configs
+   */
+  loadBotConfigOnly(botName: string): Partial<BotConfig> & { tts_relay?: import('../types.js').TTSRelayConfig } {
+    const configs = [
+      this.loadSharedConfig(),
+      this.loadBotConfig(botName),
+    ]
+
+    // Simple merge (not full mergeConfigs which applies defaults)
+    const merged: any = {}
+    for (const config of configs) {
+      for (const [key, value] of Object.entries(config)) {
+        if (value === undefined || value === null) continue
+        if (typeof value === 'object' && !Array.isArray(value)) {
+          merged[key] = { ...(merged[key] || {}), ...value }
+        } else {
+          merged[key] = value
+        }
+      }
+    }
+
+    return merged
+  }
+
+  /**
    * Load vendors configuration for LLM providers
    * In EMS mode: <EMS_PATH>/config.yaml (vendors section)
    * In default mode: <CONFIG_PATH>/shared.yaml (vendors section)
@@ -287,6 +313,9 @@ export class ConfigSystem {
       use_membrane: config.use_membrane ?? false,
       membrane_shadow_mode: config.membrane_shadow_mode ?? false,
       participant_stop_sequences: config.participant_stop_sequences ?? false,  // Default: false (allows frags/quotes)
+
+      // TTS relay
+      tts_relay: config.tts_relay,
     }
   }
 

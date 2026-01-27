@@ -65,3 +65,5 @@ export type { SharedHookContext as TracingHookContext } from './hooks.js';
 // Provider - LLMProvider implementation
 export { MembraneProvider } from './provider.js';
 
+export type { StreamOptions, ChunkMeta, BlockEvent } from './provider.js';
+

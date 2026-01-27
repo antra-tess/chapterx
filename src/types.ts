@@ -234,6 +234,21 @@ export interface BotConfig {
   // When true, auto-generates stop sequences from participant names to prevent
   // the model from "speaking as" other users. Default: false (allows frags/quotes)
   participant_stop_sequences?: boolean
+
+  // TTS relay integration
+  // Connects to a WebSocket relay server to stream visible text chunks
+  // for text-to-speech playback in local clients
+  tts_relay?: TTSRelayConfig
+}
+
+/**
+ * TTS relay configuration for streaming text to local TTS clients
+ */
+export interface TTSRelayConfig {
+  enabled: boolean
+  url: string  // WebSocket URL (e.g., "ws://localhost:8800/bot")
+  token: string  // Authentication token
+  reconnect_interval_ms?: number  // Reconnect delay (default: 5000)
 }
 
 /**
