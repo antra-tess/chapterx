@@ -51,6 +51,21 @@ export interface BlockCompletePayload {
   content: string;
 }
 
+export interface ActivationPayload {
+  channelId: string;
+  userId: string;
+  username: string;
+}
+
+export type ActivationEndReason = 'complete' | 'abort' | 'error';
+
+export interface ActivationEndPayload {
+  channelId: string;
+  userId: string;
+  username: string;
+  reason: ActivationEndReason;
+}
+
 export interface InterruptionEvent {
   channelId: string;
   spokenText: string;       // The text that was voiced - match against recent messages
@@ -175,6 +190,48 @@ export class TTSRelayClient {
     };
 
     this.send(message);
+  }
+
+  /**
+   * Send activation_start event to the relay
+   * Called when bot begins processing a message (thinking animation/sound)
+   */
+  sendActivationStart(payload: ActivationPayload): void {
+    if (!this.isConnected()) {
+      logger.debug('Cannot send activation_start: not connected');
+      return;
+    }
+
+    const message = {
+      type: 'activation_start',
+      botId: this.config.botId,
+      ...payload,
+      timestamp: Date.now(),
+    };
+
+    this.send(message);
+    logger.debug({ channelId: payload.channelId }, 'Sent activation_start');
+  }
+
+  /**
+   * Send activation_end event to the relay
+   * Called when bot finishes processing (complete, abort, or error)
+   */
+  sendActivationEnd(payload: ActivationEndPayload): void {
+    if (!this.isConnected()) {
+      logger.debug('Cannot send activation_end: not connected');
+      return;
+    }
+
+    const message = {
+      type: 'activation_end',
+      botId: this.config.botId,
+      ...payload,
+      timestamp: Date.now(),
+    };
+
+    this.send(message);
+    logger.debug({ channelId: payload.channelId, reason: payload.reason }, 'Sent activation_end');
   }
 
   // ============================================================================
