@@ -141,6 +141,15 @@ export class AgentLoop {
     if (this.ttsStreamContext && this.ttsStreamContext.channelId === event.channelId) {
       this.ttsStreamContext.interruptedText = spokenText
       this.ttsStreamContext.abortController.abort()
+      // Notify relay that activation was aborted
+      if (this.ttsRelayClient?.isConnected()) {
+        this.ttsRelayClient.sendActivationEnd({
+          channelId: this.ttsStreamContext.channelId,
+          userId: this.ttsStreamContext.userId,
+          username: this.ttsStreamContext.username,
+          reason: 'abort',
+        })
+      }
       logger.info(
         { channelId: event.channelId, spokenLength: spokenText.length },
         'Aborted stream - will post interrupted text'
@@ -1700,12 +1709,23 @@ export class AgentLoop {
       logger.info({ channelId, tokens: completion.usage, didRoll: contextResult.didRoll }, 'Activation complete')
     } catch (error) {
       await this.connector.stopTyping(channelId)
-      
+
+      // Notify relay of error and clean up TTS context
+      if (this.ttsStreamContext && this.ttsRelayClient?.isConnected()) {
+        this.ttsRelayClient.sendActivationEnd({
+          channelId: this.ttsStreamContext.channelId,
+          userId: this.ttsStreamContext.userId,
+          username: this.ttsStreamContext.username,
+          reason: 'error',
+        })
+      }
+      this.ttsStreamContext = undefined
+
       // Record error to trace
       if (trace) {
         trace.recordError('llm_call', error instanceof Error ? error : new Error(String(error)))
       }
-      
+
       throw error
     }
   }
@@ -2148,6 +2168,12 @@ export class AgentLoop {
         username: config.name,
         abortController: new AbortController(),
       }
+      // Notify relay that activation is starting (for thinking animation/sound)
+      this.ttsRelayClient.sendActivationStart({
+        channelId,
+        userId: this.botUserId,
+        username: config.name,
+      })
     }
 
     while (toolDepth < maxToolDepth) {
@@ -2685,7 +2711,15 @@ export class AgentLoop {
     // 11. Build final completion text for trace
     const fullCompletionText = accumulatedOutput + suffixText
 
-    // Clean up TTS streaming context
+    // Clean up TTS streaming context and notify relay
+    if (this.ttsStreamContext && this.ttsRelayClient?.isConnected()) {
+      this.ttsRelayClient.sendActivationEnd({
+        channelId: this.ttsStreamContext.channelId,
+        userId: this.ttsStreamContext.userId,
+        username: this.ttsStreamContext.username,
+        reason: 'complete',
+      })
+    }
     this.ttsStreamContext = undefined
 
     return {
