@@ -586,15 +586,15 @@ export class DiscordConnector {
 
             if (historyRange === null) {
               // Empty .history - clear history BEFORE this point, keep messages AFTER
-              // Since we process newest→oldest, batchResults has NEWER messages (keep them!)
-              // Remaining messages in the loop are OLDER (discard them)
+              // Since we fetch newest→oldest, `results` has NEWER messages (keep them!)
+              // `batchResults` has messages OLDER than .history in current batch (discard)
               logger.debug({
                 resultsCount: results.length,
                 batchResultsCount: batchResults.length,
                 hadPendingNewerMessages: !!(this as any)[pendingKey],
               }, 'Empty .history command - keeping newer messages, discarding older')
               this.lastHistoryDidClear = true  // Signal to skip parent fetch for threads
-
+              
               // If we previously processed a .history range in this batch, the historical
               // messages it fetched are now in `results`. Since this .history clear is
               // NEWER than that range, we need to discard those historical messages too.
@@ -608,15 +608,13 @@ export class DiscordConnector {
                   restoredCount: results.length,
                 }, 'Restored newer messages after .history clear overrode earlier .history range')
               }
-
-              // Append newer messages from current batch to results before clearing
-              // These are messages we've already processed (newer than .history)
-              results.push(...batchResults)
+              
+              // Clear batchResults (older messages in current batch)
               batchResults.length = 0
               foundHistory = true
-
-              // Break - remaining messages in the loop are OLDER than .history (discard them)
-              break
+              
+              // Continue processing remaining messages in batch (newer than .history)
+              continue
             } else if (historyRange) {
               // Recursively fetch from history target
               const targetChannelId = this.extractChannelIdFromUrl(historyRange.last)
@@ -658,29 +656,32 @@ export class DiscordConnector {
 
                 // Mark that we found .history (stop after this batch)
                 foundHistory = true
-
-                // Save messages NEWER than .history:
-                // - results: from earlier/newer batches
-                // - batchResults: newer messages in current batch (we process newest→oldest)
-                const newerMessages = [...results, ...batchResults]
-
+                
+                // IMPORTANT: Save messages that are NEWER than this .history range:
+                // Only results (from earlier/newer batches) - NOT batchResults!
+                // batchResults contains messages BETWEEN the last .history clear and .history range,
+                // which are OLDER than the .history range and should be discarded if a later
+                // .history clear overrides this range.
+                const newerMessages = [...results]
+                
                 // Reset results with historical messages (oldest)
                 results.length = 0
                 results.push(...historicalMessages)
-
-                // Store newer messages to append after batch processing
+                
+                // Store newer messages to append after we collect batch-after-history
                 ;(this as any)[pendingKey] = newerMessages
-
-                // Clear batchResults
+                
+                // Clear batchResults - we don't want messages BEFORE .history
+                // Only keep messages AFTER .history in the current channel
                 batchResults.length = 0
-                logger.debug({
+                logger.debug({ 
                   historicalAdded: historicalMessages.length,
                   newerMessagesSaved: newerMessages.length,
                 }, 'Reset results with historical, saved newer messages for later')
-
-                // Break - remaining messages in the loop are OLDER than .history (gap messages)
-                // Since batch is reversed (newest→oldest), messages after this point are older.
-                break
+                
+                // Don't add the .history message itself
+                // Continue collecting remaining messages in batch (after .history)
+                continue
               }
             }
           }
