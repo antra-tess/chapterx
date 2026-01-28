@@ -146,93 +146,40 @@ let openaiCompatibleRoutes: OpenAICompatibleRouting[] = [];
 /**
  * Determine which adapter supports a given model
  *
- * Routing rules:
- * 1. Check registered adapter patterns, using mode to pick adapter type:
- *    - mode 'base-model' → prefer openai-completions-* adapters
- *    - mode 'chat'/'prefill' → prefer openai-compatible-* adapters
- * 2. claude-* → Anthropic
- * 3. gpt-*, o1*, o3*, o4* → OpenAI
- * 4. provider/model → OpenRouter
- * 5. Fallback chain: Anthropic → OpenRouter → OpenAI
+ * Deterministic routing based on config:
+ * 1. Find adapter whose patterns match the model
+ * 2. Use mode to pick adapter type (base-model → completions, otherwise → compatible)
+ * 3. No fallbacks - if no match, return undefined
  */
 function getAdapterForModel(
   modelName: string,
   adapters: Map<string, ProviderAdapter>,
   mode?: 'prefill' | 'chat' | 'base-model'
 ): ProviderAdapter | undefined {
-  // Check registered adapter patterns, preferring the right adapter type based on mode
   const isBaseModel = mode === 'base-model';
 
   // Find all routes that match this model
-  const matchingRoutes: OpenAICompatibleRouting[] = [];
   for (const route of openaiCompatibleRoutes) {
     for (const pattern of route.patterns) {
       if (matchesPattern(modelName, pattern)) {
-        matchingRoutes.push(route);
-        break; // Found a match for this route, move to next
+        // Check if this adapter matches the mode
+        const isCompletionsAdapter = route.adapterKey.includes('completions');
+
+        // base-model mode requires completions adapter
+        // chat/prefill mode requires compatible (non-completions) adapter
+        if (isBaseModel === isCompletionsAdapter) {
+          const adapter = adapters.get(route.adapterKey);
+          if (adapter) {
+            logger.debug({
+              modelName,
+              mode,
+              adapterKey: route.adapterKey,
+            }, 'Routed model via pattern match');
+            return adapter;
+          }
+        }
       }
     }
-  }
-
-  if (matchingRoutes.length > 0) {
-    // Sort by preference: base-model mode prefers completions, others prefer compatible
-    const sortedRoutes = matchingRoutes.sort((a, b) => {
-      const aIsCompletions = a.adapterKey.includes('completions');
-      const bIsCompletions = b.adapterKey.includes('completions');
-
-      if (isBaseModel) {
-        // Prefer completions for base-model mode
-        if (aIsCompletions && !bIsCompletions) return -1;
-        if (!aIsCompletions && bIsCompletions) return 1;
-      } else {
-        // Prefer compatible (non-completions) for chat/prefill mode
-        if (!aIsCompletions && bIsCompletions) return -1;
-        if (aIsCompletions && !bIsCompletions) return 1;
-      }
-      return 0;
-    });
-
-    const selectedRoute = sortedRoutes[0];
-    const adapter = adapters.get(selectedRoute.adapterKey);
-    if (adapter) {
-      logger.debug({
-        modelName,
-        mode,
-        adapterKey: selectedRoute.adapterKey,
-        isBaseModel,
-      }, 'Routed model via pattern match');
-      return adapter;
-    }
-  }
-
-  // OpenRouter models have a provider prefix (e.g., "anthropic/claude-3-opus")
-  if (modelName.includes('/')) {
-    return adapters.get('openrouter');
-  }
-
-  // Direct Claude models go to Anthropic
-  if (modelName.startsWith('claude-')) {
-    return adapters.get('anthropic');
-  }
-
-  // OpenAI models go to OpenAI
-  if (modelName.startsWith('gpt-') ||
-      modelName.startsWith('o1') ||
-      modelName.startsWith('o3') ||
-      modelName.startsWith('o4') ||
-      modelName.startsWith('gpt5') ||
-      modelName.startsWith('chatgpt-')) {
-    return adapters.get('openai');
-  }
-
-  // Fallback chain: Anthropic → OpenRouter → OpenAI
-  if (adapters.has('anthropic')) return adapters.get('anthropic');
-  if (adapters.has('openrouter')) return adapters.get('openrouter');
-  if (adapters.has('openai')) return adapters.get('openai');
-
-  // Last resort: any available adapter
-  for (const adapter of adapters.values()) {
-    return adapter;
   }
 
   return undefined;
@@ -243,29 +190,23 @@ function getAdapterForModel(
 // ============================================================================
 
 /**
- * RoutingAdapter wraps multiple adapters and routes requests based on model name
- * 
- * This allows Membrane to work with multiple providers through a single adapter,
- * automatically selecting the right one based on the model being requested.
+ * RoutingAdapter wraps multiple adapters and routes requests based on config
+ *
+ * Deterministic routing: model patterns + mode determine which adapter to use.
+ * No fallbacks - if no adapter matches, throws an error.
  */
 class RoutingAdapter implements ProviderAdapter {
   readonly name = 'routing';
   private adapters: Map<string, ProviderAdapter>;
-  private defaultAdapter: ProviderAdapter;
-  
+
   constructor(adapters: Map<string, ProviderAdapter>) {
     this.adapters = adapters;
-    
-    // Pick a default (prefer Anthropic)
-    const defaultAdapter = adapters.get('anthropic') ?? adapters.get('openrouter');
-    if (!defaultAdapter) {
+    if (adapters.size === 0) {
       throw new Error('No adapters available for RoutingAdapter');
     }
-    this.defaultAdapter = defaultAdapter;
   }
-  
+
   supportsModel(modelId: string): boolean {
-    // We support any model that any of our adapters support
     for (const adapter of this.adapters.values()) {
       if (adapter.supportsModel(modelId)) {
         return true;
@@ -273,7 +214,7 @@ class RoutingAdapter implements ProviderAdapter {
     }
     return false;
   }
-  
+
   async complete(request: any, options?: any): Promise<any> {
     const adapter = this.selectAdapter(request);
     return adapter.complete(request, options);
@@ -290,20 +231,21 @@ class RoutingAdapter implements ProviderAdapter {
 
     const selected = getAdapterForModel(modelName, this.adapters, mode);
     if (!selected) {
-      logger.warn({ model: modelName, mode }, 'No adapter found for model, using default');
-      return this.defaultAdapter;
+      throw new Error(
+        `No adapter found for model "${modelName}" with mode "${mode}". ` +
+        `Check vendor config patterns and ensure the model is registered.`
+      );
     }
     return selected;
   }
-  
+
   /**
    * Get the underlying adapter for a specific model
-   * Useful for debugging/inspection
    */
   getAdapterForModel(modelName: string, mode?: 'prefill' | 'chat' | 'base-model'): ProviderAdapter | undefined {
     return getAdapterForModel(modelName, this.adapters, mode);
   }
-  
+
   /**
    * List all available adapters
    */
