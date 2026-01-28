@@ -37,7 +37,7 @@ max_images: 5
 tools_enabled: true
 tool_output_visible: false
 max_tool_depth: 3
-tool_plugins: ['config', 'notes', 'inject']
+tool_plugins: ['config', 'notes', 'inject', 'timer']
 plugin_config:
   notes:
     state_scope: global

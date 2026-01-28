@@ -581,18 +581,26 @@ export class AgentLoop {
       })
   }
   
-  private determineActivationReason(events: Event[]): { 
-    reason: 'mention' | 'reply' | 'random' | 'm_command', 
-    events: Array<{ type: string; messageId?: string; authorId?: string; authorName?: string; contentPreview?: string }> 
+  private determineActivationReason(events: Event[]): {
+    reason: 'mention' | 'reply' | 'random' | 'm_command' | 'timer',
+    events: Array<{ type: string; messageId?: string; authorId?: string; authorName?: string; contentPreview?: string }>
   } {
     const triggerEvents: Array<{ type: string; messageId?: string; authorId?: string; authorName?: string; contentPreview?: string }> = []
-    let reason: 'mention' | 'reply' | 'random' | 'm_command' = 'mention'
-    
+    let reason: 'mention' | 'reply' | 'random' | 'm_command' | 'timer' = 'mention'
+
     for (const event of events) {
-      if (event.type === 'message') {
+      if (event.type === 'self_activation') {
+        // Timer-triggered activation
+        reason = 'timer'
+        triggerEvents.push({
+          type: 'timer',
+          messageId: event.data?.originalMessageId,
+          contentPreview: event.data?.contextNote?.slice(0, 100),
+        })
+      } else if (event.type === 'message') {
         const message = event.data as any
         const content = message.content?.trim() || ''
-        
+
         if ((event.data as any)._isMCommand) {
           reason = 'm_command'
         } else if (message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)) {
@@ -602,7 +610,7 @@ export class AgentLoop {
         } else {
           reason = 'random'
         }
-        
+
         triggerEvents.push({
           type: event.type,
           messageId: message.id,
@@ -612,7 +620,7 @@ export class AgentLoop {
         })
       }
     }
-    
+
     return { reason, events: triggerEvents }
   }
 
@@ -630,7 +638,7 @@ export class AgentLoop {
     events: Event[],
     channelId: string,
     guildId: string,
-    triggerReason: 'mention' | 'reply' | 'random' | 'm_command',
+    triggerReason: 'mention' | 'reply' | 'random' | 'm_command' | 'timer',
     triggeringMessageId?: string
   ): Promise<{ status: 'allowed' | 'blocked'; transactionId?: string }> {
     // Load config to check if Soma is enabled
@@ -874,6 +882,18 @@ export class AgentLoop {
   }
 
   private async shouldActivate(events: Event[], channelId: string, guildId: string): Promise<boolean> {
+    // Check for self_activation events first (timer-triggered)
+    for (const event of events) {
+      if (event.type === 'self_activation') {
+        logger.info({
+          channelId,
+          timerId: event.data?.timerId,
+          contextNote: event.data?.contextNote?.slice(0, 50),
+        }, 'Activated by timer (self_activation)')
+        return true
+      }
+    }
+
     // Load config early for API-only mode check
     let config: any = null
     try {
@@ -885,13 +905,13 @@ export class AgentLoop {
     } catch {
       // Config will be loaded again below if needed
     }
-    
+
     // Check if API-only mode is enabled
     if (config?.api_only) {
       logger.debug('API-only mode enabled - skipping activation')
       return false
     }
-    
+
     // Check each message event for activation triggers
     for (const event of events) {
       if (event.type !== 'message') {
@@ -1178,6 +1198,17 @@ export class AgentLoop {
       
       // Record config in trace (for debugging)
       traceSetConfig(config)
+
+      // Send TTS activation start as early as possible (for thinking animation/sound)
+      // This happens right after config load so Melodeus can show thinking indicator quickly
+      if (config.tts_relay?.enabled && this.ttsRelayClient?.isConnected() && this.botUserId) {
+        const botDiscordUsername = this.connector.getBotUsername() || config.name
+        this.ttsRelayClient.sendActivationStart({
+          channelId,
+          userId: this.botUserId,
+          username: botDiscordUsername,
+        })
+      }
 
       // Initialize MCP servers from config (once per bot)
       if (!this.mcpInitialized && config.mcp_servers && config.mcp_servers.length > 0) {
@@ -2161,19 +2192,14 @@ export class AgentLoop {
     }
 
     // Set up TTS streaming context if relay is enabled and connected
+    // Note: activation_start is sent earlier in processActivation for faster feedback
     if (config.tts_relay?.enabled && this.ttsRelayClient?.isConnected() && this.botUserId) {
       this.ttsStreamContext = {
         channelId,
         userId: this.botUserId,
-        username: config.name,
+        username: this.connector.getBotUsername() || config.name,
         abortController: new AbortController(),
       }
-      // Notify relay that activation is starting (for thinking animation/sound)
-      this.ttsRelayClient.sendActivationStart({
-        channelId,
-        userId: this.botUserId,
-        username: config.name,
-      })
     }
 
     while (toolDepth < maxToolDepth) {

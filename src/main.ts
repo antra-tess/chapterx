@@ -21,6 +21,7 @@ import { ToolSystem } from './tools/system.js'
 import { ApiServer } from './api/server.js'
 import { logger } from './utils/logger.js'
 import { createMembraneFromVendorConfigs } from './llm/membrane/index.js'
+import { createTimerScheduler } from './timer/index.js'
 
 async function main() {
   try {
@@ -83,6 +84,18 @@ async function main() {
     const queue = new EventQueue()
     const stateManager = new ChannelStateManager()
     const configSystem = new ConfigSystem(configPath)
+
+    // Initialize timer scheduler (for self-activation)
+    const timerScheduler = createTimerScheduler(cachePath)
+    await timerScheduler.initialize((event) => {
+      // Push timer events to the queue for processing
+      queue.push(event)
+      logger.info({
+        type: event.type,
+        channelId: event.channelId,
+        timerId: event.data?.timerId,
+      }, 'Timer event pushed to queue')
+    })
     const contextBuilder = new ContextBuilder()
     const llmMiddleware = new LLMMiddleware()
     const toolSystem = new ToolSystem(toolsPath)
@@ -253,6 +266,7 @@ async function main() {
       logger.info({ signal }, 'Shutting down')
 
       agentLoop.stop()
+      timerScheduler.stop()
       if (apiServer) {
         await apiServer.stop()
       }
