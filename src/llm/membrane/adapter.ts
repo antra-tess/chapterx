@@ -442,13 +442,17 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     // - If participant_stop_sequences is false (default), disable them (set to 0)
     // - If participant_stop_sequences is true, use membrane default (don't set)
     maxParticipantsForStop: request.config.participant_stop_sequences ? undefined : 0,
+    // Pass chapterx mode for routing (base-model → completions adapter)
+    providerParams: {
+      chapterxMode: request.config.mode,
+    },
   };
-  
+
   // Handle stop sequences
   if (request.stop_sequences && request.stop_sequences.length > 0) {
     normalizedRequest.stopSequences = request.stop_sequences;
   }
-  
+
   return normalizedRequest;
 }
 

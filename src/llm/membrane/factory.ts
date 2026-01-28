@@ -145,79 +145,96 @@ let openaiCompatibleRoutes: OpenAICompatibleRouting[] = [];
 
 /**
  * Determine which adapter supports a given model
- * 
+ *
  * Routing rules:
- * - claude-* → Anthropic (direct API is preferred for Claude)
- * - gpt-*, o1*, o3*, o4* → OpenAI (direct API, includes bare o1/o3/o4)
- * - provider/model → OpenRouter (any model with provider prefix, e.g. anthropic/claude-3-opus)
- * - local:* or openai-compatible:* → Check pattern matches against registered OpenAI-compatible providers
- * - Everything else → Anthropic as fallback, then OpenRouter, then OpenAI
+ * 1. Check registered adapter patterns, using mode to pick adapter type:
+ *    - mode 'base-model' → prefer openai-completions-* adapters
+ *    - mode 'chat'/'prefill' → prefer openai-compatible-* adapters
+ * 2. claude-* → Anthropic
+ * 3. gpt-*, o1*, o3*, o4* → OpenAI
+ * 4. provider/model → OpenRouter
+ * 5. Fallback chain: Anthropic → OpenRouter → OpenAI
  */
-function getAdapterForModel(modelName: string, adapters: Map<string, ProviderAdapter>): ProviderAdapter | undefined {
-  // Local/OpenAI-compatible models: check patterns to find the right adapter
-  if (modelName.startsWith('local:') || modelName.startsWith('openai-compatible:')) {
-    // Check each registered OpenAI-compatible provider's patterns
-    for (const route of openaiCompatibleRoutes) {
-      for (const pattern of route.patterns) {
-        if (matchesPattern(modelName, pattern)) {
-          const adapter = adapters.get(route.adapterKey);
-          if (adapter) {
-            logger.debug({ modelName, pattern, adapterKey: route.adapterKey }, 'Routed local model via pattern match');
-            return adapter;
-          }
-        }
+function getAdapterForModel(
+  modelName: string,
+  adapters: Map<string, ProviderAdapter>,
+  mode?: 'prefill' | 'chat' | 'base-model'
+): ProviderAdapter | undefined {
+  // Check registered adapter patterns, preferring the right adapter type based on mode
+  const isBaseModel = mode === 'base-model';
+
+  // Find all routes that match this model
+  const matchingRoutes: OpenAICompatibleRouting[] = [];
+  for (const route of openaiCompatibleRoutes) {
+    for (const pattern of route.patterns) {
+      if (matchesPattern(modelName, pattern)) {
+        matchingRoutes.push(route);
+        break; // Found a match for this route, move to next
       }
     }
-    
-    // Fallback: try the default 'openai-compatible' adapter or first registered one
-    const defaultAdapter = adapters.get('openai-compatible');
-    if (defaultAdapter) {
-      return defaultAdapter;
-    }
-    
-    // Try any openai-compatible-* adapter
-    for (const [key, adapter] of adapters) {
-      if (key.startsWith('openai-compatible-')) {
-        logger.debug({ modelName, adapterKey: key }, 'Routed local model to first available OpenAI-compatible adapter');
-        return adapter;
-      }
-    }
-    
-    logger.warn({ modelName }, 'No OpenAI-compatible adapter found for local model');
-    return undefined;
   }
-  
+
+  if (matchingRoutes.length > 0) {
+    // Sort by preference: base-model mode prefers completions, others prefer compatible
+    const sortedRoutes = matchingRoutes.sort((a, b) => {
+      const aIsCompletions = a.adapterKey.includes('completions');
+      const bIsCompletions = b.adapterKey.includes('completions');
+
+      if (isBaseModel) {
+        // Prefer completions for base-model mode
+        if (aIsCompletions && !bIsCompletions) return -1;
+        if (!aIsCompletions && bIsCompletions) return 1;
+      } else {
+        // Prefer compatible (non-completions) for chat/prefill mode
+        if (!aIsCompletions && bIsCompletions) return -1;
+        if (aIsCompletions && !bIsCompletions) return 1;
+      }
+      return 0;
+    });
+
+    const selectedRoute = sortedRoutes[0];
+    const adapter = adapters.get(selectedRoute.adapterKey);
+    if (adapter) {
+      logger.debug({
+        modelName,
+        mode,
+        adapterKey: selectedRoute.adapterKey,
+        isBaseModel,
+      }, 'Routed model via pattern match');
+      return adapter;
+    }
+  }
+
   // OpenRouter models have a provider prefix (e.g., "anthropic/claude-3-opus")
   if (modelName.includes('/')) {
     return adapters.get('openrouter');
   }
-  
+
   // Direct Claude models go to Anthropic
   if (modelName.startsWith('claude-')) {
     return adapters.get('anthropic');
   }
-  
+
   // OpenAI models go to OpenAI
-  // Note: o1/o3/o4 patterns match both bare names (o3) and variants (o3-mini)
-  if (modelName.startsWith('gpt-') || 
-      modelName.startsWith('o1') ||   // o1, o1-mini, o1-preview
-      modelName.startsWith('o3') ||   // o3, o3-mini, o3-mini-high
-      modelName.startsWith('o4') ||   // o4, o4-mini
+  if (modelName.startsWith('gpt-') ||
+      modelName.startsWith('o1') ||
+      modelName.startsWith('o3') ||
+      modelName.startsWith('o4') ||
       modelName.startsWith('gpt5') ||
       modelName.startsWith('chatgpt-')) {
     return adapters.get('openai');
   }
-  
-  // Fallback chain: Anthropic → OpenRouter → OpenAI → any OpenAI-compatible
+
+  // Fallback chain: Anthropic → OpenRouter → OpenAI
   if (adapters.has('anthropic')) return adapters.get('anthropic');
   if (adapters.has('openrouter')) return adapters.get('openrouter');
   if (adapters.has('openai')) return adapters.get('openai');
-  
+
   // Last resort: any available adapter
   for (const adapter of adapters.values()) {
     return adapter;
   }
-  
+
   return undefined;
 }
 
@@ -258,19 +275,22 @@ class RoutingAdapter implements ProviderAdapter {
   }
   
   async complete(request: any, options?: any): Promise<any> {
-    const adapter = this.selectAdapter(request.model);
+    const adapter = this.selectAdapter(request);
     return adapter.complete(request, options);
   }
-  
+
   async stream(request: any, callbacks: any, options?: any): Promise<any> {
-    const adapter = this.selectAdapter(request.model);
+    const adapter = this.selectAdapter(request);
     return adapter.stream(request, callbacks, options);
   }
-  
-  private selectAdapter(modelName: string): ProviderAdapter {
-    const selected = getAdapterForModel(modelName, this.adapters);
+
+  private selectAdapter(request: any): ProviderAdapter {
+    const modelName = request.config?.model ?? request.model;
+    const mode = request.providerParams?.chapterxMode as 'prefill' | 'chat' | 'base-model' | undefined;
+
+    const selected = getAdapterForModel(modelName, this.adapters, mode);
     if (!selected) {
-      logger.warn({ model: modelName }, 'No adapter found for model, using default');
+      logger.warn({ model: modelName, mode }, 'No adapter found for model, using default');
       return this.defaultAdapter;
     }
     return selected;
@@ -280,8 +300,8 @@ class RoutingAdapter implements ProviderAdapter {
    * Get the underlying adapter for a specific model
    * Useful for debugging/inspection
    */
-  getAdapterForModel(modelName: string): ProviderAdapter | undefined {
-    return getAdapterForModel(modelName, this.adapters);
+  getAdapterForModel(modelName: string, mode?: 'prefill' | 'chat' | 'base-model'): ProviderAdapter | undefined {
+    return getAdapterForModel(modelName, this.adapters, mode);
   }
   
   /**
