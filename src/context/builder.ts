@@ -596,15 +596,26 @@ export class ContextBuilder {
     }
     
     // Not rolling yet - keep all messages for cache efficiency
+    // Exception: if prompt_caching is disabled, always apply character limit
     if (!rollDecision.shouldRoll) {
-      logger.debug({
-        messagesSinceRoll,
-        threshold: config.rolling_threshold,
-        messageCount: messages.length,
+      const cachingEnabled = config.prompt_caching !== false;
+      if (cachingEnabled || totalChars <= normalLimit) {
+        logger.debug({
+          messagesSinceRoll,
+          threshold: config.rolling_threshold,
+          messageCount: messages.length,
+          totalChars,
+          totalMB: (totalChars / 1024 / 1024).toFixed(2),
+          cachingEnabled,
+        }, 'Not rolling yet - keeping all messages for cache')
+        return { messages, didTruncate: false, messagesRemoved: 0 }
+      }
+      // Caching disabled and over limit - truncate anyway
+      logger.info({
         totalChars,
-        totalMB: (totalChars / 1024 / 1024).toFixed(2)
-      }, 'Not rolling yet - keeping all messages for cache')
-      return { messages, didTruncate: false, messagesRemoved: 0 }
+        limit: normalLimit,
+        messageCount: messages.length,
+      }, 'Caching disabled - applying character limit without rolling')
     }
     
     // Time to roll - apply limits
