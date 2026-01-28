@@ -44,10 +44,12 @@ export interface OpenAICompletionsConfig {
   name?: string;
   /** Model patterns this provider serves (e.g., ["base:llama3.*"]) */
   provides?: string[];
-  /** Default stop sequences (default: ['\n\nHuman:', '\nHuman:']) */
+  /** Extra stop sequences beyond auto-generated participant-based ones */
   defaultStopSequences?: string[];
   /** Warn when images are stripped from context (default: true) */
   warnOnImageStrip?: boolean;
+  /** End-of-turn token appended after each message (default: '<|eot|>', null to disable) */
+  eotToken?: string | null;
 }
 
 export interface MembraneFactoryConfig {
@@ -401,6 +403,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
           assistantName: config.assistantName,
           extraStopSequences: completionsConfig.defaultStopSequences,
           warnOnImageStrip: completionsConfig.warnOnImageStrip,
+          eotToken: completionsConfig.eotToken,
         });
         adapters.set(adapterKey, completionsAdapter);
 
@@ -523,13 +526,16 @@ export function createMembraneFromVendorConfigs(
     } else if (vendorName.startsWith('openaicompletion')) {
       // OpenAI Completions adapter (base models)
       if (baseUrl) {
+        // eotToken can be string, null (to disable), or undefined (use default)
+        const eotToken = config.eot_token !== undefined ? config.eot_token : undefined;
         openaiCompletionsProviders.push({
           apiKey,
           baseUrl,
           name: vendorName,
           provides: vendorConfig.provides,
+          eotToken,
         });
-        logger.debug({ vendorName, baseUrl, provides: vendorConfig.provides }, 'Found OpenAI Completions vendor (base model)');
+        logger.debug({ vendorName, baseUrl, eotToken, provides: vendorConfig.provides }, 'Found OpenAI Completions vendor (base model)');
       }
     } else if (vendorName.startsWith('openai')) {
       // OpenAI Compatible adapter (chat)
