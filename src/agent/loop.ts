@@ -1806,13 +1806,14 @@ export class AgentLoop {
       return this.completeLLMWithTTSStream(request, config)
     }
 
-    // Normal mode: route based on use_membrane flag
-    if (config.use_membrane && this.membraneProvider) {
+    // Use membrane when available (default on this branch)
+    if (this.membraneProvider) {
       logger.debug({ model: request.config?.model }, 'Using membrane for LLM completion')
       return this.membraneProvider.completeFromLLMRequest(request)
     }
 
-    // Fall back to built-in middleware
+    // Fall back to built-in middleware (only if membrane not initialized)
+    logger.warn({ model: request.config?.model }, 'Membrane not available, using legacy middleware')
     return this.llmMiddleware.complete(request)
   }
 
