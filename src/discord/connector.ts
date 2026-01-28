@@ -429,8 +429,16 @@ export class DiscordConnector {
 
   private parseHistoryCommand(content: string): { first?: string; last: string } | null | false {
     const lines = content.split('\n')
-    if (lines.length < 2 || lines[1] !== '---') {
-      return false  // Malformed command
+
+    // Support both ".history" alone and ".history\n---" formats
+    // Just ".history" with no other content = clear history
+    if (lines.length === 1 || (lines.length === 2 && lines[1]?.trim() === '')) {
+      return null  // Empty clear command
+    }
+
+    // If there's more content, require --- separator
+    if (lines[1] !== '---') {
+      return false  // Malformed command (has content but no ---)
     }
 
     let first: string | undefined
