@@ -8,7 +8,8 @@
  */
 
 import { ToolPlugin, PluginContext, PluginStateContext, ContextInjection } from './types.js'
-import { getTimerScheduler, ScheduledTimer } from '../../timer/scheduler.js'
+import { getTimerScheduler } from '../../timer/scheduler.js'
+import type { ScheduledTimer } from '../../timer/scheduler.js'
 import { logger } from '../../utils/logger.js'
 
 // Max delay in minutes (default: 24 hours)
