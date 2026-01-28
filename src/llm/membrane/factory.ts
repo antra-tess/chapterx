@@ -146,42 +146,24 @@ let openaiCompatibleRoutes: OpenAICompatibleRouting[] = [];
 /**
  * Determine which adapter supports a given model
  *
- * Deterministic routing based on config:
- * 1. Find adapter whose patterns match the model
- * 2. Use mode to pick adapter type (base-model → completions, otherwise → compatible)
- * 3. No fallbacks - if no match, return undefined
+ * Deterministic routing: find adapter whose patterns match the model.
+ * Vendor name prefix already determined adapter type at creation time.
  */
 function getAdapterForModel(
   modelName: string,
-  adapters: Map<string, ProviderAdapter>,
-  mode?: 'prefill' | 'chat' | 'base-model'
+  adapters: Map<string, ProviderAdapter>
 ): ProviderAdapter | undefined {
-  const isBaseModel = mode === 'base-model';
-
-  // Find all routes that match this model
   for (const route of openaiCompatibleRoutes) {
     for (const pattern of route.patterns) {
       if (matchesPattern(modelName, pattern)) {
-        // Check if this adapter matches the mode
-        const isCompletionsAdapter = route.adapterKey.includes('completions');
-
-        // base-model mode requires completions adapter
-        // chat/prefill mode requires compatible (non-completions) adapter
-        if (isBaseModel === isCompletionsAdapter) {
-          const adapter = adapters.get(route.adapterKey);
-          if (adapter) {
-            logger.debug({
-              modelName,
-              mode,
-              adapterKey: route.adapterKey,
-            }, 'Routed model via pattern match');
-            return adapter;
-          }
+        const adapter = adapters.get(route.adapterKey);
+        if (adapter) {
+          logger.debug({ modelName, adapterKey: route.adapterKey }, 'Routed model via pattern match');
+          return adapter;
         }
       }
     }
   }
-
   return undefined;
 }
 
@@ -227,12 +209,11 @@ class RoutingAdapter implements ProviderAdapter {
 
   private selectAdapter(request: any): ProviderAdapter {
     const modelName = request.config?.model ?? request.model;
-    const mode = request.providerParams?.chapterxMode as 'prefill' | 'chat' | 'base-model' | undefined;
 
-    const selected = getAdapterForModel(modelName, this.adapters, mode);
+    const selected = getAdapterForModel(modelName, this.adapters);
     if (!selected) {
       throw new Error(
-        `No adapter found for model "${modelName}" with mode "${mode}". ` +
+        `No adapter found for model "${modelName}". ` +
         `Check vendor config patterns and ensure the model is registered.`
       );
     }
@@ -242,8 +223,8 @@ class RoutingAdapter implements ProviderAdapter {
   /**
    * Get the underlying adapter for a specific model
    */
-  getAdapterForModel(modelName: string, mode?: 'prefill' | 'chat' | 'base-model'): ProviderAdapter | undefined {
-    return getAdapterForModel(modelName, this.adapters, mode);
+  getAdapterForModel(modelName: string): ProviderAdapter | undefined {
+    return getAdapterForModel(modelName, this.adapters);
   }
 
   /**
@@ -485,91 +466,89 @@ export { RoutingAdapter };
 /**
  * Create membrane from vendor configs (for integration with main.ts)
  *
- * This extracts API keys from the vendor config structure used by chapterx.
+ * Adapter type is determined by vendor name prefix:
+ * - 'anthropic-*' → Anthropic adapter
+ * - 'openrouter-*' → OpenRouter adapter
+ * - 'openaicompletion-*' → OpenAI Completions adapter (base models, /v1/completions)
+ * - 'openai-*' → OpenAI Compatible adapter (chat, /v1/chat/completions)
  *
- * Supported vendor config keys:
- * - anthropic_api_key → Anthropic adapter
- * - openrouter_api_key → OpenRouter adapter
- * - openai_api_key + openai_base_url → OpenAI adapter
- * - openai_compatible_base_url (or api_base) → OpenAI-compatible adapter (chat mode)
- * - openai_completions_base_url (or api_base) → OpenAI Completions adapter (base model mode)
- *
- * Legacy support: api_base creates BOTH compatible and completions adapters,
- * allowing the same endpoint to be used for chat or base-model modes.
- * API key fallback order: openai_compatible_api_key → openai_api_key → open_api_key
+ * Each vendor gets exactly one adapter. The vendor's `provides` patterns
+ * determine which models it serves.
  */
 export function createMembraneFromVendorConfigs(
   vendorConfigs: Record<string, { config: Record<string, string>; provides?: string[] }>,
   assistantName: string
 ): Membrane {
-  // Extract API keys from vendor configs
   let anthropicApiKey: string | undefined;
   let openrouterApiKey: string | undefined;
-  let openaiApiKey: string | undefined;
-  let openaiBaseUrl: string | undefined;
   const openaiCompatibleProviders: OpenAICompatibleConfig[] = [];
   const openaiCompletionsProviders: OpenAICompletionsConfig[] = [];
 
   for (const [vendorName, vendorConfig] of Object.entries(vendorConfigs)) {
     const config = vendorConfig.config;
+    const apiKey = config?.openai_api_key ?? config?.open_api_key ?? config?.api_key ?? 'not-needed';
+    const baseUrl = config?.api_base ?? config?.openai_compatible_base_url ?? config?.openai_completions_base_url;
 
-    if (config?.anthropic_api_key && !anthropicApiKey) {
-      anthropicApiKey = config.anthropic_api_key;
-    }
-
-    if (config?.openrouter_api_key && !openrouterApiKey) {
-      openrouterApiKey = config.openrouter_api_key;
-    }
-
-    if (config?.openai_api_key && !openaiApiKey) {
-      openaiApiKey = config.openai_api_key;
-      openaiBaseUrl = config.openai_base_url;
-    }
-
-    // OpenAI-compatible (for local inference or third-party compatible APIs)
-    // Now supports MULTIPLE vendors - each becomes a separate adapter
-    // Recognizes: openai_compatible_base_url or api_base (legacy)
-    const compatibleBaseUrl = config?.openai_compatible_base_url ?? config?.api_base;
-    const compatibleApiKey = config?.openai_compatible_api_key ?? config?.openai_api_key ?? config?.open_api_key ?? 'not-needed';
-    if (compatibleBaseUrl) {
-      openaiCompatibleProviders.push({
-        apiKey: compatibleApiKey,
-        baseUrl: compatibleBaseUrl,
-        name: vendorName,
-        provides: vendorConfig.provides,
-      });
-      logger.debug({
-        vendorName,
-        baseUrl: compatibleBaseUrl,
-        provides: vendorConfig.provides,
-      }, 'Found OpenAI-compatible vendor config');
-    }
-
-    // OpenAI Completions (for base models using /v1/completions)
-    // Uses Human:/Assistant: format, no image support
-    // Recognizes: openai_completions_base_url or api_base (legacy, creates both adapters)
-    const completionsBaseUrl = config?.openai_completions_base_url ?? config?.api_base;
-    const completionsApiKey = config?.openai_completions_api_key ?? config?.openai_api_key ?? config?.open_api_key ?? 'not-needed';
-    if (completionsBaseUrl) {
-      openaiCompletionsProviders.push({
-        apiKey: completionsApiKey,
-        baseUrl: completionsBaseUrl,
-        name: vendorName,
-        provides: vendorConfig.provides,
-      });
-      logger.debug({
-        vendorName,
-        baseUrl: completionsBaseUrl,
-        provides: vendorConfig.provides,
-      }, 'Found OpenAI Completions vendor config (base model mode)');
+    // Determine adapter type from vendor name prefix
+    if (vendorName.startsWith('anthropic')) {
+      // Anthropic adapter - use direct API
+      if (config?.anthropic_api_key && !anthropicApiKey) {
+        anthropicApiKey = config.anthropic_api_key;
+      }
+      // Also register patterns for routing
+      if (vendorConfig.provides && vendorConfig.provides.length > 0) {
+        openaiCompatibleProviders.push({
+          apiKey: config?.anthropic_api_key ?? 'not-needed',
+          baseUrl: 'https://api.anthropic.com',  // Not used, but required
+          name: vendorName,
+          provides: vendorConfig.provides,
+        });
+      }
+      logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found Anthropic vendor');
+    } else if (vendorName.startsWith('openrouter')) {
+      // OpenRouter adapter
+      if (config?.openrouter_api_key && !openrouterApiKey) {
+        openrouterApiKey = config.openrouter_api_key;
+      }
+      if (vendorConfig.provides && vendorConfig.provides.length > 0) {
+        openaiCompatibleProviders.push({
+          apiKey: config?.openrouter_api_key ?? 'not-needed',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          name: vendorName,
+          provides: vendorConfig.provides,
+        });
+      }
+      logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenRouter vendor');
+    } else if (vendorName.startsWith('openaicompletion')) {
+      // OpenAI Completions adapter (base models)
+      if (baseUrl) {
+        openaiCompletionsProviders.push({
+          apiKey,
+          baseUrl,
+          name: vendorName,
+          provides: vendorConfig.provides,
+        });
+        logger.debug({ vendorName, baseUrl, provides: vendorConfig.provides }, 'Found OpenAI Completions vendor (base model)');
+      }
+    } else if (vendorName.startsWith('openai')) {
+      // OpenAI Compatible adapter (chat)
+      if (baseUrl) {
+        openaiCompatibleProviders.push({
+          apiKey,
+          baseUrl,
+          name: vendorName,
+          provides: vendorConfig.provides,
+        });
+        logger.debug({ vendorName, baseUrl, provides: vendorConfig.provides }, 'Found OpenAI Compatible vendor');
+      }
+    } else {
+      logger.warn({ vendorName }, 'Unknown vendor prefix, skipping');
     }
   }
-  
+
   return createMembrane({
     anthropicApiKey,
     openrouterApiKey,
-    openaiApiKey,
-    openaiBaseUrl,
     openaiCompatibleProviders: openaiCompatibleProviders.length > 0 ? openaiCompatibleProviders : undefined,
     openaiCompletionsProviders: openaiCompletionsProviders.length > 0 ? openaiCompletionsProviders : undefined,
     assistantName,
