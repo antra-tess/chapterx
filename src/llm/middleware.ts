@@ -18,7 +18,7 @@ import { matchesAny } from '../utils/validation.js'
 
 export interface LLMProvider {
   readonly name: string
-  readonly supportedModes: ('prefill' | 'chat')[]
+  readonly supportedModes: ('prefill' | 'chat' | 'base-model')[]
   complete(request: ProviderRequest): Promise<LLMCompletion>
 }
 

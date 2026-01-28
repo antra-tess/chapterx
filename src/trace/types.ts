@@ -95,7 +95,7 @@ export interface LogEntry {
 // ============================================================================
 
 export interface ActivationInfo {
-  reason: 'mention' | 'reply' | 'random' | 'm_command'
+  reason: 'mention' | 'reply' | 'random' | 'm_command' | 'timer'
   
   /** The event(s) that triggered activation */
   triggerEvents: Array<{
@@ -163,7 +163,7 @@ export interface ContextBuildInfo {
     recencyWindow: number
     rollingThreshold: number
     maxImages: number
-    mode: 'prefill' | 'chat'
+    mode: 'prefill' | 'chat' | 'base-model'
   }
 }
 

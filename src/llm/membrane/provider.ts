@@ -44,7 +44,7 @@ interface Membrane {
 
 export class MembraneProvider implements LLMProvider {
   readonly name = 'membrane';
-  readonly supportedModes: ('prefill' | 'chat')[] = ['prefill', 'chat'];
+  readonly supportedModes: ('prefill' | 'chat' | 'base-model')[] = ['prefill', 'chat', 'base-model'];
   
   private membrane: Membrane;
   private assistantName: string;

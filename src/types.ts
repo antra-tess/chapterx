@@ -126,7 +126,7 @@ export interface ModelConfig {
   temperature: number
   max_tokens: number
   top_p: number
-  mode: 'prefill' | 'chat'
+  mode: 'prefill' | 'chat' | 'base-model'
   prefill_thinking?: boolean  // If true, prefill with <thinking> tag
   botName: string  // Name used in LLM context (prefill labels, stop sequences)
   botDiscordUsername?: string  // Bot's actual Discord username for chat mode message matching
@@ -149,7 +149,7 @@ export interface BotConfig {
   name: string  // Name used in LLM context (prefill labels, stop sequences)
   
   // Model config
-  mode: 'prefill' | 'chat'
+  mode: 'prefill' | 'chat' | 'base-model'
   prefill_thinking?: boolean  // If true, prefill with <thinking> tag to enable reasoning
   debug_thinking?: boolean  // If true, send thinking content as dot-prefixed debug message
   preserve_thinking_context?: boolean  // If true, preserve thinking traces in context (for Opus 4.5)
