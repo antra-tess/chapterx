@@ -398,7 +398,8 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
         const completionsAdapter = new OpenAICompletionsAdapter({
           apiKey: completionsConfig.apiKey,
           baseURL: completionsConfig.baseUrl,
-          defaultStopSequences: completionsConfig.defaultStopSequences,
+          assistantName: config.assistantName,
+          extraStopSequences: completionsConfig.defaultStopSequences,
           warnOnImageStrip: completionsConfig.warnOnImageStrip,
         });
         adapters.set(adapterKey, completionsAdapter);
