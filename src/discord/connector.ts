@@ -260,7 +260,13 @@ export class DiscordConnector {
       // This ensures cache stability - we fetch back far enough to include the cached portion
       // If firstMessageId is specified, ensure it's included by extending fetch if needed
       // NEVER trim data - cache stability should only ADD data, not remove it
-      if (firstMessageId) {
+      // BUT: Skip if .history cleared context - the cache marker may be intentionally excluded
+      if (firstMessageId && this.lastHistoryDidClear) {
+        logger.debug({
+          firstMessageId,
+          currentMessageCount: messages.length
+        }, 'Skipping cache marker extension - .history cleared context')
+      } else if (firstMessageId) {
         logger.debug({
           currentMessageCount: messages.length,
           lookingFor: firstMessageId
