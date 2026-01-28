@@ -29,7 +29,7 @@ import {
 interface Membrane {
   complete(
     request: NormalizedRequest,
-    options?: { signal?: AbortSignal; timeoutMs?: number }
+    options?: { signal?: AbortSignal; timeoutMs?: number; onRequest?: (rawRequest: unknown) => void; onResponse?: (rawResponse: unknown) => void }
   ): Promise<NormalizedResponse>;
   
   stream(
@@ -145,11 +145,22 @@ export class MembraneProvider implements LLMProvider {
   async completeFromLLMRequest(request: LLMRequest): Promise<LLMCompletion> {
     const trace = getCurrentTrace();
     const callId = trace?.startLLMCall(trace.getLLMCallCount());
-    
+
+    // Track request/response refs for trace
+    let requestRef: string | undefined;
+    let responseRef: string | undefined;
+
     try {
       const normalizedRequest = toMembraneRequest(request);
       // Cast to any because our local types may not exactly match membrane's updated types
-      const response = await this.membrane.complete(normalizedRequest as any);
+      const response = await this.membrane.complete(normalizedRequest as any, {
+        onRequest: (rawRequest: unknown) => {
+          requestRef = this.logRequestToFile(rawRequest);
+        },
+        onResponse: (rawResponse: unknown) => {
+          responseRef = this.logRawResponseToFile(rawResponse);
+        },
+      });
       const completion = fromMembraneResponse(response as any);
       
       // Record to trace
@@ -177,9 +188,13 @@ export class MembraneProvider implements LLMProvider {
           },
           completion.usage,
           completion.model,
+          {
+            requestBodyRef: requestRef,
+            responseBodyRef: responseRef,
+          },
         );
       }
-      
+
       return completion;
       
     } catch (error) {
