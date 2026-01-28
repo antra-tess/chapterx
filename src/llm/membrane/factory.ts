@@ -529,10 +529,12 @@ export { RoutingAdapter };
  * - anthropic_api_key → Anthropic adapter
  * - openrouter_api_key → OpenRouter adapter
  * - openai_api_key + openai_base_url → OpenAI adapter
- * - openai_compatible_api_key + openai_compatible_base_url → OpenAI-compatible adapter
- *   (multiple vendors can define this - each becomes a separate adapter with pattern routing)
- * - openai_completions_base_url → OpenAI Completions adapter (base model mode)
- *   Uses /v1/completions endpoint with Human:/Assistant: format
+ * - openai_compatible_base_url (or api_base) → OpenAI-compatible adapter (chat mode)
+ * - openai_completions_base_url (or api_base) → OpenAI Completions adapter (base model mode)
+ *
+ * Legacy support: api_base creates BOTH compatible and completions adapters,
+ * allowing the same endpoint to be used for chat or base-model modes.
+ * API key fallback order: openai_compatible_api_key → openai_api_key → open_api_key
  */
 export function createMembraneFromVendorConfigs(
   vendorConfigs: Record<string, { config: Record<string, string>; provides?: string[] }>,
@@ -564,32 +566,38 @@ export function createMembraneFromVendorConfigs(
 
     // OpenAI-compatible (for local inference or third-party compatible APIs)
     // Now supports MULTIPLE vendors - each becomes a separate adapter
-    if (config?.openai_compatible_base_url) {
+    // Recognizes: openai_compatible_base_url or api_base (legacy)
+    const compatibleBaseUrl = config?.openai_compatible_base_url ?? config?.api_base;
+    const compatibleApiKey = config?.openai_compatible_api_key ?? config?.openai_api_key ?? config?.open_api_key ?? 'not-needed';
+    if (compatibleBaseUrl) {
       openaiCompatibleProviders.push({
-        apiKey: config.openai_compatible_api_key ?? 'not-needed',
-        baseUrl: config.openai_compatible_base_url,
+        apiKey: compatibleApiKey,
+        baseUrl: compatibleBaseUrl,
         name: vendorName,
         provides: vendorConfig.provides,
       });
       logger.debug({
         vendorName,
-        baseUrl: config.openai_compatible_base_url,
+        baseUrl: compatibleBaseUrl,
         provides: vendorConfig.provides,
       }, 'Found OpenAI-compatible vendor config');
     }
 
     // OpenAI Completions (for base models using /v1/completions)
     // Uses Human:/Assistant: format, no image support
-    if (config?.openai_completions_base_url) {
+    // Recognizes: openai_completions_base_url or api_base (legacy, creates both adapters)
+    const completionsBaseUrl = config?.openai_completions_base_url ?? config?.api_base;
+    const completionsApiKey = config?.openai_completions_api_key ?? config?.openai_api_key ?? config?.open_api_key ?? 'not-needed';
+    if (completionsBaseUrl) {
       openaiCompletionsProviders.push({
-        apiKey: config.openai_completions_api_key ?? 'not-needed',
-        baseUrl: config.openai_completions_base_url,
+        apiKey: completionsApiKey,
+        baseUrl: completionsBaseUrl,
         name: vendorName,
         provides: vendorConfig.provides,
       });
       logger.debug({
         vendorName,
-        baseUrl: config.openai_completions_base_url,
+        baseUrl: completionsBaseUrl,
         provides: vendorConfig.provides,
       }, 'Found OpenAI Completions vendor config (base model mode)');
     }
