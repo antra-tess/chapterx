@@ -112,9 +112,13 @@ export function createTracingHooks(): MembraneHooks {
       rawResponse: unknown
     ): Promise<NormalizedResponse> => {
       const trace = getCurrentTrace();
-      
+
       // Log response to file for debugging (matches old provider behavior)
-      const responseRef = logResponseToFile(rawResponse);
+      // Include rawRequest from response.raw.request to see actual serialized prompt
+      const responseRef = logResponseToFile({
+        rawRequest: response.raw?.request,
+        rawResponse,
+      });
       
       // Try to find the context from raw request stored in response
       let context: RequestContext | undefined;
