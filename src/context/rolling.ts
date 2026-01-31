@@ -7,8 +7,10 @@
 
 import {
   shouldRoll as membranesShouldRoll,
+  applyCacheMarkers as membraneApplyCacheMarkers,
   type ContextState,
   type ContextConfig,
+  type CacheMarker,
 } from '@animalabs/membrane';
 import type { BotConfig, ParticipantMessage } from '../types.js';
 import { logger } from '../utils/logger.js';
@@ -307,5 +309,61 @@ export function findFallbackCacheMarker(
   }
   
   return fallbackId;
+}
+
+// ============================================================================
+// Cache Marker Application (using membrane's logic)
+// ============================================================================
+
+/**
+ * Apply cache marker to messages using membrane's cache marker pattern.
+ * 
+ * This wrapper converts ChapterX's marker format (message ID) to membrane's
+ * CacheMarker format and applies it. The result sets `cacheBreakpoint: true`
+ * on the marked message, which the formatter uses to place cache_control.
+ * 
+ * @param messages - Array of ParticipantMessages
+ * @param markerMessageId - Message ID where cache boundary should be placed
+ * @returns New array with cacheBreakpoint set on the marked message
+ */
+export function applyChapterXCacheMarker(
+  messages: ParticipantMessage[],
+  markerMessageId: string | null
+): ParticipantMessage[] {
+  if (!markerMessageId) return messages;
+  
+  // Find the marker index
+  const markerIndex = messages.findIndex(m => m.messageId === markerMessageId);
+  if (markerIndex === -1) {
+    logger.warn({ markerMessageId }, 'Cache marker message not found in messages array');
+    return messages;
+  }
+  
+  // Create CacheMarker format that membrane expects
+  const cacheMarkers: CacheMarker[] = [{
+    messageId: markerMessageId,
+    messageIndex: markerIndex,
+    tokenEstimate: 0, // Not used for application, just tracking
+  }];
+  
+  // Use membrane's function to apply markers
+  // Note: membrane sets metadata.cacheControl, but the formatter checks cacheBreakpoint
+  // So we apply membrane's logic then convert to what the formatter expects
+  const messagesWithMetadata = membraneApplyCacheMarkers(messages as any, cacheMarkers);
+  
+  // Convert metadata.cacheControl to cacheBreakpoint (what the formatter checks)
+  return messagesWithMetadata.map((msg: any) => {
+    if (msg.metadata?.cacheControl) {
+      const { metadata, ...rest } = msg;
+      const { cacheControl: _cc, ...restMetadata } = metadata;
+      return {
+        ...rest,
+        cacheBreakpoint: true,
+        // Preserve other metadata fields if any
+        ...(Object.keys(restMetadata).length > 0 ? { metadata: restMetadata } : {}),
+      } as ParticipantMessage;
+    }
+    return msg as ParticipantMessage;
+  });
 }
 

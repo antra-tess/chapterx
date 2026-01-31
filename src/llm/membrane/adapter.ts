@@ -25,7 +25,6 @@ import type {
 interface MessageMetadata {
   timestamp?: Date;
   sourceId?: string;
-  cacheControl?: { type: 'ephemeral' };
   [key: string]: unknown;
 }
 
@@ -33,6 +32,8 @@ interface NormalizedMessage {
   participant: string;
   content: MembraneContentBlock[];
   metadata?: MessageMetadata;
+  /** If true, cache boundary is placed after this message (used by formatter) */
+  cacheBreakpoint?: boolean;
 }
 
 interface GenerationConfig {
@@ -182,16 +183,23 @@ export type {
  * Convert chapterx ParticipantMessage to membrane NormalizedMessage
  * 
  * Key differences handled:
- * - cacheControl moves from top-level to metadata
+ * - cacheBreakpoint passes through directly (used by formatter for cache_control)
  * - timestamp, messageId move to metadata
  * - Image source.media_type → source.mediaType
  */
 export function toMembraneMessage(msg: ParticipantMessage): NormalizedMessage {
-  return {
+  const result: NormalizedMessage = {
     participant: msg.participant,
     content: msg.content.map(toMembraneContentBlock),
     metadata: buildMessageMetadata(msg),
   };
+  
+  // Pass through cacheBreakpoint directly - formatter checks this property
+  if (msg.cacheBreakpoint) {
+    result.cacheBreakpoint = true;
+  }
+  
+  return result;
 }
 
 /**
@@ -203,7 +211,7 @@ export function fromMembraneMessage(msg: NormalizedMessage): ParticipantMessage 
     content: msg.content.map(fromMembraneContentBlock),
     timestamp: msg.metadata?.timestamp,
     messageId: msg.metadata?.sourceId,
-    cacheControl: msg.metadata?.cacheControl,
+    cacheBreakpoint: msg.cacheBreakpoint,
   };
 }
 
@@ -562,9 +570,12 @@ export function fromMembraneToolDefinition(tool: MembraneToolDefinition): ToolDe
 
 /**
  * Build membrane MessageMetadata from chapterx message fields
+ * 
+ * Note: cacheControl is no longer handled here - cache markers now use
+ * cacheBreakpoint directly on the message (set by applyChapterXCacheMarker).
  */
 function buildMessageMetadata(msg: ParticipantMessage): MessageMetadata | undefined {
-  const hasMetadata = msg.timestamp || msg.messageId || msg.cacheControl;
+  const hasMetadata = msg.timestamp || msg.messageId;
   
   if (!hasMetadata) {
     return undefined;
@@ -573,7 +584,6 @@ function buildMessageMetadata(msg: ParticipantMessage): MessageMetadata | undefi
   return {
     timestamp: msg.timestamp,
     sourceId: msg.messageId,
-    cacheControl: msg.cacheControl,
   };
 }
 

@@ -27,6 +27,7 @@ import {
   truncateToMessageLimit,
   determineCacheMarker,
   findFallbackCacheMarker,
+  applyChapterXCacheMarker,
 } from './rolling.js'
 
 // Anthropic's per-image base64 limit is 5MB
@@ -219,40 +220,37 @@ export class ContextBuilder {
     // 6. Determine cache marker using membrane's pattern
     let cacheMarker = this.determineCacheMarkerFromMessages(messages, lastCacheMarker, didTruncate)
 
-    // Apply cache marker to appropriate message
+    // Apply cache marker using membrane's function (sets cacheBreakpoint)
     // IMPORTANT: The marker was selected from raw messages, but some messages may have been
     // merged or filtered during transformation to participantMessages. If the marker message
     // no longer exists, we need to find a valid fallback.
     if (cacheMarker) {
-      let msgWithMarker = participantMessages.find((m) => m.messageId === cacheMarker)
+      // Check if marker exists in participant messages
+      const markerExists = participantMessages.some(m => m.messageId === cacheMarker);
       
-      if (!msgWithMarker) {
+      if (!markerExists) {
         // Marker message was merged/filtered - find a valid fallback using helper
         const fallbackMarker = findFallbackCacheMarker(participantMessages, config.name)
         
         if (fallbackMarker) {
-          const fallbackMsg = participantMessages.find(m => m.messageId === fallbackMarker)
-          
           logger.warn({
             originalMarker: cacheMarker,
             fallbackMarker,
-            fallbackParticipant: fallbackMsg?.participant,
             totalMessages: participantMessages.length,
-          }, 'Cache marker was orphaned (merged/filtered) - using fallback')
-          
+          }, 'Cache marker orphaned - using fallback')
           cacheMarker = fallbackMarker
-          msgWithMarker = fallbackMsg
         } else {
           logger.warn({
             originalMarker: cacheMarker,
             totalMessages: participantMessages.length,
-          }, 'Cache marker orphaned and no valid fallback found - cache control disabled for this request')
+          }, 'Cache marker orphaned, no fallback - caching disabled')
           cacheMarker = null
         }
       }
       
-      if (msgWithMarker) {
-        msgWithMarker.cacheControl = { type: 'ephemeral' }
+      // Apply cache marker using membrane's logic
+      if (cacheMarker) {
+        participantMessages = applyChapterXCacheMarker(participantMessages, cacheMarker)
       }
     }
 
@@ -367,8 +365,8 @@ export class ContextBuilder {
         transformations.push('image_extracted')
       }
       
-      // Check for cache control
-      const hasCacheControl = !!msg.cacheControl
+      // Check for cache control (prefer cacheBreakpoint, fall back to deprecated cacheControl)
+      const hasCacheControl = !!msg.cacheBreakpoint || !!msg.cacheControl
       
       const textContent = extractTextContent(msg)
       
@@ -526,9 +524,9 @@ export class ContextBuilder {
           lastMsg.content.push(...msg.content)
         }
         
-        // Keep the cache control if either message had it
-        if (msg.cacheControl) {
-          lastMsg.cacheControl = msg.cacheControl
+        // Keep the cache breakpoint if either message had it
+        if (msg.cacheBreakpoint) {
+          lastMsg.cacheBreakpoint = msg.cacheBreakpoint
         }
       } else {
         // Different participant - start new message

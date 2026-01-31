@@ -40,7 +40,8 @@ export interface ParticipantMessage {
   content: ContentBlock[]
   timestamp?: Date
   messageId?: string  // Discord message ID (for cache markers)
-  cacheControl?: CacheControl
+  cacheBreakpoint?: boolean  // If true, cache boundary is placed AFTER this message
+  cacheControl?: CacheControl  // @deprecated - use cacheBreakpoint instead
 }
 
 /**
