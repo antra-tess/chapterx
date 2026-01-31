@@ -157,28 +157,31 @@ function matchesPattern(modelName: string, pattern: string): boolean {
 }
 
 /**
- * Track which OpenAI-compatible adapters serve which model patterns
+ * Track adapter-to-pattern routing
  */
-interface OpenAICompatibleRouting {
+interface AdapterRouting {
   adapterKey: string;
   patterns: string[];
 }
 
-// Module-level storage for OpenAI-compatible routing patterns
-// This is set during factory initialization and used by getAdapterForModel
-let openaiCompatibleRoutes: OpenAICompatibleRouting[] = [];
+// Module-level storage for routing patterns
+// These are set during factory initialization and used by getAdapterForModel
+let patternRoutes: AdapterRouting[] = [];
 
 /**
  * Determine which adapter supports a given model
  *
- * Deterministic routing: find adapter whose patterns match the model.
- * Vendor name prefix already determined adapter type at creation time.
+ * Routing order:
+ * 1. Check explicit pattern routes (from vendor config `provides` lists)
+ * 2. Use adapter's built-in `supportsModel()` method as fallback
+ * 3. Apply smart defaults based on model name format
  */
 function getAdapterForModel(
   modelName: string,
   adapters: Map<string, ProviderAdapter>
 ): ProviderAdapter | undefined {
-  for (const route of openaiCompatibleRoutes) {
+  // 1. Check explicit pattern routes first
+  for (const route of patternRoutes) {
     for (const pattern of route.patterns) {
       if (matchesPattern(modelName, pattern)) {
         const adapter = adapters.get(route.adapterKey);
@@ -189,6 +192,59 @@ function getAdapterForModel(
       }
     }
   }
+
+  // 2. Smart routing based on model name format
+  // OpenRouter models have a provider prefix (e.g., "anthropic/claude-3-opus", "openai/o3")
+  if (modelName.includes('/')) {
+    const openrouterAdapter = adapters.get('openrouter');
+    if (openrouterAdapter) {
+      logger.debug({ modelName, adapterKey: 'openrouter' }, 'Routed model to OpenRouter (provider/model format)');
+      return openrouterAdapter;
+    }
+  }
+
+  // Direct Claude models go to Anthropic
+  if (modelName.startsWith('claude-')) {
+    const anthropicAdapter = adapters.get('anthropic');
+    if (anthropicAdapter) {
+      logger.debug({ modelName, adapterKey: 'anthropic' }, 'Routed model to Anthropic (claude-* pattern)');
+      return anthropicAdapter;
+    }
+  }
+
+  // OpenAI models go to OpenAI
+  if (modelName.startsWith('gpt-') || 
+      modelName.startsWith('o1') ||   // o1, o1-mini, o1-preview
+      modelName.startsWith('o3') ||   // o3, o3-mini, o3-mini-high
+      modelName.startsWith('o4') ||   // o4, o4-mini
+      modelName.startsWith('gpt5') ||
+      modelName.startsWith('chatgpt-')) {
+    const openaiAdapter = adapters.get('openai');
+    if (openaiAdapter) {
+      logger.debug({ modelName, adapterKey: 'openai' }, 'Routed model to OpenAI (gpt/o1/o3/o4 pattern)');
+      return openaiAdapter;
+    }
+  }
+
+  // Local models (local:* prefix) - find matching OpenAI-compatible adapter
+  if (modelName.startsWith('local:') || modelName.startsWith('openai-compatible:')) {
+    // Already checked in pattern routes above, but try any openai-compatible adapter
+    for (const [key, adapter] of adapters) {
+      if (key.startsWith('openai-compatible-') || key === 'openai-compatible') {
+        logger.debug({ modelName, adapterKey: key }, 'Routed local model to OpenAI-compatible adapter');
+        return adapter;
+      }
+    }
+  }
+
+  // 3. Fallback: ask each adapter if it supports the model
+  for (const [key, adapter] of adapters) {
+    if (adapter.supportsModel(modelName)) {
+      logger.debug({ modelName, adapterKey: key }, 'Routed model via adapter.supportsModel()');
+      return adapter;
+    }
+  }
+
   return undefined;
 }
 
@@ -308,7 +364,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
   const adapters = new Map<string, ProviderAdapter>();
   
   // Reset routing patterns
-  openaiCompatibleRoutes = [];
+  patternRoutes = [];
   
   // Create Anthropic adapter if API key is available
   const anthropicKey = config.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY;
@@ -394,7 +450,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
       
       // Register routing patterns
       if (compatConfig.provides && compatConfig.provides.length > 0) {
-        openaiCompatibleRoutes.push({
+        patternRoutes.push({
           adapterKey,
           patterns: compatConfig.provides,
         });
@@ -432,7 +488,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
 
         // Register routing patterns
         if (completionsConfig.provides && completionsConfig.provides.length > 0) {
-          openaiCompatibleRoutes.push({
+          patternRoutes.push({
             adapterKey,
             patterns: completionsConfig.provides,
           });
@@ -483,7 +539,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
     adapters: routingAdapter.getAvailableAdapters(),
     assistantName: config.assistantName,
     formatter: formatter.name,
-    openaiCompatibleRoutes: openaiCompatibleRoutes.map(r => ({ key: r.adapterKey, patterns: r.patterns })),
+    patternRoutes: patternRoutes.map(r => ({ key: r.adapterKey, patterns: r.patterns })),
   }, 'Membrane instance created');
 
   return membrane;
@@ -585,18 +641,11 @@ export function createMembraneFromVendorConfigs(
 
     // Determine adapter type from vendor name prefix
     if (vendorName.startsWith('anthropic')) {
-      // Anthropic adapter - use direct API
+      // Anthropic adapter - uses native Anthropic API (NOT OpenAI-compatible)
+      // The native AnthropicAdapter is created when anthropicApiKey is provided
+      // Routing is handled by getAdapterForModel() based on 'claude-*' pattern
       if (config?.anthropic_api_key && !anthropicApiKey) {
         anthropicApiKey = config.anthropic_api_key;
-      }
-      // Also register patterns for routing
-      if (vendorConfig.provides && vendorConfig.provides.length > 0) {
-        openaiCompatibleProviders.push({
-          apiKey: config?.anthropic_api_key ?? 'not-needed',
-          baseUrl: 'https://api.anthropic.com',  // Not used, but required
-          name: vendorName,
-          provides: vendorConfig.provides,
-        });
       }
 
       // Auto-detect anthropic-xml formatter for Anthropic vendors
@@ -604,19 +653,14 @@ export function createMembraneFromVendorConfigs(
         detectedFormatter = 'anthropic-xml';
       }
 
-      logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found Anthropic vendor');
+      logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found Anthropic vendor (uses native API)');
+
     } else if (vendorName.startsWith('openrouter')) {
-      // OpenRouter adapter
+      // OpenRouter adapter - uses OpenRouter's API (similar to OpenAI but with extras)
+      // The native OpenRouterAdapter is created when openrouterApiKey is provided
+      // Routing is handled by getAdapterForModel() based on 'provider/model' pattern
       if (config?.openrouter_api_key && !openrouterApiKey) {
         openrouterApiKey = config.openrouter_api_key;
-      }
-      if (vendorConfig.provides && vendorConfig.provides.length > 0) {
-        openaiCompatibleProviders.push({
-          apiKey: config?.openrouter_api_key ?? 'not-needed',
-          baseUrl: 'https://openrouter.ai/api/v1',
-          name: vendorName,
-          provides: vendorConfig.provides,
-        });
       }
 
       // Auto-detect native formatter for OpenRouter vendors
@@ -624,11 +668,11 @@ export function createMembraneFromVendorConfigs(
         detectedFormatter = 'native';
       }
 
-      logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenRouter vendor');
+      logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenRouter vendor (uses native API)');
+
     } else if (vendorName.startsWith('openaicompletion')) {
-      // OpenAI Completions adapter (base models)
+      // OpenAI Completions adapter (base models using /v1/completions)
       if (baseUrl) {
-        // eotToken can be string, null (to disable), or undefined (use default)
         const eotToken = config.eot_token !== undefined ? config.eot_token : vendorConfig.completions_config?.eot_token;
         openaiCompletionsProviders.push({
           apiKey,
@@ -645,8 +689,10 @@ export function createMembraneFromVendorConfigs(
 
         logger.debug({ vendorName, baseUrl, eotToken, provides: vendorConfig.provides }, 'Found OpenAI Completions vendor (base model)');
       }
+
     } else if (vendorName.startsWith('openai')) {
-      // OpenAI Compatible adapter (chat)
+      // OpenAI Compatible adapter (chat completions at /v1/chat/completions)
+      // Requires a baseUrl to be configured
       if (baseUrl) {
         openaiCompatibleProviders.push({
           apiKey,
@@ -662,8 +708,25 @@ export function createMembraneFromVendorConfigs(
 
         logger.debug({ vendorName, baseUrl, provides: vendorConfig.provides }, 'Found OpenAI Compatible vendor');
       }
+
+    } else if (config?.openai_compatible_base_url) {
+      // Vendor has OpenAI-compatible config but non-standard prefix
+      // Treat as OpenAI-compatible chat provider
+      openaiCompatibleProviders.push({
+        apiKey: config.openai_compatible_api_key ?? apiKey,
+        baseUrl: config.openai_compatible_base_url,
+        name: vendorName,
+        provides: vendorConfig.provides,
+      });
+
+      if (!detectedFormatter) {
+        detectedFormatter = 'native';
+      }
+
+      logger.debug({ vendorName, baseUrl: config.openai_compatible_base_url, provides: vendorConfig.provides }, 'Found OpenAI Compatible vendor (non-standard prefix)');
+
     } else {
-      logger.warn({ vendorName }, 'Unknown vendor prefix, skipping');
+      logger.warn({ vendorName }, 'Unknown vendor prefix and no openai_compatible_base_url, skipping');
     }
   }
 
