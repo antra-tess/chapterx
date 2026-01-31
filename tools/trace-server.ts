@@ -1,19 +1,20 @@
 #!/usr/bin/env npx tsx
 /**
  * Trace Viewer Web Server
- * 
+ *
  * A web UI for debugging activation traces across multiple bots.
  * Supports authentication, multi-bot views, and channel name resolution.
- * 
+ *
  * Environment variables:
  *   PORT          - Server port (default: 3847)
  *   AUTH_TOKEN    - Bearer token for authentication (optional, no auth if not set)
- *   LOGS_DIR      - Base logs directory (default: ./logs)
+ *   LOGS_DIRS     - Comma-separated list of base logs directories (default: ./logs)
+ *   LOGS_DIR      - (deprecated) Single logs directory, use LOGS_DIRS instead
  *   BOTS_CONFIG   - Path to bots config directory for channel name lookup
- * 
+ *
  * Usage:
  *   ./tools/trace-server.ts
- *   AUTH_TOKEN=secret PORT=3847 ./tools/trace-server.ts
+ *   AUTH_TOKEN=secret LOGS_DIRS=/opt/chapterx/logs,/opt/chapterx_staging/logs ./tools/trace-server.ts
  */
 
 import { createServer, IncomingMessage, ServerResponse } from 'http'
@@ -24,8 +25,14 @@ import { ActivationTrace, TraceIndex } from '../src/trace/types.js'
 
 const PORT = parseInt(process.env.PORT || '3847', 10)
 const AUTH_TOKEN = process.env.AUTH_TOKEN || ''
-const LOGS_DIR = process.env.LOGS_DIR || './logs'
-const TRACE_DIR = join(LOGS_DIR, 'traces')
+
+// Support multiple log directories (comma-separated)
+const LOGS_DIRS = (process.env.LOGS_DIRS || process.env.LOGS_DIR || './logs')
+  .split(',')
+  .map(d => d.trim())
+  .filter(Boolean)
+
+const TRACE_DIRS = LOGS_DIRS.map(d => join(d, 'traces'))
 
 // Channel name cache (loaded from traces)
 const channelNameCache = new Map<string, string>()
@@ -34,52 +41,84 @@ const channelNameCache = new Map<string, string>()
 // Index Cache
 // ============================================================================
 
-type IndexEntry = TraceIndex & { filename: string, botName?: string }
+type IndexEntry = TraceIndex & { filename: string, botName?: string, logsDir?: string }
 
 let indexCache: IndexEntry[] | null = null
-let indexMtime: number = 0
+let indexMtimes: Map<string, number> = new Map()
 
 function getIndexCache(): IndexEntry[] {
-  const indexFile = join(TRACE_DIR, 'index.jsonl')
-  if (!existsSync(indexFile)) {
-    indexCache = []
-    indexMtime = 0
-    return []
-  }
-  
-  // Check if file changed since last load
-  const stat = statSync(indexFile)
-  if (indexCache !== null && stat.mtimeMs === indexMtime) {
-    // Cache hit - return cached data
-    return indexCache
-  }
-  
-  // Cache miss - reload from disk
-  console.log(`[cache] Reloading index (mtime changed: ${indexMtime} -> ${stat.mtimeMs})`)
-  const start = Date.now()
-  
-  const entries = readFileSync(indexFile, 'utf-8')
-    .split('\n')
-    .filter(Boolean)
-    .map(line => {
-      try { return JSON.parse(line) } 
-      catch { return null }
-    })
-    .filter(Boolean) as IndexEntry[]
-  
-  // Update channel name cache
-  for (const entry of entries) {
-    if (entry.channelName && entry.channelId) {
-      channelNameCache.set(entry.channelId, entry.channelName)
+  // Check if any index files have changed
+  let needsReload = indexCache === null
+
+  for (const traceDir of TRACE_DIRS) {
+    const indexFile = join(traceDir, 'index.jsonl')
+    if (!existsSync(indexFile)) continue
+
+    const stat = statSync(indexFile)
+    const cachedMtime = indexMtimes.get(indexFile) || 0
+    if (stat.mtimeMs !== cachedMtime) {
+      needsReload = true
+      break
     }
   }
-  
-  indexCache = entries
-  indexMtime = stat.mtimeMs
-  
-  console.log(`[cache] Loaded ${entries.length} index entries in ${Date.now() - start}ms`)
-  
-  return entries
+
+  if (!needsReload && indexCache !== null) {
+    return indexCache
+  }
+
+  // Cache miss - reload from all directories
+  console.log(`[cache] Reloading indexes from ${TRACE_DIRS.length} directories`)
+  const start = Date.now()
+
+  const allEntries: IndexEntry[] = []
+
+  for (let i = 0; i < TRACE_DIRS.length; i++) {
+    const traceDir = TRACE_DIRS[i]!
+    const logsDir = LOGS_DIRS[i]!
+    const indexFile = join(traceDir, 'index.jsonl')
+
+    if (!existsSync(indexFile)) continue
+
+    const stat = statSync(indexFile)
+    indexMtimes.set(indexFile, stat.mtimeMs)
+
+    const entries = readFileSync(indexFile, 'utf-8')
+      .split('\n')
+      .filter(Boolean)
+      .map(line => {
+        try {
+          const entry = JSON.parse(line) as IndexEntry
+          entry.logsDir = logsDir  // Track which logs dir this came from
+          return entry
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean) as IndexEntry[]
+
+    // Update channel name cache
+    for (const entry of entries) {
+      if (entry.channelName && entry.channelId) {
+        channelNameCache.set(entry.channelId, entry.channelName)
+      }
+    }
+
+    allEntries.push(...entries)
+  }
+
+  // Sort by timestamp descending (newest first)
+  // timestamp is Date but becomes string after JSON parse
+  allEntries.sort((a, b) => {
+    const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0
+    const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0
+    return timeB - timeA
+  })
+
+  indexCache = allEntries
+
+  console.log(`[cache] Loaded ${allEntries.length} total index entries in ${Date.now() - start}ms`)
+
+  return allEntries
 }
 
 // ============================================================================
@@ -87,13 +126,23 @@ function getIndexCache(): IndexEntry[] {
 // ============================================================================
 
 function discoverBots(): string[] {
-  if (!existsSync(TRACE_DIR)) return []
-  
-  return readdirSync(TRACE_DIR)
-    .filter(name => {
-      const path = join(TRACE_DIR, name)
-      return statSync(path).isDirectory() && name !== 'index.jsonl'
-    })
+  const bots = new Set<string>()
+
+  for (const traceDir of TRACE_DIRS) {
+    if (!existsSync(traceDir)) continue
+
+    const dirs = readdirSync(traceDir)
+      .filter(name => {
+        const path = join(traceDir, name)
+        return existsSync(path) && statSync(path).isDirectory() && name !== 'index.jsonl'
+      })
+
+    for (const dir of dirs) {
+      bots.add(dir)
+    }
+  }
+
+  return Array.from(bots)
 }
 
 function loadIndex(botName?: string): IndexEntry[] {
@@ -108,54 +157,79 @@ function loadIndex(botName?: string): IndexEntry[] {
 }
 
 function loadTrace(traceId: string): ActivationTrace | null {
-  // Search in all bot directories
-  const bots = discoverBots()
-  
-  for (const bot of bots) {
-    const botDir = join(TRACE_DIR, bot)
-    const files = readdirSync(botDir).filter(f => 
-      f.includes(traceId) && f.endsWith('.json')
+  // Search in all trace directories
+  for (const traceDir of TRACE_DIRS) {
+    if (!existsSync(traceDir)) continue
+
+    // Search in bot subdirectories
+    const bots = readdirSync(traceDir)
+      .filter(name => {
+        const path = join(traceDir, name)
+        return existsSync(path) && statSync(path).isDirectory() && name !== 'index.jsonl'
+      })
+
+    for (const bot of bots) {
+      const botDir = join(traceDir, bot)
+      const files = readdirSync(botDir).filter(f =>
+        f.includes(traceId) && f.endsWith('.json')
+      )
+      if (files.length > 0) {
+        const content = readFileSync(join(botDir, files[0]!), 'utf-8')
+        return JSON.parse(content)
+      }
+    }
+
+    // Also check root trace dir for legacy format
+    const rootFiles = readdirSync(traceDir).filter(f =>
+      f.includes(traceId) && f.endsWith('.json') && !f.includes('index')
     )
-    if (files.length > 0) {
-      const content = readFileSync(join(botDir, files[0]!), 'utf-8')
+    if (rootFiles.length > 0) {
+      const content = readFileSync(join(traceDir, rootFiles[0]!), 'utf-8')
       return JSON.parse(content)
     }
   }
-  
-  // Also check root trace dir for legacy format
-  const rootFiles = readdirSync(TRACE_DIR).filter(f => 
-    f.includes(traceId) && f.endsWith('.json') && !f.includes('index')
-  )
-  if (rootFiles.length > 0) {
-    const content = readFileSync(join(TRACE_DIR, rootFiles[0]!), 'utf-8')
-    return JSON.parse(content)
-  }
-  
+
   return null
 }
 
 function loadRequestBody(ref: string): any {
-  const path = join(LOGS_DIR, 'llm-requests', ref)
-  if (!existsSync(path)) return null
-  return JSON.parse(readFileSync(path, 'utf-8'))
+  for (const logsDir of LOGS_DIRS) {
+    const path = join(logsDir, 'llm-requests', ref)
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, 'utf-8'))
+    }
+  }
+  return null
 }
 
 function loadResponseBody(ref: string): any {
-  const path = join(LOGS_DIR, 'llm-responses', ref)
-  if (!existsSync(path)) return null
-  return JSON.parse(readFileSync(path, 'utf-8'))
+  for (const logsDir of LOGS_DIRS) {
+    const path = join(logsDir, 'llm-responses', ref)
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, 'utf-8'))
+    }
+  }
+  return null
 }
 
 function loadMembraneRequestBody(ref: string): any {
-  const path = join(LOGS_DIR, 'membrane-requests', ref)
-  if (!existsSync(path)) return null
-  return JSON.parse(readFileSync(path, 'utf-8'))
+  for (const logsDir of LOGS_DIRS) {
+    const path = join(logsDir, 'membrane-requests', ref)
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, 'utf-8'))
+    }
+  }
+  return null
 }
 
 function loadMembraneResponseBody(ref: string): any {
-  const path = join(LOGS_DIR, 'membrane-responses', ref)
-  if (!existsSync(path)) return null
-  return JSON.parse(readFileSync(path, 'utf-8'))
+  for (const logsDir of LOGS_DIRS) {
+    const path = join(logsDir, 'membrane-responses', ref)
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, 'utf-8'))
+    }
+  }
+  return null
 }
 
 function getChannelName(channelId: string): string {
@@ -2102,5 +2176,10 @@ server.listen(PORT, HOST, () => {
   } else {
     console.log(`  ⚠️  No authentication (set AUTH_TOKEN for production)\n`)
   }
-  console.log(`  📁 Logs directory: ${LOGS_DIR}\n`)
+  console.log(`  📁 Logs directories:`)
+  for (const dir of LOGS_DIRS) {
+    const exists = existsSync(dir)
+    console.log(`     ${exists ? '✓' : '✗'} ${dir}`)
+  }
+  console.log()
 })
