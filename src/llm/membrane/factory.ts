@@ -611,6 +611,7 @@ export function createMembraneFromVendorConfigs(
 ): Membrane {
   let anthropicApiKey: string | undefined;
   let openrouterApiKey: string | undefined;
+  let openaiApiKey: string | undefined;
   const openaiCompatibleProviders: OpenAICompatibleConfig[] = [];
   const openaiCompletionsProviders: OpenAICompletionsConfig[] = [];
 
@@ -691,22 +692,31 @@ export function createMembraneFromVendorConfigs(
       }
 
     } else if (vendorName.startsWith('openai')) {
-      // OpenAI Compatible adapter (chat completions at /v1/chat/completions)
-      // Requires a baseUrl to be configured
-      if (baseUrl) {
+      // Determine if this is official OpenAI API or a compatible endpoint
+      const isOfficialOpenAI = !baseUrl || baseUrl.includes('api.openai.com');
+
+      if (isOfficialOpenAI) {
+        // Official OpenAI API - use native OpenAIAdapter
+        // Smart routing in getAdapterForModel() handles gpt-*/o1/o3/o4 -> openai
+        const openaiKey = config?.openai_api_key ?? config?.api_key;
+        if (openaiKey && !openaiApiKey) {
+          openaiApiKey = openaiKey;
+        }
+        logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenAI vendor (official API, uses native adapter)');
+      } else {
+        // Custom base URL - use OpenAI Compatible adapter
         openaiCompatibleProviders.push({
           apiKey,
           baseUrl,
           name: vendorName,
           provides: vendorConfig.provides,
         });
-
-        // Auto-detect native formatter for OpenAI Compatible vendors
-        if (!detectedFormatter) {
-          detectedFormatter = 'native';
-        }
-
         logger.debug({ vendorName, baseUrl, provides: vendorConfig.provides }, 'Found OpenAI Compatible vendor');
+      }
+
+      // Auto-detect native formatter for OpenAI vendors
+      if (!detectedFormatter) {
+        detectedFormatter = 'native';
       }
 
     } else if (config?.openai_compatible_base_url) {
@@ -737,6 +747,7 @@ export function createMembraneFromVendorConfigs(
   return createMembrane({
     anthropicApiKey,
     openrouterApiKey,
+    openaiApiKey,
     openaiCompatibleProviders: openaiCompatibleProviders.length > 0 ? openaiCompatibleProviders : undefined,
     openaiCompletionsProviders: openaiCompletionsProviders.length > 0 ? openaiCompletionsProviders : undefined,
     assistantName,
