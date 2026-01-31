@@ -163,7 +163,6 @@ export interface ContextBuildInfo {
     recencyWindow: number
     rollingThreshold: number
     maxImages: number
-    mode: 'prefill' | 'chat' | 'base-model'
   }
 }
 

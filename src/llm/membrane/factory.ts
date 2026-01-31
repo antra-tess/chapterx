@@ -15,8 +15,11 @@ import {
   OpenAIAdapter,
   OpenAICompatibleAdapter,
   OpenAICompletionsAdapter,
+  AnthropicXmlFormatter,
+  NativeFormatter,
+  CompletionsFormatter,
 } from '@animalabs/membrane';
-import type { ProviderAdapter, MembraneConfig } from '@animalabs/membrane';
+import type { ProviderAdapter, MembraneConfig, PrefillFormatter } from '@animalabs/membrane';
 import { createTracingHooks } from './hooks.js';
 import { logger } from '../../utils/logger.js';
 
@@ -52,36 +55,38 @@ export interface OpenAICompletionsConfig {
   eotToken?: string | null;
 }
 
+export type FormatterType = 'anthropic-xml' | 'native' | 'completions';
+
 export interface MembraneFactoryConfig {
   /**
    * Anthropic API key
    * If not provided, falls back to ANTHROPIC_API_KEY env var
    */
   anthropicApiKey?: string;
-  
+
   /**
    * OpenRouter API key
    * If not provided, falls back to OPENROUTER_API_KEY env var
    */
   openrouterApiKey?: string;
-  
+
   /**
    * OpenAI API key
    * If not provided, falls back to OPENAI_API_KEY env var
    */
   openaiApiKey?: string;
-  
+
   /**
    * OpenAI base URL (optional, for Azure or custom endpoints)
    */
   openaiBaseUrl?: string;
-  
+
   /**
    * Single OpenAI-compatible provider (legacy - use openaiCompatibleProviders for multiple)
    * For local inference servers or third-party OpenAI-compatible APIs
    */
   openaiCompatible?: OpenAICompatibleConfig;
-  
+
   /**
    * Multiple OpenAI-compatible providers
    * Each can have its own base URL and model patterns
@@ -101,14 +106,32 @@ export interface MembraneFactoryConfig {
    * This determines which participant is treated as the assistant
    */
   assistantName: string;
-  
+
   /**
    * Maximum participants for auto-generated stop sequences in prefill mode.
    * Set to 0 to disable participant-based stop sequences (allows frags/quotes).
    * Default: 10
    */
   maxParticipantsForStop?: number;
-  
+
+  /**
+   * Formatter type to use:
+   * - 'anthropic-xml': Prefill mode with XML tools (default for Claude)
+   * - 'native': Native API tools (for OpenAI-style APIs)
+   * - 'completions': For base models using /v1/completions
+   * Default: 'anthropic-xml'
+   */
+  formatter?: FormatterType;
+
+  /**
+   * Completions formatter config (when formatter='completions')
+   */
+  completionsConfig?: {
+    eotToken?: string;
+    nameFormat?: string;
+    messageSeparator?: string;
+  };
+
   /**
    * Enable debug logging
    */
@@ -439,26 +462,57 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
   // Create routing adapter
   const routingAdapter = new RoutingAdapter(adapters);
   
+  // Create formatter based on config
+  const formatter = createFormatter(config);
+
   // Build membrane config
   // Note: Cast hooks to any because our local type definitions may not exactly match
   // membrane's updated types. The implementation is correct, just type mismatch.
   const membraneConfig: MembraneConfig = {
     assistantParticipant: config.assistantName,
     maxParticipantsForStop: config.maxParticipantsForStop,
+    formatter,
     hooks: createTracingHooks() as any,
     debug: config.debug,
   };
-  
+
   // Create and return Membrane instance
   const membrane = new Membrane(routingAdapter, membraneConfig);
-  
+
   logger.info({
     adapters: routingAdapter.getAvailableAdapters(),
     assistantName: config.assistantName,
+    formatter: formatter.name,
     openaiCompatibleRoutes: openaiCompatibleRoutes.map(r => ({ key: r.adapterKey, patterns: r.patterns })),
   }, 'Membrane instance created');
-  
+
   return membrane;
+}
+
+/**
+ * Create the appropriate formatter based on config
+ */
+function createFormatter(config: MembraneFactoryConfig): PrefillFormatter {
+  const formatterType = config.formatter ?? 'anthropic-xml';
+
+  switch (formatterType) {
+    case 'native':
+      return new NativeFormatter();
+
+    case 'completions':
+      return new CompletionsFormatter({
+        eotToken: config.completionsConfig?.eotToken,
+        nameFormat: config.completionsConfig?.nameFormat,
+        messageSeparator: config.completionsConfig?.messageSeparator,
+        maxParticipantsForStop: config.maxParticipantsForStop,
+      });
+
+    case 'anthropic-xml':
+    default:
+      return new AnthropicXmlFormatter({
+        maxParticipantsForStop: config.maxParticipantsForStop,
+      });
+  }
 }
 
 // ============================================================================
@@ -479,19 +533,55 @@ export { RoutingAdapter };
  * Each vendor gets exactly one adapter. The vendor's `provides` patterns
  * determine which models it serves.
  */
+export interface VendorConfigInput {
+  config: Record<string, string>;
+  provides?: string[];
+  formatter?: FormatterType;
+  completions_config?: {
+    eot_token?: string;
+    name_format?: string;
+    message_separator?: string;
+  };
+}
+
 export function createMembraneFromVendorConfigs(
-  vendorConfigs: Record<string, { config: Record<string, string>; provides?: string[] }>,
-  assistantName: string
+  vendorConfigs: Record<string, VendorConfigInput>,
+  assistantName: string,
+  options?: {
+    formatter?: FormatterType;
+    completionsConfig?: MembraneFactoryConfig['completionsConfig'];
+    maxParticipantsForStop?: number;
+  }
 ): Membrane {
   let anthropicApiKey: string | undefined;
   let openrouterApiKey: string | undefined;
   const openaiCompatibleProviders: OpenAICompatibleConfig[] = [];
   const openaiCompletionsProviders: OpenAICompletionsConfig[] = [];
 
+  // Track formatter from vendors (first one wins, can be overridden by options)
+  let detectedFormatter: FormatterType | undefined;
+  let detectedCompletionsConfig: MembraneFactoryConfig['completionsConfig'] | undefined;
+
   for (const [vendorName, vendorConfig] of Object.entries(vendorConfigs)) {
     const config = vendorConfig.config;
     const apiKey = config?.openai_api_key ?? config?.open_api_key ?? config?.api_key ?? 'not-needed';
     const baseUrl = config?.api_base ?? config?.openai_compatible_base_url ?? config?.openai_completions_base_url;
+
+    // Capture formatter from vendor config (first one with formatter setting wins)
+    if (!detectedFormatter && vendorConfig.formatter) {
+      detectedFormatter = vendorConfig.formatter;
+      logger.debug({ vendorName, formatter: detectedFormatter }, 'Using formatter from vendor config');
+    }
+
+    // Capture completions config from vendor
+    if (!detectedCompletionsConfig && vendorConfig.completions_config) {
+      detectedCompletionsConfig = {
+        eotToken: vendorConfig.completions_config.eot_token,
+        nameFormat: vendorConfig.completions_config.name_format,
+        messageSeparator: vendorConfig.completions_config.message_separator,
+      };
+      logger.debug({ vendorName, completionsConfig: detectedCompletionsConfig }, 'Using completions config from vendor');
+    }
 
     // Determine adapter type from vendor name prefix
     if (vendorName.startsWith('anthropic')) {
@@ -508,6 +598,12 @@ export function createMembraneFromVendorConfigs(
           provides: vendorConfig.provides,
         });
       }
+
+      // Auto-detect anthropic-xml formatter for Anthropic vendors
+      if (!detectedFormatter) {
+        detectedFormatter = 'anthropic-xml';
+      }
+
       logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found Anthropic vendor');
     } else if (vendorName.startsWith('openrouter')) {
       // OpenRouter adapter
@@ -522,12 +618,18 @@ export function createMembraneFromVendorConfigs(
           provides: vendorConfig.provides,
         });
       }
+
+      // Auto-detect native formatter for OpenRouter vendors
+      if (!detectedFormatter) {
+        detectedFormatter = 'native';
+      }
+
       logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenRouter vendor');
     } else if (vendorName.startsWith('openaicompletion')) {
       // OpenAI Completions adapter (base models)
       if (baseUrl) {
         // eotToken can be string, null (to disable), or undefined (use default)
-        const eotToken = config.eot_token !== undefined ? config.eot_token : undefined;
+        const eotToken = config.eot_token !== undefined ? config.eot_token : vendorConfig.completions_config?.eot_token;
         openaiCompletionsProviders.push({
           apiKey,
           baseUrl,
@@ -535,6 +637,12 @@ export function createMembraneFromVendorConfigs(
           provides: vendorConfig.provides,
           eotToken,
         });
+
+        // Auto-detect completions formatter for completions vendors
+        if (!detectedFormatter) {
+          detectedFormatter = 'completions';
+        }
+
         logger.debug({ vendorName, baseUrl, eotToken, provides: vendorConfig.provides }, 'Found OpenAI Completions vendor (base model)');
       }
     } else if (vendorName.startsWith('openai')) {
@@ -546,6 +654,12 @@ export function createMembraneFromVendorConfigs(
           name: vendorName,
           provides: vendorConfig.provides,
         });
+
+        // Auto-detect native formatter for OpenAI Compatible vendors
+        if (!detectedFormatter) {
+          detectedFormatter = 'native';
+        }
+
         logger.debug({ vendorName, baseUrl, provides: vendorConfig.provides }, 'Found OpenAI Compatible vendor');
       }
     } else {
@@ -553,12 +667,19 @@ export function createMembraneFromVendorConfigs(
     }
   }
 
+  // Use explicit options, then vendor-detected settings, then defaults
+  const finalFormatter = options?.formatter ?? detectedFormatter;
+  const finalCompletionsConfig = options?.completionsConfig ?? detectedCompletionsConfig;
+
   return createMembrane({
     anthropicApiKey,
     openrouterApiKey,
     openaiCompatibleProviders: openaiCompatibleProviders.length > 0 ? openaiCompatibleProviders : undefined,
     openaiCompletionsProviders: openaiCompletionsProviders.length > 0 ? openaiCompletionsProviders : undefined,
     assistantName,
+    formatter: finalFormatter,
+    completionsConfig: finalCompletionsConfig,
+    maxParticipantsForStop: options?.maxParticipantsForStop,
   });
 }
 

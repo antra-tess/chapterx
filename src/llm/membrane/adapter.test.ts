@@ -252,7 +252,6 @@ describe('Request Conversion', () => {
         temperature: 0.7,
         max_tokens: 4096,
         top_p: 0.9,
-        mode: 'prefill',
         botName: 'Claude',
         presence_penalty: 0.1,
         frequency_penalty: 0.2,
@@ -281,7 +280,6 @@ describe('Request Conversion', () => {
         temperature: 1.0,
         max_tokens: 8192,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
         prefill_thinking: true,
       },
@@ -300,7 +298,6 @@ describe('Request Conversion', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
     };
@@ -318,7 +315,6 @@ describe('Request Conversion', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
     };
@@ -336,7 +332,6 @@ describe('Request Conversion', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
     };
@@ -618,7 +613,6 @@ describe('Edge Cases: Empty Content', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
     };
@@ -635,7 +629,6 @@ describe('Edge Cases: Empty Content', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
     };
@@ -674,7 +667,6 @@ describe('Edge Cases: Multi-participant Conversations', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
       stop_sequences: ['Alice:', 'Bob:', 'Charlie:'],

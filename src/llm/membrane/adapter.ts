@@ -465,15 +465,14 @@ export function fromMembraneRequest(request: NormalizedRequest, botName: string)
       temperature: request.config.temperature ?? 1.0,
       max_tokens: request.config.maxTokens,
       top_p: request.config.topP ?? 1.0,
-      mode: 'prefill', // Default; actual mode comes from BotConfig
       botName,
       presence_penalty: request.config.presencePenalty,
       frequency_penalty: request.config.frequencyPenalty,
       prefill_thinking: request.config.thinking?.enabled,
     },
     tools: request.tools?.map(fromMembraneToolDefinition),
-    stop_sequences: Array.isArray(request.stopSequences) 
-      ? request.stopSequences 
+    stop_sequences: Array.isArray(request.stopSequences)
+      ? request.stopSequences
       : request.stopSequences?.sequences,
   };
 }

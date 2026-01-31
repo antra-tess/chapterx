@@ -4,11 +4,11 @@
  */
 
 import { EventQueue } from './event-queue.js'
+import { DeferredQueue, isTransientError } from './deferred-queue.js'
 import { ChannelStateManager } from './state-manager.js'
 import { DiscordConnector } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
-import { LLMMiddleware } from '../llm/middleware.js'
 import { ToolSystem } from '../tools/system.js'
 import { Event, BotConfig, DiscordMessage, ToolCall, ToolResult } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
@@ -58,6 +58,9 @@ export class AgentLoop {
   // TTS relay integration (optional)
   private ttsRelayClient?: TTSRelayClient
 
+  // Deferred activation queue for transient API errors
+  private deferredQueue?: DeferredQueue
+
   constructor(
     private botId: string,
     private queue: EventQueue,
@@ -65,7 +68,6 @@ export class AgentLoop {
     private stateManager: ChannelStateManager,
     private configSystem: ConfigSystem,
     private contextBuilder: ContextBuilder,
-    private llmMiddleware: LLMMiddleware,
     private toolSystem: ToolSystem,
     cacheDir: string = './cache'
   ) {
@@ -82,11 +84,10 @@ export class AgentLoop {
   }
   
   /**
-   * Set membrane instance for LLM calls
-   * When set, can be enabled per-bot with use_membrane: true in config
+   * Set membrane instance for LLM calls (required)
    */
   setMembrane(membrane: Membrane): void {
-    this.membraneProvider = new MembraneProvider(membrane, this.botId)
+    this.membraneProvider = new MembraneProvider(membrane)
     logger.info({ botId: this.botId }, 'Membrane provider set')
   }
 
@@ -174,6 +175,10 @@ export class AgentLoop {
   async run(): Promise<void> {
     this.running = true
 
+    // Initialize deferred queue for handling transient API failures
+    this.deferredQueue = new DeferredQueue()
+    await this.deferredQueue.initialize(this.botId, (event) => this.queue.push(event))
+
     logger.info({ botId: this.botId }, 'Agent loop started')
 
     while (this.running) {
@@ -201,6 +206,7 @@ export class AgentLoop {
    */
   stop(): void {
     this.running = false
+    this.deferredQueue?.stop()
   }
 
   /**
@@ -472,6 +478,12 @@ export class AgentLoop {
           author: message.author?.username
         }, '⚠️  FAILED TO DELETE m COMMAND MESSAGE - Check bot permissions (needs MANAGE_MESSAGES)')
       }
+    }
+
+    // Cancel any pending deferred activation - new activity supersedes it
+    if (this.deferredQueue?.hasPendingActivation(channelId)) {
+      this.deferredQueue.cancelActivation(channelId)
+      logger.debug({ channelId }, 'Cancelled pending deferred activation due to new activity')
     }
 
     // Check if this channel is already being processed
@@ -1752,6 +1764,41 @@ export class AgentLoop {
       }
       this.ttsStreamContext = undefined
 
+      // Check for transient API errors and queue for retry
+      if (this.deferredQueue && isTransientError(error)) {
+        const queued = this.deferredQueue.queueActivation({
+          botId: this.botId,
+          channelId,
+          guildId,
+          error: error instanceof Error ? error : new Error(String(error)),
+          originalTriggerId: triggeringMessageId,
+        })
+
+        if (queued) {
+          logger.warn({ channelId, error: error instanceof Error ? error.message : String(error) },
+            'Transient API error - queued for retry')
+
+          // Add hourglass reaction to indicate we're queued
+          if (triggeringMessageId) {
+            try {
+              await this.connector.addReaction(channelId, triggeringMessageId, '⏳')
+            } catch (reactionError) {
+              logger.debug({ reactionError }, 'Failed to add retry reaction')
+            }
+          }
+
+          // Record to trace but don't throw - we're handling it
+          if (trace) {
+            trace.captureLog('warn', 'Queued for deferred retry', {
+              errorType: (error as any)?.type,
+              retryable: true,
+            })
+          }
+
+          return  // Don't throw - we've queued the retry
+        }
+      }
+
       // Record error to trace
       if (trace) {
         trace.recordError('llm_call', error instanceof Error ? error : new Error(String(error)))
@@ -1773,29 +1820,18 @@ export class AgentLoop {
   }
 
   /**
-   * Make an LLM completion request, routing to membrane if enabled
-   *
-   * This is the main routing point for the membrane integration.
-   *
-   * Modes:
-   * - use_membrane: false → old middleware only
-   * - use_membrane: true → membrane only
-   * - membrane_shadow_mode: true → run both, log differences, use old result
-   * - membrane_shadow_mode: true + use_membrane: true → run both, use membrane result
+   * Make an LLM completion request using membrane.
    *
    * When TTS relay is connected and ttsStreamContext is set, streams chunks
    * to the relay for real-time text-to-speech.
    */
   private async completeLLM(request: any, config: BotConfig): Promise<any> {
-    // Shadow mode: run both paths and compare
-    if (config.membrane_shadow_mode && this.membraneProvider) {
-      return this.completeLLMWithShadow(request, config)
+    if (!this.membraneProvider) {
+      throw new Error('Membrane not initialized - call setMembrane() before processing requests')
     }
 
     // Check if we should stream to TTS
     const shouldStreamToTTS =
-      config.use_membrane &&
-      this.membraneProvider &&
       config.tts_relay?.enabled &&
       this.ttsRelayClient?.isConnected() &&
       this.ttsStreamContext
@@ -1806,15 +1842,9 @@ export class AgentLoop {
       return this.completeLLMWithTTSStream(request, config)
     }
 
-    // Use membrane when available (default on this branch)
-    if (this.membraneProvider) {
-      logger.debug({ model: request.config?.model }, 'Using membrane for LLM completion')
-      return this.membraneProvider.completeFromLLMRequest(request)
-    }
-
-    // Fall back to built-in middleware (only if membrane not initialized)
-    logger.warn({ model: request.config?.model }, 'Membrane not available, using legacy middleware')
-    return this.llmMiddleware.complete(request)
+    // Standard completion
+    logger.debug({ model: request.config?.model }, 'Using membrane for LLM completion')
+    return this.membraneProvider.completeFromLLMRequest(request)
   }
 
   /**
@@ -1979,159 +2009,7 @@ export class AgentLoop {
       throw error
     }
   }
-  
-  /**
-   * Shadow mode: run both old middleware and membrane, log differences
-   * 
-   * Useful for validation - ensures parity between old and new paths
-   * before fully switching to membrane.
-   */
-  private async completeLLMWithShadow(request: any, config: BotConfig): Promise<any> {
-    const model = request.config?.model || 'unknown'
-    
-    // Run old middleware
-    const oldStart = Date.now()
-    let oldResult: any
-    let oldError: Error | null = null
-    try {
-      oldResult = await this.llmMiddleware.complete(request)
-    } catch (err) {
-      oldError = err instanceof Error ? err : new Error(String(err))
-    }
-    const oldDuration = Date.now() - oldStart
-    
-    // Run membrane
-    const newStart = Date.now()
-    let newResult: any
-    let newError: Error | null = null
-    try {
-      newResult = await this.membraneProvider!.completeFromLLMRequest(request)
-    } catch (err) {
-      newError = err instanceof Error ? err : new Error(String(err))
-    }
-    const newDuration = Date.now() - newStart
-    
-    // Compare and log differences
-    this.logShadowComparison({
-      model,
-      oldResult,
-      newResult,
-      oldError,
-      newError,
-      oldDuration,
-      newDuration,
-    })
-    
-    // Return based on use_membrane preference
-    if (config.use_membrane) {
-      if (newError) throw newError
-      return newResult
-    } else {
-      if (oldError) throw oldError
-      return oldResult
-    }
-  }
-  
-  /**
-   * Log comparison between old middleware and membrane results
-   */
-  private logShadowComparison(data: {
-    model: string
-    oldResult: any
-    newResult: any
-    oldError: Error | null
-    newError: Error | null
-    oldDuration: number
-    newDuration: number
-  }): void {
-    const { model, oldResult, newResult, oldError, newError, oldDuration, newDuration } = data
-    const differences: string[] = []
-    
-    // Check for error mismatch
-    if (oldError && !newError) {
-      differences.push(`OLD errored but NEW succeeded: ${oldError.message}`)
-    } else if (!oldError && newError) {
-      differences.push(`NEW errored but OLD succeeded: ${newError.message}`)
-    } else if (oldError && newError) {
-      if (oldError.message !== newError.message) {
-        differences.push(`Different errors: OLD="${oldError.message}", NEW="${newError.message}"`)
-      }
-    }
-    
-    // Compare results if both succeeded
-    if (oldResult && newResult) {
-      // Extract text content
-      const oldText = this.extractTextFromCompletion(oldResult)
-      const newText = this.extractTextFromCompletion(newResult)
-      
-      // Normalize for comparison (trim, collapse whitespace)
-      const oldNorm = oldText.trim().replace(/\s+/g, ' ')
-      const newNorm = newText.trim().replace(/\s+/g, ' ')
-      
-      if (oldNorm !== newNorm) {
-        const similarity = this.calculateSimilarity(oldNorm, newNorm)
-        differences.push(`Text differs (${(similarity * 100).toFixed(1)}% similar)`)
-      }
-      
-      // Compare stop reason
-      if (oldResult.stopReason !== newResult.stopReason) {
-        differences.push(`Stop reason: OLD=${oldResult.stopReason}, NEW=${newResult.stopReason}`)
-      }
-      
-      // Compare token counts
-      const oldTokens = (oldResult.usage?.inputTokens || 0) + (oldResult.usage?.outputTokens || 0)
-      const newTokens = (newResult.usage?.inputTokens || 0) + (newResult.usage?.outputTokens || 0)
-      const tokenDiff = Math.abs(oldTokens - newTokens)
-      if (tokenDiff > 10) {
-        differences.push(`Tokens: OLD=${oldTokens}, NEW=${newTokens} (diff=${tokenDiff})`)
-      }
-    }
-    
-    // Log comparison
-    if (differences.length > 0) {
-      logger.warn({
-        model,
-        differences,
-        oldDuration,
-        newDuration,
-        durationDiff: newDuration - oldDuration,
-      }, 'Membrane shadow mode: differences detected')
-    } else {
-      logger.debug({
-        model,
-        oldDuration,
-        newDuration,
-        durationDiff: newDuration - oldDuration,
-      }, 'Membrane shadow mode: results match')
-    }
-  }
-  
-  /**
-   * Extract text content from completion result
-   */
-  private extractTextFromCompletion(result: any): string {
-    if (!result?.content) return ''
-    return result.content
-      .filter((c: any) => c.type === 'text')
-      .map((c: any) => c.text || '')
-      .join('')
-  }
-  
-  /**
-   * Calculate rough similarity between two strings (0-1)
-   */
-  private calculateSimilarity(a: string, b: string): number {
-    if (a === b) return 1
-    if (!a || !b) return 0
-    
-    // Use character-level Jaccard similarity as quick approximation
-    const setA = new Set(a.split(''))
-    const setB = new Set(b.split(''))
-    const intersection = new Set([...setA].filter(x => setB.has(x)))
-    const union = new Set([...setA, ...setB])
-    return intersection.size / union.size
-  }
-  
+
   /**
    * Execute with inline tool injection (Anthropic style)
    * 
@@ -2213,11 +2091,12 @@ export class AgentLoop {
         pendingToolImages.length > 0 ? pendingToolImages : undefined
       )
       
-      // Get completion (routes to membrane if config.use_membrane is true)
+      // Get completion via membrane
       let completion = await this.completeLLM(continuationRequest, config)
-      
-      // Handle stop sequence continuation - only if we're inside an unclosed tag
-      if (completion.stopReason === 'stop_sequence' && config.mode === 'prefill') {
+
+      // Handle stop sequence continuation for XML tools format
+      // Only applies when using anthropic-xml formatter (detected by presence of XML tags)
+      if (completion.stopReason === 'stop_sequence') {
         const completionText = completion.content
           .filter((c: any) => c.type === 'text')
           .map((c: any) => c.text)
@@ -2266,16 +2145,9 @@ export class AgentLoop {
         // The check later will return early
       }
       
-      // Prepend thinking tag if it was actually prefilled (non-membrane only)
-      // When using membrane, extended thinking API handles this and the adapter
-      // wraps thinking blocks in <thinking> tags, so we don't prepend here
-      if (thinkingWasPrefilled && accumulatedOutput === '' && !config.use_membrane) {
-        const firstTextBlock = completion.content.find((c: any) => c.type === 'text') as any
-        if (firstTextBlock?.text) {
-          firstTextBlock.text = '<thinking>' + firstTextBlock.text
-        }
-      }
-      
+      // Note: When prefill_thinking is enabled, membrane's extended thinking API
+      // handles thinking blocks, so no manual tag prepending is needed
+
       // Get new completion text
       const newText = completion.content
         .filter((c: any) => c.type === 'text')

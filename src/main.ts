@@ -11,12 +11,6 @@ import { ChannelStateManager } from './agent/state-manager.js'
 import { DiscordConnector } from './discord/connector.js'
 import { ConfigSystem } from './config/system.js'
 import { ContextBuilder } from './context/builder.js'
-import { LLMMiddleware } from './llm/middleware.js'
-import { AnthropicProvider } from './llm/providers/anthropic.js'
-import { OpenAIProvider } from './llm/providers/openai.js'
-import { OpenAICompletionsProvider } from './llm/providers/openai-completions.js'
-import { OpenAIImageProvider } from './llm/providers/openai-image.js'
-import { OpenRouterProvider } from './llm/providers/openrouter.js'
 import { ToolSystem } from './tools/system.js'
 import { ApiServer } from './api/server.js'
 import { logger } from './utils/logger.js'
@@ -97,83 +91,10 @@ async function main() {
       }, 'Timer event pushed to queue')
     })
     const contextBuilder = new ContextBuilder()
-    const llmMiddleware = new LLMMiddleware()
     const toolSystem = new ToolSystem(toolsPath)
 
-    // Load vendor configs and register providers
+    // Load vendor configs for membrane initialization
     const vendorConfigs = configSystem.loadVendors()
-    llmMiddleware.setVendorConfigs(vendorConfigs)
-
-    // Register providers for each vendor
-    for (const [vendorName, vendorConfig] of Object.entries(vendorConfigs)) {
-      const config = vendorConfig.config
-      
-      // Anthropic provider
-      if (config?.anthropic_api_key) {
-        const provider = new AnthropicProvider(config.anthropic_api_key)
-        // Register with vendor name so middleware can route correctly
-        llmMiddleware.registerProvider(provider, vendorName)
-        logger.info({ vendorName }, 'Registered Anthropic provider')
-      }
-      
-      // OpenAI-compatible provider (chat completions)
-      if (config?.openai_api_key) {
-        const baseUrl = config.openai_base_url || config.api_base
-        if (!baseUrl) {
-          logger.warn({ vendorName }, 'Skipping OpenAI vendor without api_base')
-          continue
-        }
-        const provider = new OpenAIProvider({
-          apiKey: config.openai_api_key,
-          baseUrl,
-        })
-        // Register with vendor name so middleware can route correctly
-        llmMiddleware.registerProvider(provider, vendorName)
-        logger.info({ vendorName, baseUrl }, 'Registered OpenAI provider')
-      }
-      
-      // OpenAI Completions provider (base models - /v1/completions endpoint)
-      if (config?.openai_completions_api_key) {
-        const baseUrl = config.openai_completions_base_url || config.openai_base_url || config.api_base
-        if (!baseUrl) {
-          logger.warn({ vendorName }, 'Skipping OpenAI Completions vendor without base_url')
-          continue
-        }
-        const provider = new OpenAICompletionsProvider({
-          apiKey: config.openai_completions_api_key,
-          baseUrl,
-        })
-        // Register with vendor name so middleware can route correctly
-        llmMiddleware.registerProvider(provider, vendorName)
-        logger.info({ vendorName, baseUrl }, 'Registered OpenAI Completions provider (base model)')
-      }
-      
-      // OpenRouter provider (supports prefill for compatible models like Claude)
-      if (config?.openrouter_api_key) {
-        const baseUrl = config.openrouter_base_url || 'https://openrouter.ai/api/v1'
-        const provider = new OpenRouterProvider({
-          apiKey: config.openrouter_api_key,
-          baseUrl,
-        })
-        // Register with vendor name so middleware can route correctly
-        llmMiddleware.registerProvider(provider, vendorName)
-        logger.info({ vendorName, baseUrl }, 'Registered OpenRouter provider')
-      }
-      
-      // OpenAI Image provider (for gpt-image-1, gpt-image-1.5, gpt-image-1-mini models)
-      if (config?.openai_image_api_key) {
-        const baseUrl = config.openai_image_base_url || config.openai_base_url || 'https://api.openai.com/v1'
-        const provider = new OpenAIImageProvider({
-          apiKey: config.openai_image_api_key,
-          baseUrl,
-        })
-        // Register with vendor name so middleware can route correctly
-        llmMiddleware.registerProvider(provider, vendorName)
-        logger.info({ vendorName, baseUrl }, 'Registered OpenAI Image provider')
-      }
-    }
-
-    // TODO: Register other providers (Bedrock, Google)
 
     // Note: MCP servers are initialized on first bot activation
     // They are configured in bot config and can be overridden per-guild/channel
@@ -207,7 +128,6 @@ async function main() {
       stateManager,
       configSystem,
       contextBuilder,
-      llmMiddleware,
       toolSystem
     )
 
@@ -218,16 +138,10 @@ async function main() {
     const botConfigOnly = configSystem.loadBotConfigOnly(botName)
     const membraneAssistantName = botConfigOnly.name || botName
 
-    // Initialize membrane (optional - used when bot config has use_membrane: true)
-    try {
-      const membrane = createMembraneFromVendorConfigs(vendorConfigs, membraneAssistantName)
-      agentLoop.setMembrane(membrane)
-      logger.info({ assistantName: membraneAssistantName }, 'Membrane initialized for agent loop')
-    } catch (error) {
-      // Membrane is optional - if it fails to initialize (e.g., no API keys),
-      // the bot can still function with built-in providers
-      logger.warn({ error }, 'Membrane initialization skipped (not required)')
-    }
+    // Initialize membrane (required for LLM calls)
+    const membrane = createMembraneFromVendorConfigs(vendorConfigs, membraneAssistantName)
+    agentLoop.setMembrane(membrane)
+    logger.info({ assistantName: membraneAssistantName }, 'Membrane initialized for agent loop')
 
     // Initialize TTS relay if configured in bot config
     if (botConfigOnly.tts_relay?.enabled) {

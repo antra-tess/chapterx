@@ -12,7 +12,7 @@
  *   assistantName: 'Claude',
  * });
  * 
- * const provider = new MembraneProvider(membrane, 'Claude');
+ * const provider = new MembraneProvider(membrane);
  * const result = await provider.completeFromLLMRequest(request);
  * ```
  */
@@ -52,7 +52,7 @@ export {
   RoutingAdapter,
 } from './factory.js';
 
-export type { MembraneFactoryConfig, OpenAICompatibleConfig } from './factory.js';
+export type { MembraneFactoryConfig, OpenAICompatibleConfig, OpenAICompletionsConfig, FormatterType, VendorConfigInput } from './factory.js';
 
 // Hooks - tracing integration
 export {
@@ -62,8 +62,23 @@ export {
 
 export type { SharedHookContext as TracingHookContext } from './hooks.js';
 
-// Provider - LLMProvider implementation
+// Provider - wraps membrane for LLM completions
 export { MembraneProvider } from './provider.js';
 
 export type { StreamOptions, ChunkMeta, BlockEvent } from './provider.js';
+
+// Re-export membrane formatters and adapters for convenience
+export {
+  Membrane,
+  AnthropicAdapter,
+  OpenRouterAdapter,
+  OpenAIAdapter,
+  OpenAICompatibleAdapter,
+  OpenAICompletionsAdapter,
+  AnthropicXmlFormatter,
+  NativeFormatter,
+  CompletionsFormatter,
+} from '@animalabs/membrane';
+
+export type { ProviderAdapter, MembraneConfig, PrefillFormatter } from '@animalabs/membrane';
 

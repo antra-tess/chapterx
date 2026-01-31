@@ -272,7 +272,7 @@ export class ContextBuilder {
       messages: participantMessages,
       system_prompt: config.system_prompt,
       context_prefix: config.context_prefix,
-      config: this.extractModelConfig(config, botDiscordUsername),
+      config: this.extractModelConfig(config),
       tools: config.tools_enabled ? undefined : undefined,  // Tools added by Agent Loop
       stop_sequences,
     }
@@ -454,7 +454,6 @@ export class ContextBuilder {
         recencyWindow: config.recency_window_messages || 0,
         rollingThreshold: config.rolling_threshold,
         maxImages: config.max_images || 0,
-        mode: config.mode,
       },
     }
   }
@@ -1626,21 +1625,16 @@ export class ContextBuilder {
     return sequences
   }
 
-  private extractModelConfig(config: BotConfig, botDiscordUsername?: string): ModelConfig {
+  private extractModelConfig(config: BotConfig): ModelConfig {
     return {
       model: config.continuation_model,
       temperature: config.temperature,
       max_tokens: config.max_tokens,
       top_p: config.top_p,
-      mode: config.mode,
       prefill_thinking: config.prefill_thinking,
       botName: config.name,
-      botDiscordUsername,  // Bot's actual Discord username for chat mode message matching
-      chatPersonaPrompt: config.chat_persona_prompt,
-      chatPersonaPrefill: config.chat_persona_prefill,
-      chatBotAsAssistant: config.chat_bot_as_assistant,
-      messageDelimiter: config.message_delimiter,  // For base model completions (removes newlines)
-      turnEndToken: config.turn_end_token,  // For Gemini etc (preserves newlines)
+      messageDelimiter: config.message_delimiter,
+      turnEndToken: config.turn_end_token,
       presence_penalty: config.presence_penalty,
       frequency_penalty: config.frequency_penalty,
       prompt_caching: config.prompt_caching,

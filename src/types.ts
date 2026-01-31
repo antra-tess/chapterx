@@ -126,15 +126,10 @@ export interface ModelConfig {
   temperature: number
   max_tokens: number
   top_p: number
-  mode: 'prefill' | 'chat' | 'base-model'
-  prefill_thinking?: boolean  // If true, prefill with <thinking> tag
+  prefill_thinking?: boolean  // If true, enable extended thinking
   botName: string  // Name used in LLM context (prefill labels, stop sequences)
-  botDiscordUsername?: string  // Bot's actual Discord username for chat mode message matching
-  chatPersonaPrompt?: boolean  // If true, add persona instruction system prompt for chat mode
-  chatPersonaPrefill?: boolean  // If true, add "botname:" prefill to end of last user message in chat mode
-  chatBotAsAssistant?: boolean  // If true (default), bot's own messages are sent as assistant role; if false, merged into user turns
-  messageDelimiter?: string  // Optional delimiter appended to each message (for base model completions, removes newlines)
-  turnEndToken?: string  // Optional token appended after each message content (e.g., '<eot>' for Gemini, preserves newlines)
+  messageDelimiter?: string  // Optional delimiter appended to each message (for completions formatter)
+  turnEndToken?: string  // Optional token appended after each message content (e.g., '<eot>' for Gemini)
   presence_penalty?: number  // Penalty for token presence (0.0-2.0)
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
   prompt_caching?: boolean  // If true (default), apply cache_control markers for Anthropic prompt caching
@@ -147,10 +142,9 @@ export interface ModelConfig {
 export interface BotConfig {
   // Identity
   name: string  // Name used in LLM context (prefill labels, stop sequences)
-  
+
   // Model config
-  mode: 'prefill' | 'chat' | 'base-model'
-  prefill_thinking?: boolean  // If true, prefill with <thinking> tag to enable reasoning
+  prefill_thinking?: boolean  // If true, enable extended thinking
   debug_thinking?: boolean  // If true, send thinking content as dot-prefixed debug message
   preserve_thinking_context?: boolean  // If true, preserve thinking traces in context (for Opus 4.5)
   continuation_model: string
@@ -190,13 +184,8 @@ export interface BotConfig {
   
   // Stop sequences
   stop_sequences: string[]
-  message_delimiter?: string  // Delimiter appended to each message in prefill mode (e.g., '</s>' for base models, removes newlines)
-  turn_end_token?: string  // Token appended after each message content (e.g., '<eot>' for Gemini, preserves newlines)
-  
-  // Chat mode persona
-  chat_persona_prompt?: boolean  // If true, add persona instruction system prompt for chat mode
-  chat_persona_prefill?: boolean  // If true, add "botname:" prefill to end of last user message in chat mode
-  chat_bot_as_assistant?: boolean  // If true (default), bot's own messages are sent as assistant role; if false, merged into user turns
+  message_delimiter?: string  // Delimiter appended to each message (for completions formatter)
+  turn_end_token?: string  // Token appended after each message content (e.g., '<eot>' for Gemini)
   
   // Retries
   llm_retries: number
@@ -220,17 +209,8 @@ export interface BotConfig {
   
   // Soma integration (credit system)
   soma?: SomaConfig
-  
-  // Membrane integration (experimental)
-  // When true, uses membrane library for LLM calls instead of built-in providers
-  use_membrane?: boolean
-  
-  // Membrane shadow mode (for validation)
-  // When true, runs both old middleware and membrane in parallel, logs differences
-  // If use_membrane is also true, returns membrane result; otherwise returns old result
-  membrane_shadow_mode?: boolean
-  
-  // Participant stop sequences (membrane only)
+
+  // Participant stop sequences
   // When true, auto-generates stop sequences from participant names to prevent
   // the model from "speaking as" other users. Default: false (allows frags/quotes)
   participant_stop_sequences?: boolean
@@ -257,6 +237,26 @@ export interface TTSRelayConfig {
 export interface VendorConfig {
   config: Record<string, string>
   provides: string[]  // Model name patterns (regex)
+
+  /**
+   * Formatter type for this vendor:
+   * - 'anthropic-xml': Prefill mode with XML tools (default for Anthropic/Claude)
+   * - 'native': Native API tools (for OpenAI-style APIs)
+   * - 'completions': For base models using /v1/completions
+   */
+  formatter?: 'anthropic-xml' | 'native' | 'completions'
+
+  /**
+   * Completions formatter settings (when formatter='completions')
+   */
+  completions_config?: {
+    /** End-of-turn token (default: '<|eot|>', set to empty to disable) */
+    eot_token?: string
+    /** Name format template (default: '{name}: ') */
+    name_format?: string
+    /** Message separator (default: '\n\n') */
+    message_separator?: string
+  }
 }
 
 // ============================================================================

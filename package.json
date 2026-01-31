@@ -23,7 +23,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@animalabs/membrane": "^0.2.5",
+    "@animalabs/membrane": "^0.5.2",
     "@anthropic-ai/sdk": "^0.32.1",
     "@aws-sdk/client-bedrock-runtime": "^3.709.0",
     "@google/generative-ai": "^0.21.0",

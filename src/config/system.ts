@@ -238,7 +238,6 @@ export class ConfigSystem {
       name: config.name || '',
 
       // Model config
-      mode: config.mode || 'prefill',
       prefill_thinking: config.prefill_thinking || false,
       debug_thinking: config.debug_thinking || false,
       preserve_thinking_context: config.preserve_thinking_context || false,
@@ -277,13 +276,8 @@ export class ConfigSystem {
 
       // Stop sequences
       stop_sequences: config.stop_sequences || [],
-      message_delimiter: config.message_delimiter,  // Optional: e.g., '</s>' for base models (removes newlines)
-      turn_end_token: config.turn_end_token,  // Optional: e.g., '<eot>' for Gemini (preserves newlines)
-
-      // Chat mode persona
-      chat_persona_prompt: config.chat_persona_prompt ?? true,
-      chat_persona_prefill: config.chat_persona_prefill ?? true,
-      chat_bot_as_assistant: config.chat_bot_as_assistant ?? true,
+      message_delimiter: config.message_delimiter,  // Optional: for completions formatter
+      turn_end_token: config.turn_end_token,  // Optional: e.g., '<eot>' for Gemini
 
       // Retries
       llm_retries: config.llm_retries || 3,
@@ -308,11 +302,9 @@ export class ConfigSystem {
         url: config.soma.url || '',
         token: config.soma.token,  // Optional: uses SOMA_TOKEN env var if not set
       } : undefined,
-      
-      // Membrane integration
-      use_membrane: config.use_membrane ?? false,
-      membrane_shadow_mode: config.membrane_shadow_mode ?? false,
-      participant_stop_sequences: config.participant_stop_sequences ?? false,  // Default: false (allows frags/quotes)
+
+      // Participant stop sequences - default false (allows frags/quotes)
+      participant_stop_sequences: config.participant_stop_sequences ?? false,
 
       // TTS relay
       tts_relay: config.tts_relay,
