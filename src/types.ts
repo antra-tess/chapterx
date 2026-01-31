@@ -134,6 +134,7 @@ export interface ModelConfig {
   presence_penalty?: number  // Penalty for token presence (0.0-2.0)
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
   prompt_caching?: boolean  // If true (default), apply cache_control markers for Anthropic prompt caching
+  cache_ttl?: '5m' | '1h'  // Anthropic cache TTL - '5m' (default) or '1h' (extended)
   participant_stop_sequences?: boolean  // If true, membrane generates stop sequences from participant names (default: false)
 }
 
@@ -163,6 +164,7 @@ export interface BotConfig {
   recent_participant_count: number  // Number of recent participants for stop sequences
   authorized_roles: string[]  // Roles authorized to use .history commands
   prompt_caching?: boolean  // Enable Anthropic prompt caching (default: true)
+  cache_ttl?: '5m' | '1h'  // Anthropic cache TTL - '5m' (default) or '1h' (extended)
   
   // Image config
   include_images: boolean

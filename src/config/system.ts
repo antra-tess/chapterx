@@ -256,6 +256,7 @@ export class ConfigSystem {
       recent_participant_count: config.recent_participant_count || 10,
       authorized_roles: config.authorized_roles || [],
       prompt_caching: config.prompt_caching !== false,  // Default: true
+      cache_ttl: config.cache_ttl,  // Optional: '5m' (default) or '1h' (extended Anthropic caching)
 
       // Image config
       include_images: config.include_images ?? true,

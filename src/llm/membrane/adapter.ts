@@ -14,155 +14,23 @@ import type {
   StopReason,
 } from '../../types.js';
 
-// NOTE: membrane types are defined locally until membrane is installed
-// Once `npm install @animalabs/membrane` is run,
-// these can be replaced with: import type { ... } from '@animalabs/membrane';
+// Import types from @animalabs/membrane
+import type {
+  NormalizedMessage,
+  NormalizedRequest,
+  NormalizedResponse,
+  ContentBlock as MembraneContentBlock,
+  ImageContent as MembraneImageContent,
+  ToolUseContent as MembraneToolUseContent,
+  ToolResultContent as MembraneToolResultContent,
+  ToolDefinition as MembraneToolDefinition,
+  MessageMetadata,
+  GenerationConfig,
+  ToolMode,
+  StopReason as MembraneStopReason,
+} from '@animalabs/membrane';
 
-// ============================================================================
-// Membrane Types (local definitions until package is installed)
-// ============================================================================
-
-interface MessageMetadata {
-  timestamp?: Date;
-  sourceId?: string;
-  [key: string]: unknown;
-}
-
-interface NormalizedMessage {
-  participant: string;
-  content: MembraneContentBlock[];
-  metadata?: MessageMetadata;
-  /** If true, cache boundary is placed after this message (used by formatter) */
-  cacheBreakpoint?: boolean;
-}
-
-interface GenerationConfig {
-  model: string;
-  maxTokens: number;
-  temperature?: number;
-  topP?: number;
-  presencePenalty?: number;
-  frequencyPenalty?: number;
-  thinking?: {
-    enabled: boolean;
-    budgetTokens?: number;
-  };
-}
-
-type ToolMode = 'xml' | 'native' | 'auto';
-
-interface NormalizedRequest {
-  messages: NormalizedMessage[];
-  system?: string;
-  config: GenerationConfig;
-  tools?: MembraneToolDefinition[];
-  toolMode?: ToolMode;
-  stopSequences?: string[] | { sequences: string[] };
-  maxParticipantsForStop?: number;
-}
-
-type MembraneStopReason =
-  | 'end_turn'
-  | 'max_tokens'
-  | 'stop_sequence'
-  | 'tool_use'
-  | 'refusal'
-  | 'abort';
-
-/**
- * Membrane's ToolCall type
- */
-interface MembraneToolCall {
-  id: string;
-  name: string;
-  input: Record<string, unknown>;
-}
-
-/**
- * Membrane's ToolResult type (content can now be string or content blocks for images)
- */
-interface MembraneToolResult {
-  toolUseId: string;
-  content: string | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; data: string; mediaType: string } }>;
-  isError?: boolean;
-}
-
-interface NormalizedResponse {
-  content: MembraneContentBlock[];
-  
-  /**
-   * Raw assistant output text including all XML.
-   * NEW in streaming refactor - use for verbatim prefill.
-   */
-  rawAssistantText: string;
-  
-  /**
-   * Tool calls extracted from response (convenience accessor).
-   * NEW in streaming refactor.
-   */
-  toolCalls: MembraneToolCall[];
-  
-  /**
-   * Tool results executed during this response.
-   * NEW in streaming refactor - empty for complete(), populated by stream().
-   */
-  toolResults: MembraneToolResult[];
-  
-  stopReason: MembraneStopReason;
-  usage: { inputTokens: number; outputTokens: number };
-  details: {
-    stop: { reason: MembraneStopReason; wasTruncated: boolean };
-    usage: {
-      inputTokens: number;
-      outputTokens: number;
-      cacheCreationTokens?: number;
-      cacheReadTokens?: number;
-    };
-    timing: { totalDurationMs: number; attempts: number };
-    model: { requested: string; actual: string; provider: string };
-    cache: { markersInRequest: number; tokensCreated: number; tokensRead: number; hitRatio: number };
-  };
-  raw: { request: unknown; response: unknown };
-}
-
-interface MembraneToolDefinition {
-  name: string;
-  description: string;
-  inputSchema: {
-    type: 'object';
-    properties: Record<string, unknown>;
-    required?: string[];
-  };
-}
-
-type MembraneContentBlock =
-  | { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }
-  | MembraneImageContent
-  | MembraneToolUseContent
-  | MembraneToolResultContent
-  | { type: 'thinking'; thinking: string; signature?: string };
-
-interface MembraneImageContent {
-  type: 'image';
-  source: { type: 'base64'; data: string; mediaType: string } | { type: 'url'; url: string };
-  tokenEstimate?: number;
-}
-
-interface MembraneToolUseContent {
-  type: 'tool_use';
-  id: string;
-  name: string;
-  input: Record<string, unknown>;
-}
-
-interface MembraneToolResultContent {
-  type: 'tool_result';
-  toolUseId: string;
-  content: string | MembraneContentBlock[];
-  isError?: boolean;
-}
-
-// Export types for use by other modules
+// Re-export types for use by other modules (preserving existing API)
 export type {
   NormalizedMessage,
   NormalizedRequest,
@@ -450,6 +318,8 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     // - If participant_stop_sequences is false (default), disable them (set to 0)
     // - If participant_stop_sequences is true, use membrane default (don't set)
     maxParticipantsForStop: request.config.participant_stop_sequences ? undefined : 0,
+    // Pass through cache TTL for Anthropic extended caching (1h vs default 5m)
+    cacheTtl: request.config.cache_ttl,
   };
 
   // Handle stop sequences
