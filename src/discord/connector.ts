@@ -3,7 +3,7 @@
  * Handles all Discord API interactions
  */
 
-import { Attachment, Client, GatewayIntentBits, Message, TextChannel } from 'discord.js'
+import { Attachment, Client, GatewayIntentBits, Message, PermissionFlagsBits, OAuth2Scopes, TextChannel } from 'discord.js'
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -128,6 +128,65 @@ export class DiscordConnector {
    */
   getBotUsername(): string | undefined {
     return this.client.user?.username
+  }
+
+  /**
+   * Generate a bot invite URL with required permissions
+   * 
+   * Default permissions include everything needed for a typical ChapterX bot:
+   * - View channels, read message history, send messages
+   * - Manage messages (for editing own messages, deleting in some cases)
+   * - Add reactions, use external emojis
+   * - Attach files, embed links
+   * - Use slash commands
+   */
+  generateInviteUrl(options?: {
+    /** Override default permissions (bigint or array of permission flags) */
+    permissions?: bigint | (keyof typeof PermissionFlagsBits)[];
+    /** Pre-select a specific guild */
+    guildId?: string;
+    /** Disable guild selection (only works with guildId) */
+    disableGuildSelect?: boolean;
+  }): string | undefined {
+    if (!this.client.user) {
+      return undefined
+    }
+
+    // Default permissions for ChapterX bots
+    const defaultPermissions = [
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.SendMessagesInThreads,
+      PermissionFlagsBits.ReadMessageHistory,
+      PermissionFlagsBits.ManageMessages,
+      PermissionFlagsBits.AddReactions,
+      PermissionFlagsBits.UseExternalEmojis,
+      PermissionFlagsBits.AttachFiles,
+      PermissionFlagsBits.EmbedLinks,
+    ].reduce((acc, perm) => acc | perm, 0n)
+
+    // Calculate permissions
+    let permissions: bigint
+    if (options?.permissions) {
+      if (typeof options.permissions === 'bigint') {
+        permissions = options.permissions
+      } else {
+        // Array of permission names
+        permissions = options.permissions.reduce(
+          (acc, name) => acc | PermissionFlagsBits[name],
+          0n
+        )
+      }
+    } else {
+      permissions = defaultPermissions
+    }
+
+    return this.client.generateInvite({
+      scopes: [OAuth2Scopes.Bot, OAuth2Scopes.ApplicationsCommands],
+      permissions,
+      guild: options?.guildId,
+      disableGuildSelect: options?.disableGuildSelect,
+    })
   }
 
   /**

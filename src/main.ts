@@ -120,6 +120,12 @@ async function main() {
     const botName = botNameOverride || botUsername
     logger.info({ botUsername, botUserId, botName, emsMode: !!emsPath }, 'Bot identity established')
 
+    // Generate and log the bot invite URL
+    const inviteUrl = connector.generateInviteUrl()
+    if (inviteUrl) {
+      logger.info({ inviteUrl }, 'Bot invite URL (add to server)')
+    }
+
     // Create and start agent loop
     const agentLoop = new AgentLoop(
       botName,  // Bot name from BOT_NAME env var (EMS mode) or Discord username
