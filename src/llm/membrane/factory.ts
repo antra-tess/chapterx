@@ -727,12 +727,13 @@ export function createMembraneFromVendorConfigs(
 
     } else if (vendorName.startsWith('bedrock')) {
       // Bedrock adapter - uses AWS Bedrock for Claude models
+      // Support multiple naming conventions for AWS credentials
       if (!bedrockConfig) {
         bedrockConfig = {
-          accessKeyId: config?.aws_access_key_id,
-          secretAccessKey: config?.aws_secret_access_key,
-          region: config?.aws_region,
-          sessionToken: config?.aws_session_token,
+          accessKeyId: config?.aws_access_key_id ?? config?.aws_access_key,
+          secretAccessKey: config?.aws_secret_access_key ?? config?.aws_secret_key,
+          region: config?.aws_region ?? config?.region,
+          sessionToken: config?.aws_session_token ?? config?.session_token,
           provides: vendorConfig.provides,
         };
       }
