@@ -15,6 +15,7 @@ import {
   OpenAIAdapter,
   OpenAICompatibleAdapter,
   OpenAICompletionsAdapter,
+  BedrockAdapter,
   AnthropicXmlFormatter,
   NativeFormatter,
   CompletionsFormatter,
@@ -53,6 +54,19 @@ export interface OpenAICompletionsConfig {
   warnOnImageStrip?: boolean;
   /** End-of-turn token appended after each message (default: '<|eot|>', null to disable) */
   eotToken?: string | null;
+}
+
+export interface BedrockConfig {
+  /** AWS access key ID */
+  accessKeyId?: string;
+  /** AWS secret access key */
+  secretAccessKey?: string;
+  /** AWS region (defaults to us-west-2) */
+  region?: string;
+  /** AWS session token (for temporary credentials) */
+  sessionToken?: string;
+  /** Model patterns this provider serves (e.g., ["bedrock:*", "anthropic.claude*"]) */
+  provides?: string[];
 }
 
 export type FormatterType = 'anthropic-xml' | 'native' | 'completions';
@@ -100,6 +114,12 @@ export interface MembraneFactoryConfig {
    * Uses Human:/Assistant: format, no image support
    */
   openaiCompletionsProviders?: OpenAICompletionsConfig[];
+
+  /**
+   * AWS Bedrock configuration for Claude models via AWS
+   * Uses AWS credentials for authentication
+   */
+  bedrock?: BedrockConfig;
 
   /**
    * Bot/assistant name for prefill mode
@@ -200,6 +220,15 @@ function getAdapterForModel(
     if (openrouterAdapter) {
       logger.debug({ modelName, adapterKey: 'openrouter' }, 'Routed model to OpenRouter (provider/model format)');
       return openrouterAdapter;
+    }
+  }
+
+  // Bedrock models (anthropic.* prefix or bedrock:* prefix)
+  if (modelName.startsWith('anthropic.') || modelName.startsWith('bedrock:')) {
+    const bedrockAdapter = adapters.get('bedrock');
+    if (bedrockAdapter) {
+      logger.debug({ modelName, adapterKey: 'bedrock' }, 'Routed model to Bedrock (anthropic.*/bedrock:* pattern)');
+      return bedrockAdapter;
     }
   }
 
@@ -416,6 +445,36 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
   } else {
     logger.debug('Membrane: No OpenAI API key provided, adapter not created');
   }
+
+  // Create Bedrock adapter if configured or AWS credentials available
+  if (config.bedrock || process.env.AWS_ACCESS_KEY_ID) {
+    try {
+      const bedrockAdapter = new BedrockAdapter({
+        accessKeyId: config.bedrock?.accessKeyId,
+        secretAccessKey: config.bedrock?.secretAccessKey,
+        region: config.bedrock?.region,
+        sessionToken: config.bedrock?.sessionToken,
+      });
+      adapters.set('bedrock', bedrockAdapter);
+      
+      // Register routing patterns if provided
+      if (config.bedrock?.provides && config.bedrock.provides.length > 0) {
+        patternRoutes.push({
+          adapterKey: 'bedrock',
+          patterns: config.bedrock.provides,
+        });
+      }
+      
+      logger.info({ 
+        region: config.bedrock?.region ?? process.env.AWS_REGION ?? 'us-west-2',
+        patterns: config.bedrock?.provides ?? [],
+      }, 'Membrane: Bedrock adapter initialized');
+    } catch (error) {
+      logger.error({ error }, 'Failed to create Bedrock adapter');
+    }
+  } else {
+    logger.debug('Membrane: No Bedrock config or AWS credentials provided, adapter not created');
+  }
   
   // Create OpenAI-compatible adapters
   // Support both legacy single config and new multiple configs
@@ -511,7 +570,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
   if (adapters.size === 0) {
     throw new Error(
       'Membrane: No provider adapters could be created. ' +
-      'Please provide at least one of: anthropicApiKey, openrouterApiKey, openaiApiKey, openaiCompatible, openaiCompatibleProviders, openaiCompletionsProviders'
+      'Please provide at least one of: anthropicApiKey, openrouterApiKey, openaiApiKey, bedrock, openaiCompatible, openaiCompatibleProviders, openaiCompletionsProviders'
     );
   }
   
@@ -612,6 +671,7 @@ export function createMembraneFromVendorConfigs(
   let anthropicApiKey: string | undefined;
   let openrouterApiKey: string | undefined;
   let openaiApiKey: string | undefined;
+  let bedrockConfig: BedrockConfig | undefined;
   const openaiCompatibleProviders: OpenAICompatibleConfig[] = [];
   const openaiCompletionsProviders: OpenAICompletionsConfig[] = [];
 
@@ -655,6 +715,25 @@ export function createMembraneFromVendorConfigs(
       }
 
       logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found Anthropic vendor (uses native API)');
+
+    } else if (vendorName.startsWith('bedrock')) {
+      // Bedrock adapter - uses AWS Bedrock for Claude models
+      if (!bedrockConfig) {
+        bedrockConfig = {
+          accessKeyId: config?.aws_access_key_id,
+          secretAccessKey: config?.aws_secret_access_key,
+          region: config?.aws_region,
+          sessionToken: config?.aws_session_token,
+          provides: vendorConfig.provides,
+        };
+      }
+
+      // Auto-detect anthropic-xml formatter for Bedrock vendors (same as Anthropic)
+      if (!detectedFormatter) {
+        detectedFormatter = 'anthropic-xml';
+      }
+
+      logger.debug({ vendorName, region: bedrockConfig.region, provides: vendorConfig.provides }, 'Found Bedrock vendor (uses AWS API)');
 
     } else if (vendorName.startsWith('openrouter')) {
       // OpenRouter adapter - uses OpenRouter's API (similar to OpenAI but with extras)
@@ -748,6 +827,7 @@ export function createMembraneFromVendorConfigs(
     anthropicApiKey,
     openrouterApiKey,
     openaiApiKey,
+    bedrock: bedrockConfig,
     openaiCompatibleProviders: openaiCompatibleProviders.length > 0 ? openaiCompatibleProviders : undefined,
     openaiCompletionsProviders: openaiCompletionsProviders.length > 0 ? openaiCompletionsProviders : undefined,
     assistantName,
