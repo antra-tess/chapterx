@@ -446,12 +446,20 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
     logger.debug('Membrane: No OpenAI API key provided, adapter not created');
   }
 
-  // Create Bedrock adapter if configured or AWS credentials available
-  if (config.bedrock || process.env.AWS_ACCESS_KEY_ID) {
+  // Create Bedrock adapter if valid AWS credentials are available
+  // Check for real credentials (not placeholders) from config or environment
+  const bedrockAccessKey = config.bedrock?.accessKeyId ?? process.env.AWS_ACCESS_KEY_ID;
+  const bedrockSecretKey = config.bedrock?.secretAccessKey ?? process.env.AWS_SECRET_ACCESS_KEY;
+  const hasValidBedrockCreds = bedrockAccessKey && 
+    bedrockSecretKey && 
+    !bedrockAccessKey.includes('YOUR_') &&
+    !bedrockSecretKey.includes('YOUR_');
+  
+  if (hasValidBedrockCreds) {
     try {
       const bedrockAdapter = new BedrockAdapter({
-        accessKeyId: config.bedrock?.accessKeyId,
-        secretAccessKey: config.bedrock?.secretAccessKey,
+        accessKeyId: bedrockAccessKey,
+        secretAccessKey: bedrockSecretKey,
         region: config.bedrock?.region,
         sessionToken: config.bedrock?.sessionToken,
       });
@@ -470,10 +478,11 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
         patterns: config.bedrock?.provides ?? [],
       }, 'Membrane: Bedrock adapter initialized');
     } catch (error) {
-      logger.error({ error }, 'Failed to create Bedrock adapter');
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error({ error: errorMessage }, 'Failed to create Bedrock adapter');
     }
   } else {
-    logger.debug('Membrane: No Bedrock config or AWS credentials provided, adapter not created');
+    logger.debug('Membrane: No valid Bedrock credentials provided (or placeholders detected), adapter not created');
   }
   
   // Create OpenAI-compatible adapters
