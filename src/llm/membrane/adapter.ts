@@ -318,6 +318,8 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     // - If participant_stop_sequences is false (default), disable them (set to 0)
     // - If participant_stop_sequences is true, use membrane default (don't set)
     maxParticipantsForStop: request.config.participant_stop_sequences ? undefined : 0,
+    // Prompt caching control - when false, cache_control markers are not added to requests
+    promptCaching: request.config.prompt_caching,
     // Pass through cache TTL for Anthropic extended caching (1h vs default 5m)
     cacheTtl: request.config.cache_ttl,
   };
