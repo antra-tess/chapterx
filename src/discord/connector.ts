@@ -218,18 +218,22 @@ export class DiscordConnector {
       // For threads: implicitly fetch parent channel context up to the branching point
       // This happens even without an explicit .history message
       // Skip if .history explicitly cleared context
+      // Track parent channel for cache anchor extension (needed if anchor is in parent context)
+      let threadParentChannel: TextChannel | undefined = undefined
+      let threadStartMessageId: string | undefined = undefined
+      
       if (channel.isThread() && this.lastHistoryDidClear) {
         logger.debug('Skipping parent context fetch - .history cleared context')
       } else if (channel.isThread()) {
         startProfile('threadParentFetch')
         const thread = channel as any  // Discord.js ThreadChannel
-        const parentChannel = thread.parent as TextChannel
-        const threadStartMessageId = thread.id  // Thread ID is the same as the message ID that started it
+        threadParentChannel = thread.parent as TextChannel
+        threadStartMessageId = thread.id  // Thread ID is the same as the message ID that started it
         
-        if (parentChannel && parentChannel.isTextBased()) {
+        if (threadParentChannel && threadParentChannel.isTextBased()) {
           logger.debug({
             threadId: thread.id,
-            parentChannelId: parentChannel.id,
+            parentChannelId: threadParentChannel.id,
             threadStartMessageId,
             currentMessageCount: messages.length,
             remainingDepth: depth - messages.length
@@ -237,7 +241,7 @@ export class DiscordConnector {
           
           // Fetch from parent channel up to (and including) the thread's starting message
           const parentMessages = await this.fetchMessagesRecursive(
-            parentChannel,
+            threadParentChannel,
             threadStartMessageId,  // End at the message that started the thread
             undefined,
             Math.max(0, depth - messages.length),  // Remaining message budget
@@ -275,14 +279,23 @@ export class DiscordConnector {
           let extended = 0
           let currentBefore = oldestMessage.id  // Oldest message in current window
           
+          // Determine which channel to extend from:
+          // - For threads: if oldest message is from parent channel (ID < thread start), extend from parent
+          // - Otherwise: extend from the original channel
+          const isOldestFromParent = threadStartMessageId && oldestMessage.id < threadStartMessageId
+          const extensionChannel = (isOldestFromParent && threadParentChannel) ? threadParentChannel : channel
+          
           logger.debug({ 
             currentBefore, 
             maxExtend,
-            firstMessageId 
+            firstMessageId,
+            isThread: channel.isThread(),
+            isOldestFromParent,
+            extensionChannelId: extensionChannel.id
           }, 'Cache marker not in window, extending fetch backwards')
           
           while (extended < maxExtend) {
-            const batch = await channel.messages.fetch({ limit: 100, before: currentBefore })
+            const batch = await extensionChannel.messages.fetch({ limit: 100, before: currentBefore })
             if (batch.size === 0) break
             
             const batchMessages = Array.from(batch.values()).sort((a, b) => a.id.localeCompare(b.id))
@@ -310,7 +323,8 @@ export class DiscordConnector {
               firstMessageId, 
               extended,
               totalMessages: messages.length,
-              oldestId: messages[0]?.id
+              oldestId: messages[0]?.id,
+              extensionChannelId: extensionChannel.id
             }, 'Cache marker not found even after extending fetch - may have been deleted')
           }
         }
