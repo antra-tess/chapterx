@@ -73,15 +73,13 @@ export class MembraneProvider {
 
       // Determine formatter: per-model config > default (undefined)
       const formatterType = getFormatterForModel(request.config.model);
+      console.log('[FORMATTER DEBUG]', { model: request.config.model, formatterType });
       const formatter = formatterType === 'native'
         ? new NativeFormatter()
         : formatterType === 'anthropic-xml'
           ? new AnthropicXmlFormatter()
           : undefined;
-
-      if (formatterType) {
-        logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter override for model in complete()');
-      }
+      console.log('[FORMATTER DEBUG] Created formatter:', formatter?.constructor?.name ?? 'none (using default)');
 
       // Cast to any because our local types may not exactly match membrane's updated types
       const response = await this.membrane.complete(normalizedRequest as any, {
