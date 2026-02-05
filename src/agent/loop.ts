@@ -586,7 +586,19 @@ export class AgentLoop {
     
     activationPromise
       .catch((error) => {
-        logger.error({ error, channelId, guildId }, 'Failed to handle activation')
+        // Only log essential error info to avoid massive JSON dumps from MembraneError
+        logger.error({
+          error: {
+            message: error?.message,
+            name: error?.name,
+            code: error?.code,
+            type: error?.type,
+            status: error?.status,
+            stack: error?.stack?.split('\n').slice(0, 5).join('\n'),
+          },
+          channelId,
+          guildId
+        }, 'Failed to handle activation')
       })
       .finally(() => {
         this.activeChannels.delete(channelId)
