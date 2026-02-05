@@ -16,6 +16,7 @@ import {
   type NormalizedRequest,
   type NormalizedResponse,
 } from './adapter.js';
+import { getFormatterForModel } from './factory.js';
 import { NativeFormatter, AnthropicXmlFormatter } from '@animalabs/membrane';
 
 // ============================================================================
@@ -146,21 +147,17 @@ export class MembraneProvider {
     const llmResponseRefs: string[] = [];
 
     try {
-      // Determine formatter override
-      // Auto-detect: claude-opus-4-* models don't support prefill
-      const model = request.config.model;
-      let formatterOverride = options.formatterOverride;
-      if (!formatterOverride && model.includes('opus-4')) {
-        formatterOverride = 'native';
-        logger.debug({ model }, 'Auto-detected opus-4 model, using native formatter (no prefill)');
-      }
-
-      // Create formatter instance if override specified
-      const formatter = formatterOverride === 'native'
+      // Determine formatter: explicit override > per-model config > default (undefined)
+      const formatterType = options.formatterOverride ?? getFormatterForModel(request.config.model);
+      const formatter = formatterType === 'native'
         ? new NativeFormatter()
-        : formatterOverride === 'anthropic-xml'
+        : formatterType === 'anthropic-xml'
           ? new AnthropicXmlFormatter()
           : undefined;
+
+      if (formatterType) {
+        logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter override for model');
+      }
 
       // Cast to any because our local types may not exactly match membrane's updated types
       const streamOptions: any = {

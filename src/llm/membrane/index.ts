@@ -50,6 +50,7 @@ export {
   createMembrane,
   createMembraneFromVendorConfigs,
   RoutingAdapter,
+  getFormatterForModel,
 } from './factory.js';
 
 export type { MembraneFactoryConfig, OpenAICompatibleConfig, OpenAICompletionsConfig, FormatterType, VendorConfigInput } from './factory.js';

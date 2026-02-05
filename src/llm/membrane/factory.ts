@@ -189,6 +189,34 @@ interface AdapterRouting {
 let patternRoutes: AdapterRouting[] = [];
 
 /**
+ * Track model pattern to formatter mapping
+ * Used to determine which formatter to use for a given model
+ */
+interface FormatterRouting {
+  patterns: string[];
+  formatter: FormatterType;
+}
+
+// Module-level storage for formatter routing
+let formatterRoutes: FormatterRouting[] = [];
+
+/**
+ * Get the formatter type for a given model name
+ * Returns undefined if no specific formatter is configured (use default)
+ */
+export function getFormatterForModel(modelName: string): FormatterType | undefined {
+  for (const route of formatterRoutes) {
+    for (const pattern of route.patterns) {
+      if (matchesPattern(modelName, pattern)) {
+        logger.debug({ modelName, formatter: route.formatter }, 'Found formatter for model');
+        return route.formatter;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
  * Determine which adapter supports a given model
  *
  * Routing order:
@@ -391,9 +419,10 @@ class RoutingAdapter implements ProviderAdapter {
  */
 export function createMembrane(config: MembraneFactoryConfig): Membrane {
   const adapters = new Map<string, ProviderAdapter>();
-  
+
   // Reset routing patterns
   patternRoutes = [];
+  formatterRoutes = [];
   
   // Create Anthropic adapter if API key is available
   const anthropicKey = config.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY;
@@ -693,10 +722,19 @@ export function createMembraneFromVendorConfigs(
     const apiKey = config?.openai_api_key ?? config?.open_api_key ?? config?.api_key ?? 'not-needed';
     const baseUrl = config?.api_base ?? config?.openai_compatible_base_url ?? config?.openai_completions_base_url;
 
-    // Capture formatter from vendor config (first one with formatter setting wins)
+    // Capture formatter from vendor config (first one with formatter setting wins for default)
     if (!detectedFormatter && vendorConfig.formatter) {
       detectedFormatter = vendorConfig.formatter;
-      logger.debug({ vendorName, formatter: detectedFormatter }, 'Using formatter from vendor config');
+      logger.debug({ vendorName, formatter: detectedFormatter }, 'Using formatter from vendor config as default');
+    }
+
+    // Register per-model formatter routing if vendor has both formatter and provides patterns
+    if (vendorConfig.formatter && vendorConfig.provides && vendorConfig.provides.length > 0) {
+      formatterRoutes.push({
+        patterns: vendorConfig.provides,
+        formatter: vendorConfig.formatter,
+      });
+      logger.debug({ vendorName, formatter: vendorConfig.formatter, patterns: vendorConfig.provides }, 'Registered formatter routes for vendor');
     }
 
     // Capture completions config from vendor
