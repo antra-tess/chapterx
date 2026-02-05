@@ -420,9 +420,8 @@ class RoutingAdapter implements ProviderAdapter {
 export function createMembrane(config: MembraneFactoryConfig): Membrane {
   const adapters = new Map<string, ProviderAdapter>();
 
-  // Reset routing patterns
+  // Reset adapter routing patterns (formatterRoutes is managed by createMembraneFromVendorConfigs)
   patternRoutes = [];
-  formatterRoutes = [];
   
   // Create Anthropic adapter if API key is available
   const anthropicKey = config.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY;
@@ -706,6 +705,9 @@ export function createMembraneFromVendorConfigs(
     maxParticipantsForStop?: number;
   }
 ): Membrane {
+  // Reset formatter routes before processing vendors (adapter routes are reset in createMembrane)
+  formatterRoutes = [];
+
   let anthropicApiKey: string | undefined;
   let openrouterApiKey: string | undefined;
   let openaiApiKey: string | undefined;
