@@ -62,6 +62,8 @@ export class MembraneProvider {
     const trace = getCurrentTrace();
     const callId = trace?.startLLMCall(trace.getLLMCallCount());
 
+    logger.debug({ hasTrace: !!trace, callId, model: request.config.model }, 'Starting membrane complete');
+
     // Track request/response refs for trace
     let requestRef: string | undefined;
     let responseRef: string | undefined;
@@ -122,13 +124,18 @@ export class MembraneProvider {
         type: error.type,
         status: error.status,
         model: request.config.model,
+        hasTrace: !!trace,
+        hasCallId: !!callId,
       }, 'Membrane complete() failed');
 
       if (trace && callId) {
+        logger.debug({ callId }, 'Recording error to trace via failLLMCall');
         trace.failLLMCall(callId, {
           message: error instanceof Error ? error.message : String(error),
           retryCount: 0,
         });
+      } else {
+        logger.warn({ hasTrace: !!trace, hasCallId: !!callId }, 'Cannot record error to trace - missing trace context or callId');
       }
       throw error;
     }
@@ -146,6 +153,8 @@ export class MembraneProvider {
   ): Promise<LLMCompletion> {
     const trace = getCurrentTrace();
     const callId = trace?.startLLMCall(trace.getLLMCallCount());
+
+    logger.debug({ hasTrace: !!trace, callId, model: request.config.model }, 'Starting membrane stream');
 
     const normalizedRequest = toMembraneRequest(request);
 
@@ -247,10 +256,13 @@ export class MembraneProvider {
         model: request.config.model,
         retryable: error.retryable,
         retryAfter: error.retryAfter,
+        hasTrace: !!trace,
+        hasCallId: !!callId,
       }, 'Membrane stream() failed');
 
       // Record error to trace
       if (trace && callId) {
+        logger.debug({ callId }, 'Recording error to trace via failLLMCall');
         trace.failLLMCall(callId, {
           message: `${error.name || 'Error'}: ${error.message}`,
           code: error.code,
@@ -265,6 +277,8 @@ export class MembraneProvider {
             toolCount: request.tools?.length || 0,
           },
         });
+      } else {
+        logger.warn({ hasTrace: !!trace, hasCallId: !!callId }, 'Cannot record error to trace - missing trace context or callId');
       }
       throw error;
     }
