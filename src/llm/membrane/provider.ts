@@ -73,38 +73,26 @@ export class MembraneProvider {
 
       // Determine formatter: per-model config > default (undefined)
       const formatterType = getFormatterForModel(request.config.model);
+      const formatter = formatterType === 'native'
+        ? new NativeFormatter()
+        : formatterType === 'anthropic-xml'
+          ? new AnthropicXmlFormatter()
+          : undefined;
 
-      let response: NormalizedResponse;
-
-      if (formatterType) {
-        // Membrane's complete() doesn't support formatter override, so use stream() instead
-        const formatter = formatterType === 'native'
-          ? new NativeFormatter()
-          : new AnthropicXmlFormatter();
-
-        console.log('[FORMATTER] Using stream() with', formatter.constructor.name, 'for model', request.config.model);
-
-        // Cast to any because our local types may not exactly match membrane's updated types
-        response = await this.membrane.stream(normalizedRequest as any, {
-          formatter,
-          onRequest: (rawRequest: unknown) => {
-            requestRef = this.logRequestToFile(rawRequest);
-          },
-          onResponse: (rawResponse: unknown) => {
-            responseRef = this.logRawResponseToFile(rawResponse);
-          },
-        });
-      } else {
-        // Use standard complete() with default formatter
-        response = await this.membrane.complete(normalizedRequest as any, {
-          onRequest: (rawRequest: unknown) => {
-            requestRef = this.logRequestToFile(rawRequest);
-          },
-          onResponse: (rawResponse: unknown) => {
-            responseRef = this.logRawResponseToFile(rawResponse);
-          },
-        });
+      if (formatter) {
+        console.log('[FORMATTER] Using', formatter.constructor.name, 'for model', request.config.model);
       }
+
+      // Cast to any because our local types may not exactly match membrane's updated types
+      const response = await this.membrane.complete(normalizedRequest as any, {
+        formatter,
+        onRequest: (rawRequest: unknown) => {
+          requestRef = this.logRequestToFile(rawRequest);
+        },
+        onResponse: (rawResponse: unknown) => {
+          responseRef = this.logRawResponseToFile(rawResponse);
+        },
+      });
       const completion = fromMembraneResponse(response as any);
       
       // Record to trace
