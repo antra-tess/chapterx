@@ -113,7 +113,17 @@ export class MembraneProvider {
 
       return completion;
       
-    } catch (error) {
+    } catch (error: any) {
+      // Log error to console for visibility
+      logger.error({
+        error: error.message || String(error),
+        name: error.name,
+        code: error.code,
+        type: error.type,
+        status: error.status,
+        model: request.config.model,
+      }, 'Membrane complete() failed');
+
       if (trace && callId) {
         trace.failLLMCall(callId, {
           message: error instanceof Error ? error.message : String(error),
@@ -123,7 +133,7 @@ export class MembraneProvider {
       throw error;
     }
   }
-  
+
   /**
    * Stream a request with tool execution support
    *
@@ -227,6 +237,18 @@ export class MembraneProvider {
 
       return completion;
     } catch (error: any) {
+      // Log error to console for visibility
+      logger.error({
+        error: error.message || String(error),
+        name: error.name,
+        code: error.code,
+        type: error.type,
+        status: error.status,
+        model: request.config.model,
+        retryable: error.retryable,
+        retryAfter: error.retryAfter,
+      }, 'Membrane stream() failed');
+
       // Record error to trace
       if (trace && callId) {
         trace.failLLMCall(callId, {
