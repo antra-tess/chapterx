@@ -70,8 +70,22 @@ export class MembraneProvider {
 
     try {
       const normalizedRequest = toMembraneRequest(request);
+
+      // Determine formatter: per-model config > default (undefined)
+      const formatterType = getFormatterForModel(request.config.model);
+      const formatter = formatterType === 'native'
+        ? new NativeFormatter()
+        : formatterType === 'anthropic-xml'
+          ? new AnthropicXmlFormatter()
+          : undefined;
+
+      if (formatterType) {
+        logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter override for model in complete()');
+      }
+
       // Cast to any because our local types may not exactly match membrane's updated types
       const response = await this.membrane.complete(normalizedRequest as any, {
+        formatter,
         onRequest: (rawRequest: unknown) => {
           requestRef = this.logRequestToFile(rawRequest);
         },
