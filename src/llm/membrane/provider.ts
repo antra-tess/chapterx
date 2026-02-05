@@ -116,7 +116,17 @@ export class MembraneProvider {
       return completion;
       
     } catch (error: any) {
-      // Log error to console for visibility
+      // Direct console output for immediate visibility
+      console.error('[MEMBRANE ERROR - complete()]', {
+        message: error.message,
+        name: error.name,
+        code: error.code,
+        type: error.type,
+        status: error.status,
+        model: request.config.model,
+      });
+
+      // Log error via structured logger
       logger.error({
         error: error.message || String(error),
         name: error.name,
@@ -246,7 +256,19 @@ export class MembraneProvider {
 
       return completion;
     } catch (error: any) {
-      // Log error to console for visibility
+      // Direct console output for immediate visibility
+      console.error('[MEMBRANE ERROR - stream()]', {
+        message: error.message,
+        name: error.name,
+        code: error.code,
+        type: error.type,
+        status: error.status,
+        model: request.config.model,
+        retryable: error.retryable,
+        retryAfter: error.retryAfter,
+      });
+
+      // Log error via structured logger
       logger.error({
         error: error.message || String(error),
         name: error.name,
