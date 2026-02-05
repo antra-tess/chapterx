@@ -16,6 +16,7 @@ import {
   type NormalizedRequest,
   type NormalizedResponse,
 } from './adapter.js';
+import { NativeFormatter, AnthropicXmlFormatter } from '@animalabs/membrane';
 
 // ============================================================================
 // Membrane Interface (local definition until package is installed)
@@ -145,8 +146,24 @@ export class MembraneProvider {
     const llmResponseRefs: string[] = [];
 
     try {
+      // Determine formatter override
+      // Auto-detect: claude-opus-4-* models don't support prefill
+      const model = request.config.model;
+      let formatterOverride = options.formatterOverride;
+      if (!formatterOverride && model.includes('opus-4')) {
+        formatterOverride = 'native';
+        logger.debug({ model }, 'Auto-detected opus-4 model, using native formatter (no prefill)');
+      }
+
+      // Create formatter instance if override specified
+      const formatter = formatterOverride === 'native'
+        ? new NativeFormatter()
+        : formatterOverride === 'anthropic-xml'
+          ? new AnthropicXmlFormatter()
+          : undefined;
+
       // Cast to any because our local types may not exactly match membrane's updated types
-      const response = await this.membrane.stream(normalizedRequest as any, {
+      const streamOptions: any = {
         onChunk: options.onChunk,
         onBlock: options.onBlock,
         onToolCalls: options.onToolCalls,
@@ -154,6 +171,7 @@ export class MembraneProvider {
         onUsage: options.onUsage,
         maxToolDepth: options.maxToolDepth ?? 10,
         signal: options.signal,
+        formatter,
         // Capture all LLM API requests in tool loops
         onRequest: (llmRequest: any) => {
           logger.debug({ hasData: !!llmRequest }, 'onRequest callback triggered');
@@ -167,7 +185,8 @@ export class MembraneProvider {
           logger.debug({ ref }, 'onResponse logged to file');
           if (ref) llmResponseRefs.push(ref);
         },
-      });
+      };
+      const response = await this.membrane.stream(normalizedRequest as any, streamOptions);
 
       // Log membrane response to file
       const membraneResponseRef = this.logResponseToFile(response);
@@ -432,5 +451,12 @@ export interface StreamOptions {
 
   /** Abort signal */
   signal?: AbortSignal;
+
+  /**
+   * Override the default formatter for this request.
+   * Use 'native' to disable prefill mode (required for claude-opus-4-* models).
+   * Use 'anthropic-xml' for prefill mode with XML tools.
+   */
+  formatterOverride?: 'native' | 'anthropic-xml';
 }
 
