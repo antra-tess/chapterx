@@ -205,16 +205,14 @@ let formatterRoutes: FormatterRouting[] = [];
  * Returns undefined if no specific formatter is configured (use default)
  */
 export function getFormatterForModel(modelName: string): FormatterType | undefined {
-  console.log('[FORMATTER ROUTES]', { modelName, routeCount: formatterRoutes.length, routes: formatterRoutes });
   for (const route of formatterRoutes) {
     for (const pattern of route.patterns) {
       if (matchesPattern(modelName, pattern)) {
-        console.log('[FORMATTER MATCH]', { modelName, pattern, formatter: route.formatter });
+        logger.debug({ modelName, formatter: route.formatter }, 'Found formatter for model');
         return route.formatter;
       }
     }
   }
-  console.log('[FORMATTER NO MATCH]', { modelName });
   return undefined;
 }
 

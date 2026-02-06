@@ -80,7 +80,7 @@ export class MembraneProvider {
           : undefined;
 
       if (formatter) {
-        console.log('[FORMATTER] Using', formatter.constructor.name, 'for model', request.config.model);
+        logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter override for model');
       }
 
       // Cast to any because our local types may not exactly match membrane's updated types

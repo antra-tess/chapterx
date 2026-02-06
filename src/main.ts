@@ -145,9 +145,15 @@ async function main() {
     const membraneAssistantName = botConfigOnly.name || botName
 
     // Initialize membrane (required for LLM calls)
-    const membrane = createMembraneFromVendorConfigs(vendorConfigs, membraneAssistantName)
-    agentLoop.setMembrane(membrane)
-    logger.info({ assistantName: membraneAssistantName }, 'Membrane initialized for agent loop')
+    if (process.env.MOCK_LLM) {
+      const { MockMembrane } = await import('./llm/membrane/mock.js')
+      agentLoop.setMembrane(new MockMembrane() as any)
+      logger.info('Using MockMembrane (MOCK_LLM=1) - no real LLM calls')
+    } else {
+      const membrane = createMembraneFromVendorConfigs(vendorConfigs, membraneAssistantName)
+      agentLoop.setMembrane(membrane)
+      logger.info({ assistantName: membraneAssistantName }, 'Membrane initialized for agent loop')
+    }
 
     // Initialize TTS relay if configured in bot config
     if (botConfigOnly.tts_relay?.enabled) {

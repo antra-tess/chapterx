@@ -45,6 +45,12 @@ export class DiscordConnector {
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
   private urlMapPath: string  // Path to URL map file
 
+  // Push-based caches (populated from gateway events, avoids API fetches)
+  private messageCache = new Map<string, Message[]>()  // channelId → messages (chronological)
+  private messageCachePopulated = new Set<string>()  // channels that had initial API fetch
+  private pinnedConfigCache = new Map<string, string[]>()  // channelId → pinned config strings
+  private pinnedConfigDirty = new Set<string>()  // channels whose pins changed since last fetch
+
   constructor(
     private queue: EventQueue,
     private options: ConnectorOptions
@@ -206,6 +212,13 @@ export class DiscordConnector {
    * Used to load config BEFORE determining fetch depth
    */
   async fetchPinnedConfigs(channelId: string): Promise<string[]> {
+    // Check push-based cache first
+    const cached = this.getCachedPinnedConfigs(channelId)
+    if (cached !== null) {
+      logger.debug({ channelId }, 'Pinned config cache hit')
+      return cached
+    }
+
     try {
       const channel = await this.client.channels.fetch(channelId) as TextChannel
       if (!channel || !channel.isTextBased()) {
@@ -213,7 +226,13 @@ export class DiscordConnector {
       }
       const pinnedMessages = await channel.messages.fetchPinned(false)
       const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
-      return this.extractConfigs(sortedPinned)
+      const configs = this.extractConfigs(sortedPinned)
+
+      // Store in cache
+      this.cachePinnedConfigs(channelId, configs)
+      logger.debug({ channelId }, 'Pinned config cache miss - fetched from API')
+
+      return configs
     } catch (error) {
       logger.warn({ error, channelId }, 'Failed to fetch pinned configs')
       return []
@@ -354,7 +373,7 @@ export class DiscordConnector {
           }, 'Cache marker not in window, extending fetch backwards')
           
           while (extended < maxExtend) {
-            const batch = await extensionChannel.messages.fetch({ limit: 100, before: currentBefore })
+            const batch = await this.cachedFetchMessages(extensionChannel, { limit: 100, before: currentBefore })
             if (batch.size === 0) break
             
             const batchMessages = Array.from(batch.values()).sort((a, b) => a.id.localeCompare(b.id))
@@ -587,10 +606,10 @@ export class DiscordConnector {
         isFirstBatch
       }, 'Fetching batch in while loop')
 
-      const fetched = await channel.messages.fetch(fetchOptions) as any
-      
+      const fetched = await this.cachedFetchMessages(channel, fetchOptions) as any
+
       logger.debug({ fetchedSize: fetched?.size || 0 }, 'Batch fetched')
-      
+
       if (!fetched || fetched.size === 0) {
         logger.debug('No more messages to fetch')
         break
@@ -601,11 +620,11 @@ export class DiscordConnector {
 
       // Collect messages from this batch (will prepend entire batch to results later)
       const batchResults: Message[] = []
-      
+
       // For first batch, include the startFromId message at the end (it's newest)
       if (isFirstBatch && startFromId) {
         try {
-          const startMsg = await channel.messages.fetch(startFromId)
+          const startMsg = await this.cachedFetchMessages(channel, startFromId)
           batchMessages.push(startMsg)  // Add to end of chronological batch
           logger.debug({ startFromId }, 'Added startFrom message to first batch')
         } catch (error) {
@@ -837,7 +856,7 @@ export class DiscordConnector {
     
     // First, fetch the last message
     try {
-      const lastMsg = await channel.messages.fetch(lastMessageId)
+      const lastMsg = await this.cachedFetchMessages(channel, lastMessageId)
       allMessages.push(lastMsg)
     } catch (error) {
       logger.warn({ error, lastMessageId }, 'Failed to fetch last message')
@@ -847,20 +866,20 @@ export class DiscordConnector {
     // Then fetch older messages in batches until we reach first (or limit)
     let currentBefore = lastMessageId
     let foundFirst = false
-    
+
     const maxBatches = Math.ceil(maxMessages / 100)
-    
+
     for (let batch = 0; batch < maxBatches && !foundFirst; batch++) {
       // Stop if we've already fetched enough
       if (allMessages.length >= maxMessages) {
         break
       }
-      
+
       try {
         const batchSize = Math.min(100, maxMessages - allMessages.length)
-        const fetched = await channel.messages.fetch({ 
-          limit: batchSize, 
-          before: currentBefore 
+        const fetched = await this.cachedFetchMessages(channel, {
+          limit: batchSize,
+          before: currentBefore
         })
 
         if (fetched.size === 0) break
@@ -1562,6 +1581,122 @@ export class DiscordConnector {
     logger.info('Discord connector closed')
   }
 
+  // ===========================================================================
+  // Push-based Message Cache
+  // ===========================================================================
+
+  private pushMessageToCache(channelId: string, message: Message): void {
+    const cache = this.messageCache.get(channelId)
+    if (cache) {
+      cache.push(message)
+    }
+    // If cache doesn't exist yet, we haven't done the initial fetch - don't start partial cache
+  }
+
+  private updateMessageInCache(channelId: string, message: Message): void {
+    const cache = this.messageCache.get(channelId)
+    if (!cache) return
+    const idx = cache.findIndex(m => m.id === message.id)
+    if (idx !== -1) {
+      cache[idx] = message
+    }
+  }
+
+  private removeMessageFromCache(channelId: string, messageId: string): void {
+    const cache = this.messageCache.get(channelId)
+    if (!cache) return
+    const idx = cache.findIndex(m => m.id === messageId)
+    if (idx !== -1) {
+      cache.splice(idx, 1)
+    }
+  }
+
+  /**
+   * Cached wrapper around channel.messages.fetch().
+   * After the first API fetch populates the cache, subsequent requests
+   * are served from memory. Push events keep the cache current.
+   *
+   * Supports:
+   *   { limit: N }              → last N messages
+   *   { limit: N, before: id }  → N messages before given ID
+   *   messageId (string)        → single message by ID
+   */
+  async cachedFetchMessages(channel: TextChannel, options: any): Promise<any> {
+    const channelId = channel.id
+
+    // Single message fetch by ID
+    if (typeof options === 'string') {
+      const cache = this.messageCache.get(channelId)
+      if (cache) {
+        const found = cache.find(m => m.id === options)
+        if (found) return found
+      }
+      // Cache miss for single message - fetch from API
+      const msg = await channel.messages.fetch(options)
+      // Add to cache if we have one
+      if (msg && this.messageCache.has(channelId)) {
+        this.pushMessageToCache(channelId, msg)
+      }
+      return msg
+    }
+
+    // Batch fetch
+    const limit = options.limit || 50
+    const before = options.before as string | undefined
+    const cache = this.messageCache.get(channelId)
+
+    if (cache && this.messageCachePopulated.has(channelId)) {
+      // Cache is fully populated - serve from it (even if fewer than limit)
+      let filtered: Message[]
+      if (before) {
+        // Messages with ID less than `before` (older)
+        filtered = cache.filter(m => m.id < before)
+      } else {
+        filtered = cache
+      }
+
+      const slice = filtered.slice(-limit).reverse()
+      const map = new Map(slice.map(m => [m.id, m]))
+      // Mimic Collection interface
+      ;(map as any).values = map.values.bind(map)
+      ;(map as any).first = () => slice[0]
+      return map
+    }
+
+    // Cache miss - fetch from API
+    const fetched = await channel.messages.fetch(options)
+
+    // Populate cache from API result
+    if (!this.messageCachePopulated.has(channelId)) {
+      const msgs = Array.from(fetched.values()).reverse()  // chronological order
+      this.messageCache.set(channelId, msgs)
+      this.messageCachePopulated.add(channelId)
+      logger.debug({ channelId, count: msgs.length }, 'Message cache populated from API')
+    }
+
+    return fetched
+  }
+
+  /**
+   * Get cached pinned configs, or null if cache is empty/dirty.
+   */
+  getCachedPinnedConfigs(channelId: string): string[] | null {
+    if (this.pinnedConfigDirty.has(channelId)) {
+      this.pinnedConfigDirty.delete(channelId)
+      this.pinnedConfigCache.delete(channelId)
+      return null
+    }
+    return this.pinnedConfigCache.get(channelId) || null
+  }
+
+  /**
+   * Store pinned configs in cache after API fetch.
+   */
+  cachePinnedConfigs(channelId: string, configs: string[]): void {
+    this.pinnedConfigCache.set(channelId, configs)
+    this.pinnedConfigDirty.delete(channelId)
+  }
+
   private setupEventHandlers(): void {
     this.client.on('ready', () => {
       logger.info({ user: this.client.user?.tag }, 'Discord client ready')
@@ -1577,17 +1712,26 @@ export class DiscordConnector {
         },
         'Received messageCreate event'
       )
-      
+
+      // Update message cache
+      this.pushMessageToCache(message.channelId, message)
+
       this.queue.push({
         type: 'message',
         channelId: message.channelId,
         guildId: message.guildId || '',
         data: message,
         timestamp: new Date(),
+        receivedAt: Date.now(),
       })
     })
 
     this.client.on('messageUpdate', (oldMsg, newMsg) => {
+      // Update message cache
+      if (newMsg.id && newMsg.channelId) {
+        this.updateMessageInCache(newMsg.channelId, newMsg as Message)
+      }
+
       this.queue.push({
         type: 'edit',
         channelId: newMsg.channelId,
@@ -1598,6 +1742,11 @@ export class DiscordConnector {
     })
 
     this.client.on('messageDelete', (message) => {
+      // Update message cache
+      if (message.id && message.channelId) {
+        this.removeMessageFromCache(message.channelId, message.id)
+      }
+
       this.queue.push({
         type: 'delete',
         channelId: message.channelId,
@@ -1605,6 +1754,28 @@ export class DiscordConnector {
         data: message,
         timestamp: new Date(),
       })
+    })
+
+    this.client.on('messageReactionAdd', (reaction) => {
+      // Refresh cached message so reaction data is up to date
+      if (reaction.message.id && reaction.message.channelId) {
+        this.updateMessageInCache(reaction.message.channelId, reaction.message as Message)
+      }
+    })
+
+    this.client.on('messageReactionRemove', (reaction) => {
+      if (reaction.message.id && reaction.message.channelId) {
+        this.updateMessageInCache(reaction.message.channelId, reaction.message as Message)
+      }
+    })
+
+    this.client.on('channelPinsUpdate', (channel) => {
+      // Mark pinned config cache as dirty for this channel
+      const channelId = (channel as any).id
+      if (channelId) {
+        this.pinnedConfigDirty.add(channelId)
+        logger.debug({ channelId }, 'Pinned messages updated, cache invalidated')
+      }
     })
   }
 

@@ -424,11 +424,18 @@ export class AgentLoop {
   }
 
   private async processBatch(events: Event[]): Promise<void> {
+    const batchStart = Date.now()
     logger.debug({ count: events.length, types: events.map((e) => e.type) }, 'Processing batch')
 
     // Get first event to access channel for config (for random check)
     const firstEvent = events[0]
     if (!firstEvent) return
+
+    // Profile: time from Discord event receipt to batch processing
+    const eventReceivedAt = (firstEvent as any).receivedAt
+    if (eventReceivedAt) {
+      logger.debug({ eventAgeMs: batchStart - eventReceivedAt }, 'Event age (discord.js + queue poll)')
+    }
     
     // Handle delete events - remove tool cache entries for deleted bot messages
     for (const event of events) {
@@ -446,10 +453,12 @@ export class AgentLoop {
     }
 
     // Check if activation is needed
+    const shouldActivateStart = Date.now()
     if (!await this.shouldActivate(events, firstEvent.channelId, firstEvent.guildId)) {
       logger.debug('No activation needed')
       return
     }
+    logger.debug({ durationMs: Date.now() - shouldActivateStart }, 'shouldActivate completed')
 
     const { channelId, guildId } = firstEvent
 
@@ -501,6 +510,7 @@ export class AgentLoop {
     // ===== SOMA CREDIT CHECK =====
     // Check if user has sufficient ichor before proceeding with activation
     // Only charge for human-initiated triggers (mention, reply, m_command) - not random
+    const somaStart = Date.now()
     const somaCheckResult = await this.checkSomaCredits(
       events,
       channelId,
@@ -508,17 +518,20 @@ export class AgentLoop {
       activationReason.reason,
       triggeringMessageId
     )
-    
+    logger.debug({ durationMs: Date.now() - somaStart }, 'Soma credit check completed')
+
     if (somaCheckResult.status === 'blocked') {
       // User doesn't have enough ichor - message already sent
       this.activeChannels.delete(channelId)
       return
     }
-    
+
     // Store transaction ID for potential refund if activation fails
     const somaTransactionId = somaCheckResult.transactionId
     // ===== END SOMA CHECK =====
-    
+
+    logger.debug({ durationMs: Date.now() - batchStart }, 'processBatch overhead (event→handleActivation)')
+
     // Wrap activation in both logging and trace context
     const activationPromise = triggeringMessageId
       ? withActivationLogging(channelId, triggeringMessageId, async () => {
@@ -1079,8 +1092,8 @@ export class AgentLoop {
     const profileStart = Date.now()
 
     startProfile('typing')
-    // Start typing indicator
-    await this.connector.startTyping(channelId)
+    // Start typing indicator (fire-and-forget, don't block on Discord API)
+    this.connector.startTyping(channelId).catch(() => {})
     endProfile('typing')
 
     try {
