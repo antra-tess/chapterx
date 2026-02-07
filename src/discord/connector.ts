@@ -643,12 +643,14 @@ export class DiscordConnector {
           isHistory: message.content?.startsWith('.history')
         }, 'Processing message in recursive fetch')*/
 
-        // Check if we hit the stop point
+        // Check if we hit the range start (first: boundary)
+        // Discard everything older, keep from here onwards
         if (stopAtId && message.id === stopAtId) {
+          batchResults.length = 0  // Discard messages older than the range start
           batchResults.push(message)
-          results.unshift(...batchResults)  // Prepend this batch
-          logger.debug({ stopAtId, batchSize: batchResults.length }, 'Reached first message boundary, stopping')
-          return results
+          stopAtId = undefined  // Found it, stop looking
+          logger.debug({ foundFirstId: message.id }, 'Reached first message boundary, discarding older')
+          continue
         }
 
         // Check for .history command (skip if ignoreHistory is set)
@@ -678,37 +680,32 @@ export class DiscordConnector {
 
             if (historyRange === null) {
               // Empty .history - clear history BEFORE this point, keep messages AFTER
-              // Since we process newest→oldest, batchResults has NEWER messages (keep them!)
-              // Remaining messages in the loop are OLDER (discard them)
+              //
+              // Processing order: OLDEST-first (Discord returns newest-first, we reverse())
+              // So batchResults has OLDER messages (already iterated) → DISCARD
+              // Remaining messages in the loop are NEWER → KEEP (via continue)
               logger.debug({
                 resultsCount: results.length,
                 batchResultsCount: batchResults.length,
                 hadPendingNewerMessages: !!(this as any)[pendingKey],
-              }, 'Empty .history command - keeping newer messages, discarding older')
+              }, 'Empty .history command - discarding older, collecting newer')
               this.lastHistoryDidClear = true  // Signal to skip parent fetch for threads
 
               // If we previously processed a .history range in this batch, the historical
               // messages it fetched are now in `results`. Since this .history clear is
               // NEWER than that range, we need to discard those historical messages too.
               if ((this as any)[pendingKey]) {
-                // pendingKey has the ACTUAL newer messages we want to keep
-                // results has historical messages that should be discarded
-                results.length = 0
-                results.push(...(this as any)[pendingKey])
                 delete (this as any)[pendingKey]
-                logger.debug({
-                  restoredCount: results.length,
-                }, 'Restored newer messages after .history clear overrode earlier .history range')
+                logger.debug('Discarded pending messages from earlier .history range (overridden by clear)')
               }
 
-              // Append newer messages from current batch to results before clearing
-              // These are messages we've already processed (newer than .history)
-              results.push(...batchResults)
+              // Discard everything accumulated so far (older than .history)
+              results.length = 0
               batchResults.length = 0
               foundHistory = true
 
-              // Break - remaining messages in the loop are OLDER than .history (discard them)
-              break
+              // Continue collecting remaining messages in batch (NEWER than .history)
+              continue
             } else if (historyRange) {
               // Recursively fetch from history target
               const targetChannelId = this.extractChannelIdFromUrl(historyRange.last)
@@ -748,31 +745,33 @@ export class DiscordConnector {
                   currentResultsCount: results.length,
                 }, 'Fetched historical messages, combining with current results')
 
-                // Mark that we found .history (stop after this batch)
+                // Mark that we found .history (stop after this batch completes)
                 foundHistory = true
 
-                // Save messages NEWER than .history:
-                // - results: from earlier/newer batches
-                // - batchResults: newer messages in current batch (we process newest→oldest)
-                const newerMessages = [...results, ...batchResults]
+                // Processing order: OLDEST-first (after reverse())
+                // batchResults has OLDER messages in current channel (before .history) → DISCARD
+                // Remaining messages in the loop are NEWER → KEEP (via continue)
+                //
+                // Build new results: historical messages + (newer messages collected after continue)
+                // Save any existing results from older batches to pendingKey
+                const existingResults = [...results]
 
-                // Reset results with historical messages (oldest)
+                // Reset results with historical messages (oldest context)
                 results.length = 0
                 results.push(...historicalMessages)
 
-                // Store newer messages to append after batch processing
-                ;(this as any)[pendingKey] = newerMessages
+                // Store batchResults from older batches in pendingKey (these go AFTER historical)
+                // Note: batchResults contains messages OLDER than .history in current batch - discard
+                ;(this as any)[pendingKey] = existingResults
 
-                // Clear batchResults
                 batchResults.length = 0
                 logger.debug({
                   historicalAdded: historicalMessages.length,
-                  newerMessagesSaved: newerMessages.length,
-                }, 'Reset results with historical, saved newer messages for later')
+                  existingResultsSaved: existingResults.length,
+                }, 'Reset results with historical, continuing to collect newer messages')
 
-                // Break - remaining messages in the loop are OLDER than .history (gap messages)
-                // Since batch is reversed (newest→oldest), messages after this point are older.
-                break
+                // Continue collecting remaining messages in batch (NEWER than .history)
+                continue
               }
             }
           }
@@ -1623,6 +1622,12 @@ export class DiscordConnector {
    */
   async cachedFetchMessages(channel: TextChannel, options: any): Promise<any> {
     const channelId = channel.id
+
+    // Bypass cache for debugging
+    if (process.env.NO_MSG_CACHE) {
+      if (typeof options === 'string') return channel.messages.fetch(options)
+      return channel.messages.fetch(options)
+    }
 
     // Single message fetch by ID
     if (typeof options === 'string') {
