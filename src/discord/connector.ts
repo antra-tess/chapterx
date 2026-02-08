@@ -521,7 +521,14 @@ export class DiscordConnector {
 
   private parseHistoryCommand(content: string): { first?: string; last: string } | null | false {
     const lines = content.split('\n')
-    if (lines.length < 2 || lines[1] !== '---') {
+
+    // Bare .history with no body (or only whitespace after) = clear context
+    if (lines.length < 2 || lines.slice(1).every(l => !l.trim())) {
+      return null
+    }
+
+    // Must have --- separator for YAML body
+    if (lines[1]?.trim() !== '---') {
       return false  // Malformed command
     }
 
