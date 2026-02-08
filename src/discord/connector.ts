@@ -735,6 +735,7 @@ export class DiscordConnector {
                 // Track that we jumped from this channel via .history
                 // This is used for plugin state inheritance
                 this.lastHistoryOriginChannelId = channel.id
+                this.lastHistoryDidClear = true  // Prevent cache stability from extending past range boundary
 
                 logger.debug({ 
                   historyTarget: historyRange.last,
