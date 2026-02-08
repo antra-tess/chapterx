@@ -419,6 +419,8 @@ export interface DiscordContext {
     parentChannelId?: string
     /** Origin channel ID if .history was used to jump here */
     historyOriginChannelId?: string
+    /** Whether .history clear was used to truncate context */
+    historyDidClear?: boolean
   }
 }
 

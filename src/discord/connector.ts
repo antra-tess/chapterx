@@ -342,12 +342,12 @@ export class DiscordConnector {
       // This ensures cache stability - we fetch back far enough to include the cached portion
       // If firstMessageId is specified, ensure it's included by extending fetch if needed
       // NEVER trim data - cache stability should only ADD data, not remove it
-      if (firstMessageId) {
+      if (firstMessageId && !this.lastHistoryDidClear) {
         logger.debug({
           currentMessageCount: messages.length,
           lookingFor: firstMessageId
         }, 'Checking if cache marker is in fetch window')
-        
+
         let firstIndex = messages.findIndex(m => m.id === firstMessageId)
         
         // If not found, extend fetch backwards until we find it (or hit limit)
@@ -416,8 +416,13 @@ export class DiscordConnector {
             firstMessageId
           }, 'Cache marker found in fetch window (no trimming)')
         }
+      } else if (firstMessageId && this.lastHistoryDidClear) {
+        logger.debug({
+          firstMessageId,
+          messageCount: messages.length
+        }, 'Skipping cache stability extension - .history clear truncated context')
       }
-      
+
       logger.debug({ finalMessageCount: messages.length }, 'Recursive fetch complete with .history processing')
 
       startProfile('messageConvert')
@@ -497,6 +502,9 @@ export class DiscordConnector {
       }
       if (this.lastHistoryOriginChannelId) {
         inheritanceInfo.historyOriginChannelId = this.lastHistoryOriginChannelId
+      }
+      if (this.lastHistoryDidClear) {
+        inheritanceInfo.historyDidClear = true
       }
 
       // Log fetch timings

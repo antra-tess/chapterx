@@ -27,6 +27,7 @@ import { PluginContextFactory, ContextInjection } from '../tools/plugins/index.j
 import { setResourceAccessor } from '../tools/plugins/mcp-resources.js'
 import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.js'
 import { MembraneProvider } from '../llm/membrane/index.js'
+import { resolveToolModeForModel } from '../llm/membrane/adapter.js'
 import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
@@ -1158,8 +1159,16 @@ export class AgentLoop {
       if (promptCachingEnabled) {
         const cacheOldestId = state.cacheOldestMessageId
         const fetchedOldestId = discordContext.messages[0]?.id
-        
-        if (!cacheOldestId && fetchedOldestId) {
+
+        // If .history clear was used, reset cache marker to the new oldest message
+        // This prevents the next activation from extending backwards past the clear boundary
+        if (discordContext.inheritanceInfo?.historyDidClear && fetchedOldestId) {
+          logger.debug({
+            oldCacheMarker: cacheOldestId,
+            newCacheMarker: fetchedOldestId,
+          }, 'Resetting cache marker after .history clear')
+          this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
+        } else if (!cacheOldestId && fetchedOldestId) {
           // First activation - set cache marker to oldest fetched message
           this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
           logger.debug({ channelId, oldestMessageId: fetchedOldestId }, 'Initialized cached starting point for cache stability')
@@ -1539,24 +1548,51 @@ export class AgentLoop {
         imagesFetched: discordContext.images.length,
       }, '⏱️  PROFILING: Pre-LLM phase timings (ms)')
 
-      // 6. Call LLM (with inline tool execution)
+      // 6. Call LLM (with tool execution)
       startProfile('llmCall')
-      
-      const { 
-        completion, 
-        toolCallIds, 
-        preambleMessageIds, 
+
+      // Route to native tool execution for non-Claude models
+      const hasTools = config.tools_enabled && (contextResult.request.tools?.length ?? 0) > 0
+      const toolMode = hasTools ? resolveToolModeForModel(config.continuation_model) : 'xml'
+
+      let executionResult: {
+        completion: any;
+        toolCallIds: string[];
+        preambleMessageIds: string[];
+        fullCompletionText?: string;
+        sentMessageIds: string[];
+        messageContexts: Record<string, MessageContext>;
+      }
+
+      if (hasTools && toolMode === 'native') {
+        logger.debug({ model: config.continuation_model, toolMode }, 'Using native tool execution path')
+        executionResult = await this.executeWithNativeTools(
+          contextResult.request,
+          config,
+          channelId,
+          triggeringMessageId || '',
+          activation?.id,
+          discordContext.messages
+        )
+      } else {
+        executionResult = await this.executeWithInlineTools(
+          contextResult.request,
+          config,
+          channelId,
+          triggeringMessageId || '',
+          activation?.id,
+          discordContext.messages  // For post-hoc participant truncation
+        )
+      }
+
+      const {
+        completion,
+        toolCallIds,
+        preambleMessageIds,
         fullCompletionText,
         sentMessageIds: inlineSentMessageIds,
         messageContexts: inlineMessageContexts
-      } = await this.executeWithInlineTools(
-        contextResult.request, 
-        config, 
-        channelId,
-        triggeringMessageId || '',
-        activation?.id,
-        discordContext.messages  // For post-hoc participant truncation
-      )
+      } = executionResult
       endProfile('llmCall')
 
       // 7. Stop typing
@@ -2036,8 +2072,384 @@ export class AgentLoop {
   }
 
   /**
+   * Execute with native tool calls (OpenAI / non-Anthropic models)
+   *
+   * Uses membrane's stream() with onToolCalls callback to handle the tool loop
+   * natively. No XML parsing, no prefill continuation, no stop sequences.
+   * Membrane manages the multi-turn tool loop internally.
+   */
+  private async executeWithNativeTools(
+    llmRequest: any,
+    config: BotConfig,
+    channelId: string,
+    triggeringMessageId: string,
+    _activationId?: string,
+    discordMessages?: DiscordMessage[]
+  ): Promise<{
+    completion: any;
+    toolCallIds: string[];
+    preambleMessageIds: string[];
+    fullCompletionText?: string;
+    sentMessageIds: string[];
+    messageContexts: Record<string, MessageContext>;
+  }> {
+    const allToolCallIds: string[] = []
+    const allSentMessageIds: string[] = []
+    const messageContexts: Record<string, MessageContext> = {}
+    const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
+    let accumulatedPreToolText = ''
+
+    // Set up TTS streaming context if relay is enabled and connected
+    if (config.tts_relay?.enabled && this.ttsRelayClient?.isConnected() && this.botUserId) {
+      this.ttsStreamContext = {
+        channelId,
+        userId: this.botUserId,
+        username: this.connector.getBotUsername() || config.name,
+        abortController: new AbortController(),
+      }
+    }
+
+    const ttsCtx = this.ttsStreamContext
+    const ttsRelay = this.ttsRelayClient
+
+    try {
+      const result = await this.membraneProvider!.stream(llmRequest, {
+        signal: ttsCtx?.abortController.signal,
+        maxToolDepth: config.max_tool_depth,
+
+        // TTS streaming callbacks
+        ...(ttsCtx && ttsRelay?.isConnected() ? {
+          onChunk: (text: string, meta: any) => {
+            const blockType = meta?.type ?? 'text'
+            const visible = meta?.visible ?? true
+            ttsRelay.sendChunk({
+              channelId: ttsCtx.channelId,
+              userId: ttsCtx.userId,
+              username: ttsCtx.username,
+              text,
+              blockIndex: meta?.blockIndex ?? 0,
+              blockType,
+              visible,
+            })
+          },
+          onBlock: (event: any) => {
+            const blockIndex = event?.index ?? 0
+            const blockType = event?.block?.type ?? 'text'
+            const blockContent = (event?.block as any)?.content ?? ''
+            if (event?.event === 'block_start') {
+              ttsRelay.sendBlockStart({
+                channelId: ttsCtx.channelId,
+                userId: ttsCtx.userId,
+                username: ttsCtx.username,
+                blockIndex,
+                blockType,
+              })
+            } else if (event?.event === 'block_complete') {
+              ttsRelay.sendBlockComplete({
+                channelId: ttsCtx.channelId,
+                userId: ttsCtx.userId,
+                username: ttsCtx.username,
+                blockIndex,
+                blockType,
+                content: blockContent,
+              })
+            }
+          },
+        } : {}),
+
+        // Progressive display: send accumulated text before tools execute
+        onPreToolContent: async (text: string) => {
+          accumulatedPreToolText += text
+          const segments = this.parseIntoSegments(accumulatedPreToolText)
+          if (segments.length > 0) {
+            // Truncate at participant names
+            if (discordMessages) {
+              const fullVisibleText = segments.map(s => s.visible).join('')
+              const truncResult = this.truncateAtParticipant(
+                fullVisibleText,
+                discordMessages,
+                this.connector.getBotUsername() || config.name,
+                llmRequest.stop_sequences
+              )
+              if (truncResult.truncatedAt) {
+                logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncating native pre-tool text at participant')
+                return  // Don't send hallucinated content
+              }
+            }
+
+            const sendResult = await this.sendSegments(
+              channelId,
+              segments,
+              allSentMessageIds.length === 0 ? triggeringMessageId : undefined
+            )
+            allSentMessageIds.push(...sendResult.sentMessageIds)
+            for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
+              messageContexts[msgId] = ctx
+            }
+            // Reset so we don't re-send
+            accumulatedPreToolText = ''
+          }
+        },
+
+        // Execute tools when membrane detects native tool calls
+        onToolCalls: async (calls, context) => {
+          const results: Array<{ toolUseId: string; content: string; isError?: boolean }> = []
+
+          logger.debug({
+            toolCount: calls.length,
+            depth: context.depth,
+          }, 'Executing native tools')
+
+          for (const call of calls) {
+            const toolStartTime = Date.now()
+
+            // Convert membrane call to ChapterX ToolCall
+            const cxCall: ToolCall = {
+              id: call.id,
+              name: call.name,
+              input: call.input as Record<string, any>,
+              messageId: triggeringMessageId,
+              timestamp: new Date(),
+              originalCompletionText: context.accumulated || '',
+            }
+
+            const toolResult = await this.toolSystem.executeTool(cxCall)
+            const toolDurationMs = Date.now() - toolStartTime
+
+            allToolCallIds.push(call.id)
+
+            // Format output
+            const outputStr = typeof toolResult.output === 'string'
+              ? toolResult.output
+              : JSON.stringify(toolResult.output)
+
+            let content: string
+            let isError = false
+            if (toolResult.error) {
+              content = `Error executing ${call.name}: ${toolResult.error}`
+              isError = true
+            } else {
+              content = outputStr
+            }
+
+            // Store for persistence
+            pendingToolPersistence.push({ call: cxCall, result: toolResult })
+
+            // Record to trace
+            const traceOutput = toolResult.error
+              ? `[ERROR] ${toolResult.error}`
+              : (outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr)
+            traceToolExecution({
+              toolCallId: call.id,
+              toolName: call.name,
+              input: call.input,
+              output: traceOutput,
+              outputTruncated: !toolResult.error && outputStr.length > 1000,
+              fullOutputLength: toolResult.error ? traceOutput.length : outputStr.length,
+              durationMs: toolDurationMs,
+              sentToDiscord: config.tool_output_visible,
+              error: toolResult.error ? String(toolResult.error) : undefined,
+              imageCount: toolResult.images?.length,
+            })
+
+            // Send tool output to Discord if visible
+            if (config.tool_output_visible) {
+              const inputStr = JSON.stringify(call.input)
+              const rawOutput = typeof toolResult.output === 'string' ? toolResult.output : JSON.stringify(toolResult.output)
+              const flatOutput = rawOutput.replace(/\n/g, ' ').replace(/\s+/g, ' ')
+              const maxLen = 200
+              const trimmedOutput = flatOutput.length > maxLen
+                ? `${flatOutput.slice(0, maxLen)}... (${rawOutput.length} chars)`
+                : flatOutput
+              const toolMessage = `.${config.name}>[${call.name}]: ${inputStr}\n.${config.name}<[${call.name}]: ${trimmedOutput}`
+              await this.connector.sendWebhook(channelId, toolMessage, config.name)
+
+              // Send MCP images as dotted attachments if present
+              if (toolResult.images && toolResult.images.length > 0) {
+                for (let i = 0; i < toolResult.images.length; i++) {
+                  const img = toolResult.images[i]!
+                  try {
+                    await this.connector.sendImageAttachment(
+                      channelId,
+                      img.data,
+                      img.mimeType,
+                      `.${config.name}<[${call.name}] image ${i + 1}/${toolResult.images.length}`,
+                      undefined
+                    )
+                  } catch (err) {
+                    logger.warn({ err, toolName: call.name, imageIndex: i }, 'Failed to send MCP tool image to Discord')
+                  }
+                }
+              }
+            }
+
+            logger.debug({
+              toolName: call.name,
+              durationMs: toolDurationMs,
+              hasError: !!toolResult.error,
+              outputLength: outputStr.length,
+            }, 'Native tool executed')
+
+            results.push({
+              toolUseId: call.id,
+              content,
+              isError,
+            })
+          }
+
+          return results
+        },
+      })
+
+      // Persist tool uses
+      for (const { call, result } of pendingToolPersistence) {
+        await this.toolSystem.persistToolUse(this.botId, channelId, call, result)
+      }
+
+      // Extract final text from completion
+      const completionText = (result?.content || [])
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.text)
+        .join('')
+
+      // Strip thinking blocks and tool XML
+      const { stripped, content: thinkingContent } = this.stripThinkingBlocks(
+        this.toolSystem.stripToolXml(completionText)
+      )
+
+      // Post debug thinking if enabled
+      if (config.debug_thinking && thinkingContent.length > 0) {
+        for (const thinking of thinkingContent) {
+          if (thinking.trim()) {
+            try {
+              if (thinking.length <= 1900) {
+                await this.connector.sendMessage(channelId, `.💭 ${thinking}`)
+              } else {
+                await this.connector.sendMessageWithAttachment(
+                  channelId,
+                  '.💭 thinking trace attached',
+                  { name: 'thinking.md', content: thinking }
+                )
+              }
+            } catch (err) {
+              logger.warn({ err }, 'Failed to send debug thinking message')
+            }
+          }
+        }
+      }
+
+      // Truncate at participant names
+      let displayText = stripped
+      if (discordMessages) {
+        const truncResult = this.truncateAtParticipant(
+          displayText,
+          discordMessages,
+          this.connector.getBotUsername() || config.name,
+          llmRequest.stop_sequences
+        )
+        if (truncResult.truncatedAt) {
+          logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated native output at participant')
+          displayText = truncResult.text
+        }
+      }
+
+      // Replace mentions
+      if (discordMessages) {
+        displayText = await this.replaceMentions(displayText, discordMessages)
+      }
+
+      // Send remaining text to Discord (text not already sent via onPreToolContent)
+      if (displayText.trim()) {
+        const segments = this.parseIntoSegments(displayText)
+        if (segments.length > 0) {
+          const sendResult = await this.sendSegments(
+            channelId,
+            segments,
+            allSentMessageIds.length === 0 ? triggeringMessageId : undefined
+          )
+          allSentMessageIds.push(...sendResult.sentMessageIds)
+          for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
+            messageContexts[msgId] = ctx
+          }
+        }
+      }
+
+      // Clean up TTS streaming context
+      if (this.ttsStreamContext && this.ttsRelayClient?.isConnected()) {
+        this.ttsRelayClient.sendActivationEnd({
+          channelId: this.ttsStreamContext.channelId,
+          userId: this.ttsStreamContext.userId,
+          username: this.ttsStreamContext.username,
+          reason: 'complete',
+        })
+      }
+      this.ttsStreamContext = undefined
+
+      return {
+        completion: {
+          content: [{ type: 'text', text: displayText }],
+          stopReason: (result?.stopReason || 'end_turn') as any,
+          usage: result?.usage || { inputTokens: 0, outputTokens: 0 },
+          model: result?.model || '',
+        },
+        toolCallIds: allToolCallIds,
+        preambleMessageIds: [],
+        fullCompletionText: completionText,
+        sentMessageIds: allSentMessageIds,
+        messageContexts,
+      }
+    } catch (error: any) {
+      // Handle TTS interruption abort
+      if (ttsCtx?.interruptedText && (error.name === 'AbortError' || ttsCtx.abortController.signal.aborted)) {
+        logger.info(
+          { channelId: ttsCtx.channelId, textLength: ttsCtx.interruptedText.length },
+          'Native stream aborted due to TTS interruption, using interrupted text'
+        )
+
+        // Clean up TTS context
+        if (this.ttsStreamContext && this.ttsRelayClient?.isConnected()) {
+          this.ttsRelayClient.sendActivationEnd({
+            channelId: this.ttsStreamContext.channelId,
+            userId: this.ttsStreamContext.userId,
+            username: this.ttsStreamContext.username,
+            reason: 'abort',
+          })
+        }
+        this.ttsStreamContext = undefined
+
+        return {
+          completion: {
+            content: [{ type: 'text', text: ttsCtx.interruptedText }],
+            stopReason: 'interrupted',
+            usage: { inputTokens: 0, outputTokens: 0 },
+            model: 'interrupted',
+          },
+          toolCallIds: allToolCallIds,
+          preambleMessageIds: [],
+          fullCompletionText: ttsCtx.interruptedText,
+          sentMessageIds: allSentMessageIds,
+          messageContexts,
+        }
+      }
+
+      // Clean up TTS on unexpected errors too
+      if (this.ttsStreamContext && this.ttsRelayClient?.isConnected()) {
+        this.ttsRelayClient.sendActivationEnd({
+          channelId: this.ttsStreamContext.channelId,
+          userId: this.ttsStreamContext.userId,
+          username: this.ttsStreamContext.username,
+          reason: 'error',
+        })
+      }
+      this.ttsStreamContext = undefined
+
+      throw error
+    }
+  }
+
+  /**
    * Execute with inline tool injection (Anthropic style)
-   * 
+   *
    * Instead of making separate LLM calls for each tool use, this method:
    * 1. Detects tool calls in the completion stream
    * 2. Executes the tool immediately
