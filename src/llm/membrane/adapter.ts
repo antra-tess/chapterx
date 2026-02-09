@@ -29,6 +29,7 @@ import type {
   ToolMode,
   StopReason as MembraneStopReason,
 } from '@animalabs/membrane';
+import { getFormatterForModel } from './factory.js';
 
 // Re-export types for use by other modules (preserving existing API)
 export type {
@@ -268,16 +269,25 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
  * - Other models → native (likely going through OpenRouter)
  */
 export function resolveToolModeForModel(modelName: string): ToolMode {
+  // Check per-model formatter routes first (e.g., claude-opus-4-6 → native)
+  const formatterOverride = getFormatterForModel(modelName);
+  if (formatterOverride === 'native') {
+    return 'native';
+  }
+  if (formatterOverride === 'completions') {
+    return 'native'; // Completions models don't use XML tools
+  }
+
   // OpenRouter models have a provider prefix
   if (modelName.includes('/')) {
     return 'native';
   }
-  
+
   // Direct Claude models use XML tools for prefill compatibility
   if (modelName.startsWith('claude-')) {
     return 'xml';
   }
-  
+
   // Default to native for unknown models (safer for non-Claude models)
   return 'native';
 }
