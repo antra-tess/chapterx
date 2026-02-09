@@ -1710,8 +1710,17 @@ export class DiscordConnector {
       this.cacheStats.hits++
       let filtered: Message[]
       if (before) {
-        // Messages with ID less than `before` (older), skip tombstones
-        filtered = cache.filter((m): m is Message => m !== null && m.id < before)
+        // Use index map to find boundary in O(1), then slice + filter tombstones
+        // from the subset instead of scanning the entire cache array
+        const index = this.messageCacheIndex.get(channelId)
+        const beforeIdx = index?.get(before)
+        if (beforeIdx !== undefined) {
+          // Fast path: slice up to the known position, filter only tombstones
+          filtered = cache.slice(0, beforeIdx).filter((m): m is Message => m !== null)
+        } else {
+          // Fallback: before ID not in index (deleted/external), full scan
+          filtered = cache.filter((m): m is Message => m !== null && m.id < before)
+        }
       } else {
         filtered = cache.filter((m): m is Message => m !== null)
       }
