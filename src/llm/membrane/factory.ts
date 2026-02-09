@@ -16,6 +16,7 @@ import {
   OpenAICompatibleAdapter,
   OpenAICompletionsAdapter,
   BedrockAdapter,
+  GeminiAdapter,
   AnthropicXmlFormatter,
   NativeFormatter,
   CompletionsFormatter,
@@ -89,6 +90,13 @@ export interface OpenAIProviderConfig {
   provides?: string[];
 }
 
+export interface GeminiConfig {
+  /** Google AI API key */
+  apiKey?: string;
+  /** Model patterns this provider serves (e.g., ["gemini-2.5-*"]) */
+  provides?: string[];
+}
+
 export type FormatterType = 'anthropic-xml' | 'native' | 'completions';
 
 export interface MembraneFactoryConfig {
@@ -155,6 +163,12 @@ export interface MembraneFactoryConfig {
    * Uses AWS credentials for authentication
    */
   bedrock?: BedrockConfig;
+
+  /**
+   * Google Gemini configuration
+   * Uses Google AI API key for authentication
+   */
+  gemini?: GeminiConfig;
 
   /**
    * Bot/assistant name for prefill mode
@@ -292,6 +306,15 @@ function getAdapterForModel(
     if (bedrockAdapter) {
       logger.debug({ modelName, adapterKey: 'bedrock' }, 'Routed model to Bedrock (anthropic.*/bedrock:* pattern)');
       return bedrockAdapter;
+    }
+  }
+
+  // Gemini models go to Gemini adapter
+  if (modelName.startsWith('gemini-') || modelName.startsWith('gemini_')) {
+    const geminiAdapter = adapters.get('gemini');
+    if (geminiAdapter) {
+      logger.debug({ modelName, adapterKey: 'gemini' }, 'Routed model to Gemini (gemini-* pattern)');
+      return geminiAdapter;
     }
   }
 
@@ -622,7 +645,35 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
   } else {
     logger.debug('Membrane: No valid Bedrock credentials provided (or placeholders detected), adapter not created');
   }
-  
+
+  // Create Gemini adapter if API key is available
+  const geminiKey = config.gemini?.apiKey ?? process.env.GOOGLE_API_KEY;
+  if (geminiKey) {
+    try {
+      const geminiAdapter = new GeminiAdapter({
+        apiKey: geminiKey,
+      });
+      adapters.set('gemini', geminiAdapter);
+
+      // Register routing patterns if provided
+      if (config.gemini?.provides && config.gemini.provides.length > 0) {
+        patternRoutes.push({
+          adapterKey: 'gemini',
+          patterns: config.gemini.provides,
+        });
+      }
+
+      logger.info({
+        patterns: config.gemini?.provides ?? [],
+      }, 'Membrane: Gemini adapter initialized');
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error({ error: errorMessage }, 'Failed to create Gemini adapter');
+    }
+  } else {
+    logger.debug('Membrane: No Google API key provided, Gemini adapter not created');
+  }
+
   // Create OpenAI-compatible adapters
   // Support both legacy single config and new multiple configs
   const compatibleConfigs: OpenAICompatibleConfig[] = [];
@@ -822,6 +873,7 @@ export function createMembraneFromVendorConfigs(
   const openaiProviders: OpenAIProviderConfig[] = [];
   let openrouterApiKey: string | undefined;
   let bedrockConfig: BedrockConfig | undefined;
+  let geminiConfig: GeminiConfig | undefined;
   const openaiCompatibleProviders: OpenAICompatibleConfig[] = [];
   const openaiCompletionsProviders: OpenAICompletionsConfig[] = [];
 
@@ -897,6 +949,25 @@ export function createMembraneFromVendorConfigs(
       }
 
       logger.debug({ vendorName, region: bedrockConfig.region, provides: vendorConfig.provides }, 'Found Bedrock vendor (uses AWS API)');
+
+    } else if (vendorName.startsWith('gemini')) {
+      // Gemini adapter - uses native Google AI API
+      if (!geminiConfig) {
+        const googleKey = config?.google_api_key ?? config?.api_key;
+        if (googleKey) {
+          geminiConfig = {
+            apiKey: googleKey,
+            provides: vendorConfig.provides,
+          };
+        }
+      }
+
+      // Auto-detect native formatter for Gemini vendors
+      if (!detectedFormatter) {
+        detectedFormatter = 'native';
+      }
+
+      logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found Gemini vendor (uses Google AI API)');
 
     } else if (vendorName.startsWith('openrouter')) {
       // OpenRouter adapter - uses OpenRouter's API (similar to OpenAI but with extras)
@@ -1000,6 +1071,7 @@ export function createMembraneFromVendorConfigs(
     openaiBaseUrl: openaiProviders.length === 1 ? openaiProviders[0]!.baseUrl : undefined,
     openaiProviders: openaiProviders.length > 1 ? openaiProviders : undefined,
     bedrock: bedrockConfig,
+    gemini: geminiConfig,
     openaiCompatibleProviders: openaiCompatibleProviders.length > 0 ? openaiCompatibleProviders : undefined,
     openaiCompletionsProviders: openaiCompletionsProviders.length > 0 ? openaiCompletionsProviders : undefined,
     assistantName,
