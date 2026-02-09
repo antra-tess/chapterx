@@ -69,14 +69,31 @@ export interface BedrockConfig {
   provides?: string[];
 }
 
+export interface AnthropicProviderConfig {
+  /** Anthropic API key */
+  apiKey: string;
+  /** Vendor/provider name (e.g., "anthropic-anima") */
+  name: string;
+  /** Model patterns this provider serves (e.g., ["claude-3-opus-20240229"]) */
+  provides?: string[];
+}
+
 export type FormatterType = 'anthropic-xml' | 'native' | 'completions';
 
 export interface MembraneFactoryConfig {
   /**
-   * Anthropic API key
+   * Anthropic API key (used as the default/fallback anthropic adapter)
    * If not provided, falls back to ANTHROPIC_API_KEY env var
    */
   anthropicApiKey?: string;
+
+  /**
+   * Multiple Anthropic providers with different API keys
+   * Each can have its own key and model patterns (provides)
+   * Used when different API keys have access to different models
+   * (e.g., one key for modern Claude, another for legacy Claude 3 Opus)
+   */
+  anthropicProviders?: AnthropicProviderConfig[];
 
   /**
    * OpenRouter API key
@@ -423,20 +440,58 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
   // Reset adapter routing patterns (formatterRoutes is managed by createMembraneFromVendorConfigs)
   patternRoutes = [];
   
-  // Create Anthropic adapter if API key is available
-  const anthropicKey = config.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY;
-  if (anthropicKey) {
-    try {
-      const anthropicAdapter = new AnthropicAdapter({
-        apiKey: anthropicKey,
-      });
-      adapters.set('anthropic', anthropicAdapter);
-      logger.info('Membrane: Anthropic adapter initialized');
-    } catch (error) {
-      logger.error({ error }, 'Failed to create Anthropic adapter');
+  // Create Anthropic adapters
+  // When anthropicProviders is set, it takes precedence over anthropicApiKey
+  // (anthropicProviders already contains the full list including the "default" one)
+  if (config.anthropicProviders && config.anthropicProviders.length > 0) {
+    // Multiple providers mode: create an adapter for each
+    let defaultSet = false;
+    for (const providerConfig of config.anthropicProviders) {
+      // Vendor named 'anthropic' always gets the default key; otherwise first provider does
+      const isDefault = providerConfig.name === 'anthropic' || !defaultSet;
+      const adapterKey = isDefault ? 'anthropic' : `anthropic-${providerConfig.name}`;
+      if (isDefault) defaultSet = true;
+
+      try {
+        const anthropicAdapter = new AnthropicAdapter({
+          apiKey: providerConfig.apiKey,
+        });
+        adapters.set(adapterKey, anthropicAdapter);
+
+        // Register pattern routes so getAdapterForModel can find the right one
+        if (providerConfig.provides && providerConfig.provides.length > 0) {
+          patternRoutes.push({
+            adapterKey,
+            patterns: providerConfig.provides,
+          });
+        }
+
+        logger.info({
+          name: providerConfig.name,
+          adapterKey,
+          isDefault,
+          patterns: providerConfig.provides ?? [],
+        }, 'Membrane: Anthropic adapter initialized');
+      } catch (error) {
+        logger.error({ error, name: providerConfig.name }, 'Failed to create Anthropic adapter');
+      }
     }
   } else {
-    logger.debug('Membrane: No Anthropic API key provided, adapter not created');
+    // Legacy single key mode
+    const anthropicKey = config.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY;
+    if (anthropicKey) {
+      try {
+        const anthropicAdapter = new AnthropicAdapter({
+          apiKey: anthropicKey,
+        });
+        adapters.set('anthropic', anthropicAdapter);
+        logger.info('Membrane: Anthropic adapter initialized');
+      } catch (error) {
+        logger.error({ error }, 'Failed to create Anthropic adapter');
+      }
+    } else {
+      logger.debug('Membrane: No Anthropic API key provided, adapter not created');
+    }
   }
   
   // Create OpenRouter adapter if API key is available
@@ -708,7 +763,7 @@ export function createMembraneFromVendorConfigs(
   // Reset formatter routes before processing vendors (adapter routes are reset in createMembrane)
   formatterRoutes = [];
 
-  let anthropicApiKey: string | undefined;
+  const anthropicProviders: AnthropicProviderConfig[] = [];
   let openrouterApiKey: string | undefined;
   let openaiApiKey: string | undefined;
   let bedrockConfig: BedrockConfig | undefined;
@@ -752,10 +807,13 @@ export function createMembraneFromVendorConfigs(
     // Determine adapter type from vendor name prefix
     if (vendorName.startsWith('anthropic')) {
       // Anthropic adapter - uses native Anthropic API (NOT OpenAI-compatible)
-      // The native AnthropicAdapter is created when anthropicApiKey is provided
-      // Routing is handled by getAdapterForModel() based on 'claude-*' pattern
-      if (config?.anthropic_api_key && !anthropicApiKey) {
-        anthropicApiKey = config.anthropic_api_key;
+      // Collect ALL anthropic vendors for multi-key support
+      if (config?.anthropic_api_key) {
+        anthropicProviders.push({
+          apiKey: config.anthropic_api_key,
+          name: vendorName,
+          provides: vendorConfig.provides,
+        });
       }
 
       // Auto-detect anthropic-xml formatter for Anthropic vendors
@@ -874,7 +932,10 @@ export function createMembraneFromVendorConfigs(
   const finalCompletionsConfig = options?.completionsConfig ?? detectedCompletionsConfig;
 
   return createMembrane({
-    anthropicApiKey,
+    // When multiple anthropic vendors exist, pass them all as providers for pattern routing
+    // When only one exists, use the legacy single-key path for backward compatibility
+    anthropicApiKey: anthropicProviders.length === 1 ? anthropicProviders[0]!.apiKey : undefined,
+    anthropicProviders: anthropicProviders.length > 1 ? anthropicProviders : undefined,
     openrouterApiKey,
     openaiApiKey,
     bedrock: bedrockConfig,
