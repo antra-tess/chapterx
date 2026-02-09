@@ -1553,7 +1553,7 @@ export class AgentLoop {
 
       // Route to native tool execution for non-Claude models
       const hasTools = config.tools_enabled && (contextResult.request.tools?.length ?? 0) > 0
-      const toolMode = hasTools ? resolveToolModeForModel(config.continuation_model) : 'xml'
+      const toolMode = resolveToolModeForModel(config.continuation_model)
 
       let executionResult: {
         completion: any;
@@ -1564,8 +1564,8 @@ export class AgentLoop {
         messageContexts: Record<string, MessageContext>;
       }
 
-      if (hasTools && toolMode === 'native') {
-        logger.debug({ model: config.continuation_model, toolMode }, 'Using native tool execution path')
+      if (toolMode === 'native') {
+        logger.debug({ model: config.continuation_model, toolMode, hasTools }, 'Using native tool execution path')
         executionResult = await this.executeWithNativeTools(
           contextResult.request,
           config,
