@@ -78,6 +78,17 @@ export interface AnthropicProviderConfig {
   provides?: string[];
 }
 
+export interface OpenAIProviderConfig {
+  /** OpenAI API key */
+  apiKey: string;
+  /** Vendor/provider name (e.g., "openai-o1") */
+  name: string;
+  /** Base URL (optional, defaults to api.openai.com) */
+  baseUrl?: string;
+  /** Model patterns this provider serves (e.g., ["o1-*", "o1"]) */
+  provides?: string[];
+}
+
 export type FormatterType = 'anthropic-xml' | 'native' | 'completions';
 
 export interface MembraneFactoryConfig {
@@ -102,7 +113,7 @@ export interface MembraneFactoryConfig {
   openrouterApiKey?: string;
 
   /**
-   * OpenAI API key
+   * OpenAI API key (used as the default/fallback OpenAI adapter)
    * If not provided, falls back to OPENAI_API_KEY env var
    */
   openaiApiKey?: string;
@@ -111,6 +122,13 @@ export interface MembraneFactoryConfig {
    * OpenAI base URL (optional, for Azure or custom endpoints)
    */
   openaiBaseUrl?: string;
+
+  /**
+   * Multiple OpenAI providers with different API keys
+   * Each can have its own key, base URL, and model patterns (provides)
+   * Used when different API keys have access to different models or rate limits
+   */
+  openaiProviders?: OpenAIProviderConfig[];
 
   /**
    * Single OpenAI-compatible provider (legacy - use openaiCompatibleProviders for multiple)
@@ -512,21 +530,58 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
     logger.debug('Membrane: No OpenRouter API key provided, adapter not created');
   }
   
-  // Create OpenAI adapter if API key is available
-  const openaiKey = config.openaiApiKey ?? process.env.OPENAI_API_KEY;
-  if (openaiKey) {
-    try {
-      const openaiAdapter = new OpenAIAdapter({
-        apiKey: openaiKey,
-        baseURL: config.openaiBaseUrl,
-      });
-      adapters.set('openai', openaiAdapter);
-      logger.info('Membrane: OpenAI adapter initialized');
-    } catch (error) {
-      logger.error({ error }, 'Failed to create OpenAI adapter');
+  // Create OpenAI adapters
+  // When openaiProviders is set, it takes precedence over openaiApiKey
+  if (config.openaiProviders && config.openaiProviders.length > 0) {
+    // Multiple providers mode: create an adapter for each
+    let defaultSet = false;
+    for (const providerConfig of config.openaiProviders) {
+      const isDefault = providerConfig.name === 'openai' || !defaultSet;
+      const adapterKey = isDefault ? 'openai' : `openai-${providerConfig.name}`;
+      if (isDefault) defaultSet = true;
+
+      try {
+        const openaiAdapter = new OpenAIAdapter({
+          apiKey: providerConfig.apiKey,
+          baseURL: providerConfig.baseUrl,
+        });
+        adapters.set(adapterKey, openaiAdapter);
+
+        // Register pattern routes
+        if (providerConfig.provides && providerConfig.provides.length > 0) {
+          patternRoutes.push({
+            adapterKey,
+            patterns: providerConfig.provides,
+          });
+        }
+
+        logger.info({
+          name: providerConfig.name,
+          adapterKey,
+          isDefault,
+          patterns: providerConfig.provides ?? [],
+        }, 'Membrane: OpenAI adapter initialized');
+      } catch (error) {
+        logger.error({ error, name: providerConfig.name }, 'Failed to create OpenAI adapter');
+      }
     }
   } else {
-    logger.debug('Membrane: No OpenAI API key provided, adapter not created');
+    // Legacy single key mode
+    const openaiKey = config.openaiApiKey ?? process.env.OPENAI_API_KEY;
+    if (openaiKey) {
+      try {
+        const openaiAdapter = new OpenAIAdapter({
+          apiKey: openaiKey,
+          baseURL: config.openaiBaseUrl,
+        });
+        adapters.set('openai', openaiAdapter);
+        logger.info('Membrane: OpenAI adapter initialized');
+      } catch (error) {
+        logger.error({ error }, 'Failed to create OpenAI adapter');
+      }
+    } else {
+      logger.debug('Membrane: No OpenAI API key provided, adapter not created');
+    }
   }
 
   // Create Bedrock adapter if valid AWS credentials are available
@@ -764,8 +819,8 @@ export function createMembraneFromVendorConfigs(
   formatterRoutes = [];
 
   const anthropicProviders: AnthropicProviderConfig[] = [];
+  const openaiProviders: OpenAIProviderConfig[] = [];
   let openrouterApiKey: string | undefined;
-  let openaiApiKey: string | undefined;
   let bedrockConfig: BedrockConfig | undefined;
   const openaiCompatibleProviders: OpenAICompatibleConfig[] = [];
   const openaiCompletionsProviders: OpenAICompletionsConfig[] = [];
@@ -883,13 +938,17 @@ export function createMembraneFromVendorConfigs(
       const isOfficialOpenAI = !baseUrl || baseUrl.includes('api.openai.com');
 
       if (isOfficialOpenAI) {
-        // Official OpenAI API - use native OpenAIAdapter
-        // Smart routing in getAdapterForModel() handles gpt-*/o1/o3/o4 -> openai
+        // Official OpenAI API — collect ALL vendors for multi-key support
         const openaiKey = config?.openai_api_key ?? config?.api_key;
-        if (openaiKey && !openaiApiKey) {
-          openaiApiKey = openaiKey;
+        if (openaiKey) {
+          openaiProviders.push({
+            apiKey: openaiKey,
+            name: vendorName,
+            baseUrl: baseUrl, // undefined or explicit api.openai.com
+            provides: vendorConfig.provides,
+          });
         }
-        logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenAI vendor (official API, uses native adapter)');
+        logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenAI vendor (official API)');
       } else {
         // Custom base URL - use OpenAI Compatible adapter
         openaiCompatibleProviders.push({
@@ -937,7 +996,9 @@ export function createMembraneFromVendorConfigs(
     anthropicApiKey: anthropicProviders.length === 1 ? anthropicProviders[0]!.apiKey : undefined,
     anthropicProviders: anthropicProviders.length > 1 ? anthropicProviders : undefined,
     openrouterApiKey,
-    openaiApiKey,
+    openaiApiKey: openaiProviders.length === 1 ? openaiProviders[0]!.apiKey : undefined,
+    openaiBaseUrl: openaiProviders.length === 1 ? openaiProviders[0]!.baseUrl : undefined,
+    openaiProviders: openaiProviders.length > 1 ? openaiProviders : undefined,
     bedrock: bedrockConfig,
     openaiCompatibleProviders: openaiCompatibleProviders.length > 0 ? openaiCompatibleProviders : undefined,
     openaiCompletionsProviders: openaiCompletionsProviders.length > 0 ? openaiCompletionsProviders : undefined,
