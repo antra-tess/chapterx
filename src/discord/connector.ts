@@ -46,10 +46,16 @@ export class DiscordConnector {
   private urlMapPath: string  // Path to URL map file
 
   // Push-based caches (populated from gateway events, avoids API fetches)
-  private messageCache = new Map<string, Message[]>()  // channelId → messages (chronological)
+  private messageCache = new Map<string, (Message | null)[]>()  // channelId → messages (chronological, nulls are tombstones)
+  private messageCacheIndex = new Map<string, Map<string, number>>()  // channelId → (messageId → array index)
   private messageCachePopulated = new Set<string>()  // channels that had initial API fetch
   private pinnedConfigCache = new Map<string, string[]>()  // channelId → pinned config strings
   private pinnedConfigDirty = new Set<string>()  // channels whose pins changed since last fetch
+
+  // Cache observability and maintenance
+  private cacheStats = { hits: 0, misses: 0, apiCalls: 0, evictions: 0 }
+  private cacheStatsInterval?: NodeJS.Timeout
+  private evictionInterval?: NodeJS.Timeout
 
   constructor(
     private queue: EventQueue,
@@ -116,6 +122,22 @@ export class DiscordConnector {
     try {
       await this.client.login(this.options.token)
       logger.info({ userId: this.client.user?.id, tag: this.client.user?.tag }, 'Discord connector started')
+
+      // Periodic cache stats logging
+      this.cacheStatsInterval = setInterval(() => {
+        if (this.cacheStats.hits + this.cacheStats.misses > 0) {
+          const hitRate = this.cacheStats.hits / (this.cacheStats.hits + this.cacheStats.misses)
+          logger.info({
+            ...this.cacheStats,
+            hitRate: hitRate.toFixed(3),
+            channels: this.messageCache.size,
+            totalMessages: Array.from(this.messageCache.values()).reduce((sum, msgs) => sum + msgs.filter(m => m !== null).length, 0),
+          }, 'Message cache stats')
+        }
+      }, 5 * 60 * 1000)
+
+      // Periodic cache eviction (compact tombstones, cap per-channel size)
+      this.evictionInterval = setInterval(() => this.evictStaleMessages(), 5 * 60 * 1000)
     } catch (error) {
       logger.error({ error }, 'Failed to start Discord connector')
       throw new DiscordError('Failed to connect to Discord', error)
@@ -1591,6 +1613,9 @@ export class DiscordConnector {
     for (const interval of this.typingIntervals.values()) {
       clearInterval(interval)
     }
+    // Clear cache maintenance intervals
+    if (this.cacheStatsInterval) clearInterval(this.cacheStatsInterval)
+    if (this.evictionInterval) clearInterval(this.evictionInterval)
 
     await this.client.destroy()
     logger.info('Discord connector closed')
@@ -1602,27 +1627,35 @@ export class DiscordConnector {
 
   private pushMessageToCache(channelId: string, message: Message): void {
     const cache = this.messageCache.get(channelId)
-    if (cache) {
-      cache.push(message)
-    }
+    if (!cache) return
     // If cache doesn't exist yet, we haven't done the initial fetch - don't start partial cache
+    const idx = cache.push(message) - 1
+    let index = this.messageCacheIndex.get(channelId)
+    if (!index) {
+      index = new Map()
+      this.messageCacheIndex.set(channelId, index)
+    }
+    index.set(message.id, idx)
   }
 
   private updateMessageInCache(channelId: string, message: Message): void {
+    const index = this.messageCacheIndex.get(channelId)
     const cache = this.messageCache.get(channelId)
-    if (!cache) return
-    const idx = cache.findIndex(m => m.id === message.id)
-    if (idx !== -1) {
+    if (!index || !cache) return
+    const idx = index.get(message.id)
+    if (idx !== undefined && cache[idx] !== null) {
       cache[idx] = message
     }
   }
 
   private removeMessageFromCache(channelId: string, messageId: string): void {
+    const index = this.messageCacheIndex.get(channelId)
     const cache = this.messageCache.get(channelId)
-    if (!cache) return
-    const idx = cache.findIndex(m => m.id === messageId)
-    if (idx !== -1) {
-      cache.splice(idx, 1)
+    if (!index || !cache) return
+    const idx = index.get(messageId)
+    if (idx !== undefined) {
+      cache[idx] = null  // tombstone — compacted by evictStaleMessages()
+      index.delete(messageId)
     }
   }
 
@@ -1645,14 +1678,20 @@ export class DiscordConnector {
       return channel.messages.fetch(options)
     }
 
-    // Single message fetch by ID
+    // Single message fetch by ID — O(1) via index
     if (typeof options === 'string') {
+      const index = this.messageCacheIndex.get(channelId)
       const cache = this.messageCache.get(channelId)
-      if (cache) {
-        const found = cache.find(m => m.id === options)
-        if (found) return found
+      if (index && cache) {
+        const idx = index.get(options)
+        if (idx !== undefined && cache[idx] !== null) {
+          this.cacheStats.hits++
+          return cache[idx]
+        }
       }
       // Cache miss for single message - fetch from API
+      this.cacheStats.misses++
+      this.cacheStats.apiCalls++
       const msg = await channel.messages.fetch(options)
       // Add to cache if we have one
       if (msg && this.messageCache.has(channelId)) {
@@ -1668,12 +1707,13 @@ export class DiscordConnector {
 
     if (cache && this.messageCachePopulated.has(channelId)) {
       // Cache is fully populated - serve from it (even if fewer than limit)
+      this.cacheStats.hits++
       let filtered: Message[]
       if (before) {
-        // Messages with ID less than `before` (older)
-        filtered = cache.filter(m => m.id < before)
+        // Messages with ID less than `before` (older), skip tombstones
+        filtered = cache.filter((m): m is Message => m !== null && m.id < before)
       } else {
-        filtered = cache
+        filtered = cache.filter((m): m is Message => m !== null)
       }
 
       const slice = filtered.slice(-limit).reverse()
@@ -1685,17 +1725,84 @@ export class DiscordConnector {
     }
 
     // Cache miss - fetch from API
+    this.cacheStats.misses++
+    this.cacheStats.apiCalls++
     const fetched = await channel.messages.fetch(options)
 
-    // Populate cache from API result
+    // Populate cache from API result and build index
     if (!this.messageCachePopulated.has(channelId)) {
-      const msgs = Array.from(fetched.values()).reverse()  // chronological order
+      const msgs = Array.from(fetched.values()).reverse() as Message[]  // chronological order
       this.messageCache.set(channelId, msgs)
+      const index = new Map<string, number>()
+      msgs.forEach((m, i) => index.set(m.id, i))
+      this.messageCacheIndex.set(channelId, index)
       this.messageCachePopulated.add(channelId)
       logger.debug({ channelId, count: msgs.length }, 'Message cache populated from API')
     }
 
     return fetched
+  }
+
+  /**
+   * Evict stale messages: compact tombstones and cap per-channel size.
+   * Runs periodically via evictionInterval.
+   */
+  private evictStaleMessages(): void {
+    const maxPerChannel = 1000
+    let totalEvicted = 0
+
+    for (const [channelId, cache] of this.messageCache) {
+      // Step 1: Compact tombstones (filter out nulls)
+      const compacted = cache.filter((m): m is Message => m !== null)
+
+      // Step 2: Evict oldest if over cap
+      let evicted = 0
+      if (compacted.length > maxPerChannel) {
+        evicted = compacted.length - maxPerChannel
+        compacted.splice(0, evicted)  // remove oldest (array is chronological)
+      }
+
+      // Step 3: Rebuild array and index
+      this.messageCache.set(channelId, compacted)
+      const newIndex = new Map<string, number>()
+      compacted.forEach((m, i) => newIndex.set(m.id, i))
+      this.messageCacheIndex.set(channelId, newIndex)
+
+      totalEvicted += evicted
+    }
+
+    if (totalEvicted > 0) {
+      this.cacheStats.evictions += totalEvicted
+      logger.debug({ evicted: totalEvicted, channels: this.messageCache.size }, 'Cache eviction complete')
+    }
+  }
+
+  /**
+   * Prefetch channels to warm the message cache on startup.
+   * Called fire-and-forget from the ready handler.
+   */
+  private async prefetchChannels(channelIds: string[]): Promise<void> {
+    const concurrency = 5
+    let fetched = 0
+
+    for (let i = 0; i < channelIds.length; i += concurrency) {
+      const batch = channelIds.slice(i, i + concurrency)
+      await Promise.allSettled(
+        batch.map(async (channelId) => {
+          try {
+            const channel = await this.client.channels.fetch(channelId) as TextChannel
+            if (channel?.isTextBased()) {
+              await this.cachedFetchMessages(channel, { limit: 100 })
+              fetched++
+            }
+          } catch (error) {
+            logger.warn({ channelId, error }, 'Failed to prefetch channel')
+          }
+        })
+      )
+    }
+
+    logger.info({ requested: channelIds.length, fetched }, 'Channel prefetch complete')
   }
 
   /**
@@ -1721,6 +1828,13 @@ export class DiscordConnector {
   private setupEventHandlers(): void {
     this.client.on('ready', () => {
       logger.info({ user: this.client.user?.tag }, 'Discord client ready')
+
+      // Optional: prefetch channels to warm the cache on startup
+      const prefetchChannels = process.env.PREFETCH_CHANNELS
+      if (prefetchChannels) {
+        const channelIds = prefetchChannels.split(',').map(s => s.trim()).filter(Boolean)
+        this.prefetchChannels(channelIds)  // fire-and-forget
+      }
     })
 
     this.client.on('messageCreate', (message) => {
