@@ -239,6 +239,19 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
       };
     }
     
+    case 'generated_image': {
+      // Convert membrane generated_image to chapterx image format
+      const genImg = block as any;
+      return {
+        type: 'image',
+        source: {
+          type: 'base64',
+          data: genImg.data,
+          media_type: genImg.mimeType || 'image/png',
+        },
+      };
+    }
+
     case 'thinking':
       // Convert thinking block to text (chapterx doesn't have native thinking type)
       return {

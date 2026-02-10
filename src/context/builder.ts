@@ -852,11 +852,21 @@ export class ContextBuilder {
             const cached = imageMap.get(attachment.url)
             
             if (cached) {
-              // Check if image needs resampling (exceeds Anthropic's 5MB per-image limit)
               let imageData = cached.data
               let mediaType = cached.mediaType
+
+              // Normalize image through sharp to strip problematic metadata/encoding
+              // that can cause "Could not process image" errors from providers
+              try {
+                const normalized = await this.normalizeImage(imageData, mediaType)
+                imageData = normalized.data
+                mediaType = normalized.mediaType
+              } catch (error) {
+                logger.warn({ error, messageId: msg.id }, 'Failed to normalize image, using original')
+              }
+
               const originalBase64Size = imageData.length * 4 / 3  // Approximate base64 size
-              
+
               if (originalBase64Size > MAX_IMAGE_BASE64_BYTES) {
                 try {
                   const resampled = await this.resampleImage(imageData, MAX_IMAGE_BASE64_BYTES)
@@ -1046,6 +1056,27 @@ export class ContextBuilder {
       removed: toRemove,
       kept: maxMcpImages,
     }, 'Limited MCP images in context (kept latest)')
+  }
+
+  /**
+   * Normalize an image by re-encoding through sharp to strip problematic
+   * metadata (EXIF, ICC profiles, XMP) that can cause provider-side
+   * "Could not process image" errors. Preserves dimensions and quality.
+   */
+  private async normalizeImage(
+    data: Buffer,
+    mediaType: string
+  ): Promise<{ data: Buffer; mediaType: string }> {
+    const image = sharp(data)
+    const metadata = await image.metadata()
+
+    if (metadata.hasAlpha || mediaType === 'image/png') {
+      const output = await sharp(data).png({ compressionLevel: 6 }).toBuffer()
+      return { data: output, mediaType: 'image/png' }
+    }
+
+    const output = await sharp(data).jpeg({ quality: 95, mozjpeg: true }).toBuffer()
+    return { data: output, mediaType: 'image/jpeg' }
   }
 
   /**
