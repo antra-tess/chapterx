@@ -345,6 +345,8 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     promptCaching: request.config.prompt_caching,
     // Pass through cache TTL for Anthropic extended caching (1h vs default 5m)
     cacheTtl: request.config.cache_ttl,
+    // Context prefix for simulacrum seeding (injected as first assistant message)
+    contextPrefix: request.context_prefix,
   };
 
   // Handle stop sequences
