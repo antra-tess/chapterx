@@ -353,7 +353,23 @@ export class DiscordConnector {
             parentMessageCount: parentMessages.length,
             threadMessageCount: messages.length
           }, 'Fetched parent context for thread')
-          
+
+          // Ensure thread starter message is included in parent context.
+          // fetchMessagesRecursive fetches messages BEFORE startFromId then appends the
+          // startFromId message itself — but when the starter is the first message in the
+          // channel, the "before" fetch returns empty and breaks before reaching that append.
+          if (threadStartMessageId && !parentMessages.some(m => m.id === threadStartMessageId)) {
+            try {
+              const starterMsg = await this.cachedFetchMessages(threadParentChannel, threadStartMessageId)
+              if (starterMsg) {
+                parentMessages.push(starterMsg as Message)
+                logger.debug({ threadStartMessageId }, 'Explicitly added missing thread starter to parent context')
+              }
+            } catch (error) {
+              logger.warn({ error, threadStartMessageId }, 'Failed to fetch thread starter message')
+            }
+          }
+
           // Prepend parent messages (they're older than thread messages)
           messages = [...parentMessages, ...messages]
         }
