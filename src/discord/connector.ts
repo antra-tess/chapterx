@@ -1722,40 +1722,52 @@ export class DiscordConnector {
     const cache = this.messageCache.get(channelId)
 
     if (cache && this.messageCachePopulated.has(channelId)) {
-      // Cache is fully populated - serve from it (even if fewer than limit)
-      this.cacheStats.hits++
-      let filtered: Message[]
       if (before) {
-        // Use index map to find boundary in O(1), then slice + filter tombstones
-        // from the subset instead of scanning the entire cache array
-        const index = this.messageCacheIndex.get(channelId)
-        const beforeIdx = index?.get(before)
-        if (beforeIdx !== undefined) {
-          // Fast path: slice up to the known position, filter only tombstones
-          filtered = cache.slice(0, beforeIdx).filter((m): m is Message => m !== null)
+        // Check if query goes beyond the oldest cached message — if so, fall through
+        // to API so pagination can extend backwards into channel history
+        const oldestCached = cache.find((m): m is Message => m !== null)
+        if (oldestCached && before <= oldestCached.id) {
+          // Beyond cache boundary — fall through to API fetch below
+          logger.debug({ channelId, before, oldestCached: oldestCached.id }, 'Cache pagination boundary — falling through to API')
         } else {
-          // Fallback: before ID not in index (deleted/external), full scan
-          filtered = cache.filter((m): m is Message => m !== null && m.id < before)
+          // Within cache range — serve from cache
+          this.cacheStats.hits++
+          let filtered: Message[]
+          const index = this.messageCacheIndex.get(channelId)
+          const beforeIdx = index?.get(before)
+          if (beforeIdx !== undefined) {
+            // Fast path: slice up to the known position, filter only tombstones
+            filtered = cache.slice(0, beforeIdx).filter((m): m is Message => m !== null)
+          } else {
+            // Fallback: before ID not in index (deleted/external), full scan
+            filtered = cache.filter((m): m is Message => m !== null && m.id < before)
+          }
+
+          const slice = filtered.slice(-limit).reverse()
+          const map = new Map(slice.map(m => [m.id, m]))
+          ;(map as any).values = map.values.bind(map)
+          ;(map as any).first = () => slice[0]
+          return map
         }
       } else {
-        filtered = cache.filter((m): m is Message => m !== null)
+        // No 'before' — return most recent messages from cache
+        this.cacheStats.hits++
+        const filtered = cache.filter((m): m is Message => m !== null)
+        const slice = filtered.slice(-limit).reverse()
+        const map = new Map(slice.map(m => [m.id, m]))
+        ;(map as any).values = map.values.bind(map)
+        ;(map as any).first = () => slice[0]
+        return map
       }
-
-      const slice = filtered.slice(-limit).reverse()
-      const map = new Map(slice.map(m => [m.id, m]))
-      // Mimic Collection interface
-      ;(map as any).values = map.values.bind(map)
-      ;(map as any).first = () => slice[0]
-      return map
     }
 
-    // Cache miss - fetch from API
+    // Cache miss or beyond cache boundary - fetch from API
     this.cacheStats.misses++
     this.cacheStats.apiCalls++
     const fetched = await channel.messages.fetch(options)
 
-    // Populate cache from API result and build index
     if (!this.messageCachePopulated.has(channelId)) {
+      // First population — store as initial cache
       const msgs = Array.from(fetched.values()).reverse() as Message[]  // chronological order
       this.messageCache.set(channelId, msgs)
       const index = new Map<string, number>()
@@ -1763,6 +1775,19 @@ export class DiscordConnector {
       this.messageCacheIndex.set(channelId, index)
       this.messageCachePopulated.add(channelId)
       logger.debug({ channelId, count: msgs.length }, 'Message cache populated from API')
+    } else if (before && cache) {
+      // Extend cache backwards with older messages from API
+      const msgs = Array.from(fetched.values()).reverse() as Message[]
+      const existingIndex = this.messageCacheIndex.get(channelId) ?? new Map<string, number>()
+      const newMsgs = msgs.filter(m => !existingIndex.has(m.id))
+      if (newMsgs.length > 0) {
+        cache.unshift(...newMsgs)
+        // Rebuild index (positions shifted by prepend)
+        const newIndex = new Map<string, number>()
+        cache.forEach((m, i) => { if (m) newIndex.set(m.id, i) })
+        this.messageCacheIndex.set(channelId, newIndex)
+        logger.debug({ channelId, extended: newMsgs.length, total: cache.length }, 'Cache extended backwards')
+      }
     }
 
     return fetched
@@ -1773,7 +1798,7 @@ export class DiscordConnector {
    * Runs periodically via evictionInterval.
    */
   private evictStaleMessages(): void {
-    const maxPerChannel = 1000
+    const maxPerChannel = 2000
     let totalEvicted = 0
 
     for (const [channelId, cache] of this.messageCache) {
@@ -1808,6 +1833,7 @@ export class DiscordConnector {
    */
   private async prefetchChannels(channelIds: string[]): Promise<void> {
     const concurrency = 5
+    const targetMessages = 1000  // Warm cache deep enough for most recency_window_messages configs
     let fetched = 0
 
     for (let i = 0; i < channelIds.length; i += concurrency) {
@@ -1816,10 +1842,25 @@ export class DiscordConnector {
         batch.map(async (channelId) => {
           try {
             const channel = await this.client.channels.fetch(channelId) as TextChannel
-            if (channel?.isTextBased()) {
-              await this.cachedFetchMessages(channel, { limit: 100 })
-              fetched++
+            if (!channel?.isTextBased()) return
+
+            // First batch populates the cache
+            await this.cachedFetchMessages(channel, { limit: 100 })
+            const cache = this.messageCache.get(channelId)
+            if (!cache || cache.length === 0) return
+
+            // Paginate backwards to fill cache up to target
+            let totalFetched = cache.length
+            while (totalFetched < targetMessages) {
+              const oldest = cache.find((m): m is Message => m !== null)
+              if (!oldest) break
+              const older = await this.cachedFetchMessages(channel, { limit: 100, before: oldest.id })
+              if (!older || older.size === 0) break  // Reached beginning of channel
+              totalFetched += older.size
             }
+
+            fetched++
+            logger.debug({ channelId, messages: cache.length }, 'Channel prefetch complete')
           } catch (error) {
             logger.warn({ channelId, error }, 'Failed to prefetch channel')
           }
@@ -1827,7 +1868,7 @@ export class DiscordConnector {
       )
     }
 
-    logger.info({ requested: channelIds.length, fetched }, 'Channel prefetch complete')
+    logger.info({ requested: channelIds.length, fetched, targetMessages }, 'Channel prefetch complete')
   }
 
   /**
