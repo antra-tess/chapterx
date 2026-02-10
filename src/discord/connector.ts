@@ -568,7 +568,7 @@ export class DiscordConnector {
   private parseHistoryCommand(content: string): { first?: string; last: string } | null | false {
     const lines = content.split('\n')
 
-    // Bare .history with no body (or only whitespace after) = clear context
+    // Bare .history (or .history <@bot>) with no body = clear context
     if (lines.length < 2 || lines.slice(1).every(l => !l.trim())) {
       return null
     }
@@ -724,12 +724,23 @@ export class DiscordConnector {
 
           if (authorized) {
             const historyRange = this.parseHistoryCommand(message.content)
-            
-            logger.debug({ 
+
+            logger.debug({
               historyRange,
               messageId: message.id,
               fullContent: message.content
             }, 'Parsed .history command')
+
+            // Check if .history targets a specific bot via mention (e.g., .history <@botId>)
+            // Extract target from the first line of the raw message content
+            const mentionMatch = message.content.match(/^\.history\s+<@!?(\d+)>/)
+            const historyBotTarget = mentionMatch?.[1]
+            const selfId = this.client.user?.id
+            if (historyBotTarget && historyBotTarget !== selfId) {
+              // Targeted at a different bot — skip this .history command entirely
+              logger.debug({ historyBotTarget, selfId, messageId: message.id }, 'Skipping .history targeted at different bot')
+              continue  // Don't add to batchResults — the .history message itself is always skipped
+            }
 
             if (historyRange === null) {
               // Empty .history - clear history BEFORE this point, keep messages AFTER
@@ -775,7 +786,7 @@ export class DiscordConnector {
                 this.lastHistoryOriginChannelId = channel.id
                 this.lastHistoryDidClear = true  // Prevent cache stability from extending past range boundary
 
-                logger.debug({ 
+                logger.debug({
                   historyTarget: historyRange.last,
                   targetChannelId,
                   histLastId,
