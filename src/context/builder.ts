@@ -743,15 +743,21 @@ export class ContextBuilder {
             if (attachment.contentType?.startsWith('image/')) {
               const cached = imageMap.get(attachment.url)
               if (cached) {
-                const base64Size = cached.data.toString('base64').length
-                
+                // Use post-resample target size for budget check if image exceeds per-image limit,
+                // since the inclusion stage will resample it down to fit
+                const rawBase64Size = Math.ceil(cached.data.length * 4 / 3)
+                const base64Size = rawBase64Size > MAX_IMAGE_BASE64_BYTES
+                  ? MAX_IMAGE_BASE64_BYTES  // will be resampled to fit this limit
+                  : rawBase64Size
+
                 if (totalBase64Size + base64Size <= maxTotalBase64Bytes) {
                   messagesWithImages.add(msg.id)
                   prefixImageCount++
                   totalBase64Size += base64Size
-                  logger.debug({ 
+                  logger.debug({
                     messageId: msg.id,
-                    imageSizeMB: (base64Size / 1024 / 1024).toFixed(2),
+                    rawMB: (rawBase64Size / 1024 / 1024).toFixed(2),
+                    budgetMB: (base64Size / 1024 / 1024).toFixed(2),
                     totalMB: (totalBase64Size / 1024 / 1024).toFixed(2),
                     prefixImageCount,
                     tier: 'cached-prefix',
@@ -762,7 +768,7 @@ export class ContextBuilder {
           }
         }
       }
-      
+
       // TIER 2: Images in rolling window (always enabled when include_images is true)
       // Select up to maxEphemeralImages AFTER the cache marker
       // These don't affect caching since they're in the ephemeral portion
@@ -770,25 +776,30 @@ export class ContextBuilder {
       const ephemeralStartIndex = cacheMarkerIndex >= 0 ? cacheMarkerIndex + 1 : 0
       for (let i = messages.length - 1; i >= ephemeralStartIndex && ephemeralImageCount < maxEphemeralImages; i--) {
         const msg = messages[i]!
-        
+
         // Skip if already selected in TIER 1 (avoid double-counting when ranges overlap)
         // This happens when cache_images=true and cacheMarkerIndex=-1 (no marker yet)
         if (messagesWithImages.has(msg.id)) continue
-        
+
         for (const attachment of msg.attachments) {
           if (ephemeralImageCount >= maxEphemeralImages) break
-          
+
           if (attachment.contentType?.startsWith('image/')) {
             const cached = imageMap.get(attachment.url)
             if (cached) {
-              const base64Size = cached.data.toString('base64').length
+              // Use post-resample target size for budget check if image exceeds per-image limit
+              const rawBase64Size = Math.ceil(cached.data.length * 4 / 3)
+              const base64Size = rawBase64Size > MAX_IMAGE_BASE64_BYTES
+                ? MAX_IMAGE_BASE64_BYTES
+                : rawBase64Size
               if (totalBase64Size + base64Size <= maxTotalBase64Bytes) {
                 messagesWithImages.add(msg.id)
                 ephemeralImageCount++
                 totalBase64Size += base64Size
-                logger.debug({ 
+                logger.debug({
                   messageId: msg.id,
-                  imageSizeMB: (base64Size / 1024 / 1024).toFixed(2),
+                  rawMB: (rawBase64Size / 1024 / 1024).toFixed(2),
+                  budgetMB: (base64Size / 1024 / 1024).toFixed(2),
                   totalMB: (totalBase64Size / 1024 / 1024).toFixed(2),
                   ephemeralImageCount,
                   tier: 'ephemeral',
