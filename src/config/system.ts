@@ -255,7 +255,7 @@ export class ConfigSystem {
       continuation_model: config.continuation_model || '',
       temperature: config.temperature ?? 1.0,
       max_tokens: config.max_tokens || 4096,
-      top_p: config.top_p ?? 1.0,
+      top_p: config.top_p,
       presence_penalty: config.presence_penalty,
       frequency_penalty: config.frequency_penalty,
 
@@ -338,7 +338,7 @@ export class ConfigSystem {
       throw new ConfigError('max_tokens must be positive')
     }
 
-    if (config.top_p < 0 || config.top_p > 1) {
+    if (config.top_p !== undefined && (config.top_p < 0 || config.top_p > 1)) {
       throw new ConfigError('top_p must be between 0 and 1')
     }
   }

@@ -126,7 +126,7 @@ export interface ModelConfig {
   model: string
   temperature: number
   max_tokens: number
-  top_p: number
+  top_p?: number  // Optional — only sent to API when explicitly set (avoids Anthropic temp+top_p conflict)
   prefill_thinking?: boolean  // If true, enable extended thinking
   botName: string  // Name used in LLM context (prefill labels, stop sequences)
   messageDelimiter?: string  // Optional delimiter appended to each message (for completions formatter)
@@ -152,7 +152,7 @@ export interface BotConfig {
   continuation_model: string
   temperature: number
   max_tokens: number
-  top_p: number
+  top_p?: number
   presence_penalty?: number  // Penalty for token presence (0.0-2.0)
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
   
