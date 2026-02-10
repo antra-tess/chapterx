@@ -32,13 +32,17 @@ export class ConfigSystem {
 
     logger.debug({ botName, guildId, emsMode: this.emsMode }, 'Loading config')
 
+    // Load bot config early to get display name for pinned config target matching
+    const botConfig = this.loadBotConfig(botName)
+    const botDisplayName = botConfig.name
+
     // Load configs in priority order (each overrides previous)
     const configs: Partial<BotConfig>[] = [
       this.loadSharedConfig(),
       this.loadGuildConfig(guildId),
-      this.loadBotConfig(botName),
+      botConfig,
       this.loadBotGuildConfig(botName, guildId),
-      ...channelConfigs.map((yaml) => this.parseChannelConfig(yaml, botName)),
+      ...channelConfigs.map((yaml) => this.parseChannelConfig(yaml, botName, botDisplayName)),
     ]
 
     // Merge all configs
@@ -132,21 +136,28 @@ export class ConfigSystem {
     return this.loadYAMLFile(path)
   }
 
-  private parseChannelConfig(yamlString: string, botName: string): Partial<BotConfig> {
+  private parseChannelConfig(yamlString: string, botName: string, botDisplayName?: string): Partial<BotConfig> {
     try {
       const config = YAML.parse(yamlString) || {}
-      
-      logger.debug({ 
-        yamlString, 
-        parsedConfig: config, 
-        target: config.target, 
+
+      // Match target against botId (e.g. "haiku45") or display name (e.g. "Haiku"), case-insensitive
+      const target = config.target?.toLowerCase()
+      const matchesBotId = target === botName.toLowerCase()
+      const matchesDisplayName = botDisplayName && target === botDisplayName.toLowerCase()
+      const targetMatches = !config.target || matchesBotId || matchesDisplayName
+
+      logger.debug({
+        yamlString,
+        parsedConfig: config,
+        target: config.target,
         botName,
-        match: config.target === botName
+        botDisplayName,
+        match: targetMatches
       }, 'Parsing channel config')
-      
+
       // If config has a target field, only apply if it matches this bot
-      if (config.target && config.target !== botName) {
-        logger.debug({ target: config.target, botName }, 'Skipping config with different target')
+      if (!targetMatches) {
+        logger.debug({ target: config.target, botName, botDisplayName }, 'Skipping config with different target')
         return {}
       }
       
