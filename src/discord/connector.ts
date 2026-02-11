@@ -229,6 +229,21 @@ export class DiscordConnector {
     }
   }
 
+  async getChannelMeta(channelId: string): Promise<{ name?: string; isThread: boolean; parentChannelId?: string }> {
+    try {
+      const channel = await this.client.channels.fetch(channelId)
+      if (!channel) return { isThread: false }
+      const isThread = 'isThread' in channel && typeof channel.isThread === 'function' ? channel.isThread() : false
+      return {
+        name: 'name' in channel ? (channel.name as string) || undefined : undefined,
+        isThread,
+        parentChannelId: isThread && 'parentId' in channel ? (channel.parentId as string) || undefined : undefined,
+      }
+    } catch {
+      return { isThread: false }
+    }
+  }
+
   /**
    * Fetch just pinned configs from a channel (fast - single API call)
    * Used to load config BEFORE determining fetch depth

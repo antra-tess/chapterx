@@ -536,9 +536,10 @@ export class AgentLoop {
     // Wrap activation in both logging and trace context
     const activationPromise = triggeringMessageId
       ? withActivationLogging(channelId, triggeringMessageId, async () => {
-          // Get channel name for trace indexing
-          const channelName = await this.connector.getChannelName(channelId)
-          
+          // Get channel metadata for trace indexing
+          const channelMeta = await this.connector.getChannelMeta(channelId)
+          const channelName = channelMeta.name
+
           // Run with trace context
           const { trace, error: traceError } = await withTrace(
             channelId,
@@ -550,6 +551,7 @@ export class AgentLoop {
               if (this.botUserId) {
                 traceCollector.setBotUserId(this.botUserId)
               }
+              traceCollector.setThreadInfo(channelMeta.isThread, channelMeta.parentChannelId)
               traceCollector.recordActivation({
                 reason: activationReason.reason,
                 triggerEvents: activationReason.events,

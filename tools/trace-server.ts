@@ -388,6 +388,8 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
         activationReason: (e as any).activationReason,
         triggerPreview: (e as any).triggerPreview,
         responsePreview: (e as any).responsePreview,
+        isThread: (e as any).isThread,
+        parentChannelId: (e as any).parentChannelId,
         success: e.success,
         durationMs: e.durationMs,
         llmCallCount: e.llmCallCount,

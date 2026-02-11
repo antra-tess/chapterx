@@ -20,6 +20,12 @@ export interface ActivationTrace {
   channelId: string
   guildId?: string
   triggeringMessageId: string
+
+  /** Whether this activation happened in a thread */
+  isThread?: boolean
+
+  /** Parent channel ID if this is a thread */
+  parentChannelId?: string
   
   /** Bot identity */
   botId: string
@@ -388,6 +394,12 @@ export interface TraceIndex {
 
   /** First ~100 chars of the bot's response */
   responsePreview?: string
+
+  /** Whether this activation happened in a thread */
+  isThread?: boolean
+
+  /** Parent channel ID if this is a thread */
+  parentChannelId?: string
 
   /** Quick stats for filtering */
   success: boolean

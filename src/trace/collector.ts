@@ -80,6 +80,8 @@ export class TraceCollector {
   
   private guildId?: string
   private botUserId?: string
+  private isThread?: boolean
+  private parentChannelId?: string
   private config?: Record<string, any>
   
   private activation?: ActivationInfo
@@ -115,6 +117,11 @@ export class TraceCollector {
   
   setBotUserId(userId: string): void {
     this.botUserId = userId
+  }
+
+  setThreadInfo(isThread: boolean, parentChannelId?: string): void {
+    this.isThread = isThread
+    this.parentChannelId = parentChannelId
   }
   
   setConfig(config: Record<string, any>): void {
@@ -378,6 +385,8 @@ export class TraceCollector {
       triggeringMessageId: this.triggeringMessageId,
       botId: this.botId,
       botUserId: this.botUserId,
+      isThread: this.isThread,
+      parentChannelId: this.parentChannelId,
       activation: this.activation || {
         reason: 'mention',
         triggerEvents: [],

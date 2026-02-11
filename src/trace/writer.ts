@@ -116,6 +116,8 @@ export class TraceWriter {
       activationReason: trace.activation?.reason,
       triggerPreview,
       responsePreview,
+      isThread: trace.isThread,
+      parentChannelId: trace.parentChannelId,
       success: trace.outcome?.success ?? false,
       durationMs: trace.durationMs ?? 0,
       llmCallCount: trace.llmCalls.length,
