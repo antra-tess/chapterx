@@ -270,6 +270,7 @@ export class ContextBuilder {
       messages: participantMessages,
       system_prompt: config.system_prompt,
       context_prefix: config.context_prefix,
+      prefill_user_message: config.prefill_user_message,
       config: this.extractModelConfig(config),
       tools: config.tools_enabled ? undefined : undefined,  // Tools added by Agent Loop
       stop_sequences,

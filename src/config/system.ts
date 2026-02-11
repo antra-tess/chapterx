@@ -244,6 +244,18 @@ export class ConfigSystem {
       }
     }
 
+    // Load prefill user message from file if specified (replaces '[Start]' synthetic user message)
+    let prefillUserMessage = config.prefill_user_message
+    if (config.prefill_user_message_file && !prefillUserMessage) {
+      const prefillPath = resolveBotFilePath(config.prefill_user_message_file)
+      if (existsSync(prefillPath)) {
+        prefillUserMessage = readFileSync(prefillPath, 'utf-8')
+        logger.info({ path: prefillPath, length: prefillUserMessage.length }, 'Loaded prefill user message from file')
+      } else {
+        logger.warn({ path: prefillPath }, 'Prefill user message file not found')
+      }
+    }
+
     return {
       // Identity (required, no defaults)
       name: config.name || '',
@@ -300,6 +312,8 @@ export class ConfigSystem {
       system_prompt_file: config.system_prompt_file,
       context_prefix: contextPrefix,
       context_prefix_file: config.context_prefix_file,
+      prefill_user_message: prefillUserMessage,
+      prefill_user_message_file: config.prefill_user_message_file,
       reply_on_random: config.reply_on_random ?? 500,
       reply_on_name: config.reply_on_name ?? false,
       max_queued_replies: config.max_queued_replies || 1,

@@ -17,6 +17,7 @@ export interface LLMRequest {
   messages: ParticipantMessage[]
   system_prompt?: string
   context_prefix?: string  // Inserted as first cached assistant message (for simulacrum seeding)
+  prefill_user_message?: string  // Custom content for synthetic user message (replaces '[Start]')
   config: ModelConfig
   tools?: ToolDefinition[]
   stop_sequences?: string[]
@@ -199,6 +200,8 @@ export interface BotConfig {
   system_prompt_file?: string  // Path to file containing system prompt (relative to config dir)
   context_prefix?: string      // Prefix content to insert as first assistant message (cached)
   context_prefix_file?: string // Path to file containing context prefix (relative to config dir)
+  prefill_user_message?: string       // Custom content for synthetic user message (replaces '[Start]')
+  prefill_user_message_file?: string  // Path to file containing prefill user message (relative to config dir)
   reply_on_random: number
   reply_on_name: boolean
   max_queued_replies: number

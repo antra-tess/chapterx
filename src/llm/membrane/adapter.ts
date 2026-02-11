@@ -347,6 +347,8 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     cacheTtl: request.config.cache_ttl,
     // Context prefix for simulacrum seeding (injected as first assistant message)
     contextPrefix: request.context_prefix,
+    // Custom prefill user message (replaces '[Start]' synthetic user message)
+    prefillUserMessage: request.prefill_user_message,
   };
 
   // Handle stop sequences
