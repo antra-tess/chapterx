@@ -1103,6 +1103,7 @@ export class DiscordConnector {
         if (i === 0 && replyToMessageId) {
           try {
             options.reply = { messageReference: replyToMessageId }
+            options.allowedMentions = { repliedUser: false }
             const sent = await channel.send({ content: chunk, ...options })
             messageIds.push(sent.id)
           } catch (error: any) {
@@ -1157,6 +1158,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
+          options.allowedMentions = { repliedUser: false }
           const sent = await channel.send(options)
           logger.debug({ channelId, attachmentName: attachment.name, replyTo: replyToMessageId }, 'Sent message with attachment')
           return [sent.id]
@@ -1219,6 +1221,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
+          options.allowedMentions = { repliedUser: false }
           const sent = await channel.send(options)
           logger.debug({ channelId, filename, replyTo: replyToMessageId }, 'Sent image attachment')
           return [sent.id]
@@ -1274,6 +1277,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
+          options.allowedMentions = { repliedUser: false }
           const sent = await channel.send(options)
           logger.debug({ channelId, filename, size: fileBuffer.length, replyTo: replyToMessageId }, 'Sent file attachment')
           return [sent.id]
