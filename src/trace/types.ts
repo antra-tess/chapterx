@@ -380,16 +380,25 @@ export interface TraceIndex {
   /** Human-readable channel name (for display) */
   channelName?: string
   
+  /** Why we activated */
+  activationReason?: string
+
+  /** First ~100 chars of the triggering message */
+  triggerPreview?: string
+
+  /** First ~100 chars of the bot's response */
+  responsePreview?: string
+
   /** Quick stats for filtering */
   success: boolean
   durationMs: number
   llmCallCount: number
   toolExecutionCount: number
   totalTokens: number
-  
+
   /** Discord message IDs included in context (for reverse lookup) */
   contextMessageIds: string[]
-  
+
   /** Discord message IDs we sent (for finding our responses) */
   sentMessageIds: string[]
 }

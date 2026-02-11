@@ -101,6 +101,11 @@ export class TraceWriter {
    * Append trace summary to index for fast lookups
    */
   private appendToIndex(trace: ActivationTrace, filename: string, channelName?: string): void {
+    // Extract previews for quick scanning without loading full trace
+    const firstTrigger = trace.activation?.triggerEvents?.[0]
+    const triggerPreview = firstTrigger?.contentPreview?.slice(0, 100) || undefined
+    const responsePreview = trace.outcome?.responseText?.slice(0, 100) || undefined
+
     const index: TraceIndex & { filename: string } = {
       traceId: trace.traceId,
       timestamp: trace.timestamp,
@@ -108,6 +113,9 @@ export class TraceWriter {
       triggeringMessageId: trace.triggeringMessageId,
       botName: trace.botId,
       channelName,
+      activationReason: trace.activation?.reason,
+      triggerPreview,
+      responsePreview,
       success: trace.outcome?.success ?? false,
       durationMs: trace.durationMs ?? 0,
       llmCallCount: trace.llmCalls.length,
