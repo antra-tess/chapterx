@@ -360,21 +360,25 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
       return
     }
     
-    // GET /api/traces - List recent traces
+    // GET /api/traces - List traces (paginated, newest-first)
     if (path === '/api/traces') {
       const url = new URL(req.url!, `http://localhost:${PORT}`)
-      const limit = parseInt(url.searchParams.get('limit') || '50', 10)
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10), 1), 200)
+      const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10), 0)
       const channel = url.searchParams.get('channel')
       const failed = url.searchParams.get('failed') === 'true'
       const botFilter = url.searchParams.get('bot') || undefined
-      
-      let entries = loadIndex(botFilter).reverse()
+
+      // loadIndex already returns newest-first — no .reverse() needed
+      let entries = loadIndex(botFilter)
       if (channel) entries = entries.filter(e => e.channelId === channel)
       if (failed) entries = entries.filter(e => !e.success)
-      
+
+      const total = entries.length
+
       // Strip large arrays not needed for list view (only used for search)
       // This reduces response size from ~13KB to ~500 bytes per entry
-      const slimEntries = entries.slice(0, limit).map(e => ({
+      const slimEntries = entries.slice(offset, offset + limit).map(e => ({
         traceId: e.traceId,
         timestamp: e.timestamp,
         channelId: e.channelId,
@@ -388,8 +392,8 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
         totalTokens: e.totalTokens,
         // contextMessageIds and sentMessageIds intentionally omitted
       }))
-      
-      sendJson(req, res, slimEntries)
+
+      sendJson(req, res, { traces: slimEntries, total, offset, limit })
       return
     }
     
@@ -973,6 +977,43 @@ const HTML = `<!DOCTYPE html>
       font-size: 0.85rem;
       color: var(--text-muted);
     }
+
+    .pagination {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 16px;
+      padding: 12px 0;
+    }
+
+    .pagination-info {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    .pagination-buttons {
+      display: flex;
+      gap: 8px;
+    }
+
+    .pagination-buttons button {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+
+    .pagination-buttons button:hover:not(:disabled) {
+      border-color: var(--accent);
+    }
+
+    .pagination-buttons button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
     
     .llm-call {
       background: var(--bg);
@@ -1061,6 +1102,7 @@ const HTML = `<!DOCTYPE html>
         <select id="botSelect" onchange="onBotChange()">
           <option value="">All Bots</option>
         </select>
+        <button id="failedToggle" class="filter-btn" onclick="toggleFailed()">Errors Only</button>
       </div>
     </div>
     
@@ -1080,8 +1122,15 @@ const HTML = `<!DOCTYPE html>
       <div id="searchResults"></div>
       
       <div id="recentTraces">
-        <h2 style="font-size: 1rem; margin-bottom: 12px; color: var(--text-muted);">Recent Traces</h2>
+        <h2 style="font-size: 1rem; margin-bottom: 12px; color: var(--text-muted);">Traces</h2>
         <div id="recentList"></div>
+        <div id="pagination" class="pagination" style="display: none;">
+          <span id="paginationInfo" class="pagination-info"></span>
+          <div class="pagination-buttons">
+            <button id="prevPage" onclick="changePage(-1)">Previous</button>
+            <button id="nextPage" onclick="changePage(1)">Next</button>
+          </div>
+        </div>
       </div>
     </div>
     
@@ -1097,6 +1146,10 @@ const HTML = `<!DOCTYPE html>
     let currentTrace = null;
     let authToken = localStorage.getItem('trace_viewer_token') || '';
     let currentBot = '';
+    let currentPage = 0;
+    let pageSize = 50;
+    let totalTraces = 0;
+    let failedOnly = false;
     
     // Check if auth is required
     async function checkAuth() {
@@ -1150,9 +1203,31 @@ const HTML = `<!DOCTYPE html>
     });
     
     async function init() {
+      // Restore state from URL params before loading data
+      const params = new URLSearchParams(window.location.search);
+      const urlBot = params.get('bot');
+      const urlPage = parseInt(params.get('page') || '0', 10);
+      if (urlPage > 0) currentPage = urlPage;
+      if (params.get('failed') === 'true') failedOnly = true;
+
       await loadBots();
-      loadRecentTraces();
-      
+
+      // Restore bot selector from URL after bots are loaded
+      if (urlBot) {
+        const select = document.getElementById('botSelect');
+        if (Array.from(select.options).some(o => o.value === urlBot)) {
+          select.value = urlBot;
+          currentBot = urlBot;
+        }
+      }
+
+      // Restore failed filter toggle
+      if (failedOnly) {
+        document.getElementById('failedToggle').classList.add('active');
+      }
+
+      await loadTraces();
+
       // Check URL for initial trace view or search
       const path = window.location.pathname;
       const traceMatch = path.match(/^\\/trace\\/([a-zA-Z0-9-]+)/);
@@ -1161,14 +1236,13 @@ const HTML = `<!DOCTYPE html>
         loadTrace(traceMatch[1]);
       } else {
         // Check for search query
-        const params = new URLSearchParams(window.location.search);
         const q = params.get('q');
         if (q) {
           document.getElementById('searchInput').value = q;
           search();
         }
       }
-      
+
       // Enter key to search
       document.getElementById('searchInput').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') search();
@@ -1190,7 +1264,35 @@ const HTML = `<!DOCTYPE html>
     
     function onBotChange() {
       currentBot = document.getElementById('botSelect').value;
-      loadRecentTraces();
+      currentPage = 0;
+      syncUrlState();
+      loadTraces();
+    }
+
+    function toggleFailed() {
+      failedOnly = !failedOnly;
+      currentPage = 0;
+      document.getElementById('failedToggle').classList.toggle('active', failedOnly);
+      syncUrlState();
+      loadTraces();
+    }
+
+    function syncUrlState() {
+      const params = new URLSearchParams();
+      if (currentBot) params.set('bot', currentBot);
+      if (currentPage > 0) params.set('page', String(currentPage));
+      if (failedOnly) params.set('failed', 'true');
+      const qs = params.toString();
+      history.replaceState({}, '', qs ? '?' + qs : window.location.pathname);
+    }
+
+    function changePage(delta) {
+      const maxPage = Math.max(0, Math.ceil(totalTraces / pageSize) - 1);
+      const newPage = currentPage + delta;
+      if (newPage < 0 || newPage > maxPage) return;
+      currentPage = newPage;
+      syncUrlState();
+      loadTraces();
     }
     
     function apiFetch(url, options = {}) {
@@ -1203,13 +1305,17 @@ const HTML = `<!DOCTYPE html>
       });
     }
     
-    async function loadRecentTraces() {
-      let url = '/api/traces?limit=10';
+    async function loadTraces() {
+      const offset = currentPage * pageSize;
+      let url = '/api/traces?limit=' + pageSize + '&offset=' + offset;
       if (currentBot) url += '&bot=' + encodeURIComponent(currentBot);
-      
+      if (failedOnly) url += '&failed=true';
+
       const res = await apiFetch(url);
-      const traces = await res.json();
-      
+      const data = await res.json();
+      const traces = data.traces;
+      totalTraces = data.total;
+
       const html = traces.map(t => \`
         <div class="result-card" onclick="loadTrace('\${t.traceId}')">
           <div class="result-header">
@@ -1226,8 +1332,27 @@ const HTML = `<!DOCTYPE html>
           </div>
         </div>
       \`).join('');
-      
+
       document.getElementById('recentList').innerHTML = html || '<div class="empty-state">No traces yet</div>';
+
+      // Update pagination controls
+      const paginationEl = document.getElementById('pagination');
+      if (totalTraces > pageSize) {
+        const start = offset + 1;
+        const end = Math.min(offset + pageSize, totalTraces);
+        const maxPage = Math.ceil(totalTraces / pageSize) - 1;
+        document.getElementById('paginationInfo').textContent = 'Showing ' + start + '–' + end + ' of ' + totalTraces + ' traces';
+        document.getElementById('prevPage').disabled = currentPage <= 0;
+        document.getElementById('nextPage').disabled = currentPage >= maxPage;
+        paginationEl.style.display = 'flex';
+      } else {
+        paginationEl.style.display = totalTraces > 0 ? 'flex' : 'none';
+        if (totalTraces > 0) {
+          document.getElementById('paginationInfo').textContent = totalTraces + ' trace' + (totalTraces !== 1 ? 's' : '');
+          document.getElementById('prevPage').disabled = true;
+          document.getElementById('nextPage').disabled = true;
+        }
+      }
     }
     
     async function search() {
@@ -1291,9 +1416,13 @@ const HTML = `<!DOCTYPE html>
     function showSearch() {
       document.getElementById('searchView').style.display = 'block';
       document.getElementById('traceView').classList.remove('active');
-      
-      // Update URL back to root
-      history.pushState({}, '', '/');
+
+      // Update URL back to list view, preserving filter state
+      const params = new URLSearchParams();
+      if (currentBot) params.set('bot', currentBot);
+      if (currentPage > 0) params.set('page', String(currentPage));
+      const qs = params.toString();
+      history.pushState({}, '', qs ? '/?' + qs : '/');
     }
     
     function showTrace() {
