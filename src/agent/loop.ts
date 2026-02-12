@@ -10,7 +10,7 @@ import { DiscordConnector } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { ToolSystem } from '../tools/system.js'
-import { Event, BotConfig, DiscordMessage, ToolCall, ToolResult } from '../types.js'
+import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { sleep } from '../utils/retry.js'
 import { 
@@ -1610,14 +1610,14 @@ export class AgentLoop {
       const imageBlocks = completion.content.filter((c: any) => c.type === 'image')
       if (imageBlocks.length > 0) {
         logger.info({ imageCount: imageBlocks.length }, 'Completion contains generated images')
-        
+
         // Send each image as a Discord attachment
         const imageSentIds: string[] = []
         for (const imageBlock of imageBlocks) {
           try {
             const imageData = imageBlock.source?.data
             const mediaType = imageBlock.source?.media_type || 'image/png'
-            
+
             if (imageData) {
               const msgIds = await this.connector.sendImageAttachment(
                 channelId,
@@ -1633,30 +1633,37 @@ export class AgentLoop {
             logger.error({ err }, 'Failed to send generated image to Discord')
           }
         }
-        
+
+        // Combine text message IDs (already sent by inline execution) with image IDs
+        const allMessageIds = [...(inlineSentMessageIds ?? []), ...imageSentIds]
+        const responseText = completion.content
+          .filter((c: any) => c.type === 'text')
+          .map((c: any) => c.text)
+          .join('\n')
+
         // Record activation if enabled
         if (activation) {
           this.activationStore.addCompletion(
             activation.id,
-            '[Generated image]',
-            imageSentIds,
+            responseText || '[Generated image]',
+            allMessageIds,
             [],
             []
           )
           await this.activationStore.completeActivation(activation.id)
         }
-        
+
         // Update state and trace for image response
         if (contextResult.cacheMarker) {
           this.stateManager.updateCacheMarker(this.botId, channelId, contextResult.cacheMarker)
         }
-        
+
         trace?.recordOutcome({
           success: true,
-          responseText: '[Generated image]',
-          responseLength: 0,
-          sentMessageIds: imageSentIds,
-          messagesSent: imageSentIds.length,
+          responseText: responseText || '[Generated image]',
+          responseLength: responseText.length,
+          sentMessageIds: allMessageIds,
+          messagesSent: allMessageIds.length,
           maxToolDepth: 1,
           hitMaxToolDepth: false,
           stateUpdates: {
@@ -1666,7 +1673,7 @@ export class AgentLoop {
             newMessageCount: 1,
           }
         })
-        
+
         return  // Done - image response handled
       }
 
@@ -2491,6 +2498,10 @@ export class AgentLoop {
     // Track MCP tool result images for injection into continuation requests
     // These accumulate across tool iterations so the model can see all images
     let pendingToolImages: Array<{ toolName: string; images: Array<{ data: string; mimeType: string }> }> = []
+
+    // Track generated image blocks from LLM completions (e.g., Gemini image generation)
+    // These are non-text content blocks that need to be preserved through finalization
+    const generatedImageBlocks: ContentBlock[] = []
     
     // Check if thinking was actually prefilled (not in continuation mode)
     const thinkingWasPrefilled = this.wasThinkingPrefilled(llmRequest, config)
@@ -2592,8 +2603,15 @@ export class AgentLoop {
         .filter((c: any) => c.type === 'text')
         .map((c: any) => c.text)
         .join('')
-      
+
       accumulatedOutput += newText
+
+      // Capture generated image blocks (from image generation models like Gemini)
+      for (const block of completion.content) {
+        if (block.type === 'image') {
+          generatedImageBlocks.push(block)
+        }
+      }
       
       // If we stopped on </function_calls>, append it back (stop sequence consumes the matched text)
       if (completion.stopReason === 'stop_sequence' && 
@@ -2630,6 +2648,7 @@ export class AgentLoop {
             llmRequest,
             discordMessages,
             stopReason: completion.stopReason,
+            generatedImageBlocks,
           })
         }
         // Inside function_calls - the stop sequence was in a parameter, continue
@@ -2664,6 +2683,7 @@ export class AgentLoop {
           llmRequest,
           discordMessages,
           stopReason: completion.stopReason,
+          generatedImageBlocks,
         })
       }
       
@@ -2704,6 +2724,7 @@ export class AgentLoop {
             llmRequest,
             discordMessages,
             stopReason: 'hallucination',
+            generatedImageBlocks: [],  // Discard images too on hallucination
           })
         }
         // Apply truncation to segments if needed
@@ -2894,6 +2915,7 @@ export class AgentLoop {
       llmRequest,
       discordMessages,
       suffix: '[Max tool depth reached]',
+      generatedImageBlocks,
     })
   }
   
@@ -2917,6 +2939,7 @@ export class AgentLoop {
     discordMessages?: DiscordMessage[];
     suffix?: string;  // e.g., '[Max tool depth reached]'
     stopReason?: string;
+    generatedImageBlocks?: ContentBlock[];  // Image blocks from image generation models
   }): Promise<{
     completion: any;
     toolCallIds: string[];
@@ -2931,7 +2954,7 @@ export class AgentLoop {
       pendingToolPersistence, allToolCallIds, allPreambleMessageIds, 
       allSentMessageIds, messageContexts, lastContextEndPos,
       channelId, triggeringMessageId, config, llmRequest, discordMessages,
-      suffix, stopReason
+      suffix, stopReason, generatedImageBlocks
     } = params
     
     // 1. Get remaining output (after what was already sent)
@@ -3060,9 +3083,15 @@ export class AgentLoop {
     }
     this.ttsStreamContext = undefined
 
+    // Build content blocks: text + any generated images from image generation models
+    const contentBlocks: ContentBlock[] = [{ type: 'text', text: displayText + suffixText }]
+    if (generatedImageBlocks && generatedImageBlocks.length > 0) {
+      contentBlocks.push(...generatedImageBlocks)
+    }
+
     return {
       completion: {
-        content: [{ type: 'text', text: displayText + suffixText }],
+        content: contentBlocks,
         stopReason: (stopReason || 'end_turn') as any,
         usage: { inputTokens: 0, outputTokens: 0 },
         model: '',
