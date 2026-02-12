@@ -1681,6 +1681,7 @@ export class ContextBuilder {
       prompt_caching: config.prompt_caching,
       cache_ttl: config.cache_ttl,
       participant_stop_sequences: config.participant_stop_sequences,
+      generate_images: config.generate_images,
     }
   }
 }

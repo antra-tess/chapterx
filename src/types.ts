@@ -137,6 +137,7 @@ export interface ModelConfig {
   prompt_caching?: boolean  // If true (default), apply cache_control markers for Anthropic prompt caching
   cache_ttl?: '5m' | '1h'  // Anthropic cache TTL - '5m' (default) or '1h' (extended)
   participant_stop_sequences?: boolean  // If true, membrane generates stop sequences from participant names (default: false)
+  generate_images?: boolean  // If true, set responseModalities for image generation (overrides auto-detect from model name)
 }
 
 /**
@@ -172,7 +173,8 @@ export interface BotConfig {
   max_images: number  // Max images to include (applies to ephemeral window, or prefix if cache_images is true)
   max_ephemeral_images?: number  // Max images in rolling window after cache marker (default: max_images)
   cache_images?: boolean  // If true, include images in cached prefix (requires deterministic handling). Default: false (images only in rolling window)
-  
+  generate_images?: boolean  // If true, set responseModalities for image generation models (overrides auto-detect from model name)
+
   // Text attachment config
   include_text_attachments: boolean
   max_text_attachment_kb: number  // Max size per text attachment in KB

@@ -356,6 +356,16 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     normalizedRequest.stopSequences = request.stop_sequences;
   }
 
+  // Handle explicit image generation config override
+  // Flows through providerParams → extra → Gemini generationConfig
+  if (request.config.generate_images !== undefined) {
+    normalizedRequest.providerParams = {
+      generationConfig: {
+        responseModalities: request.config.generate_images ? ['TEXT', 'IMAGE'] : ['TEXT'],
+      },
+    };
+  }
+
   return normalizedRequest;
 }
 
