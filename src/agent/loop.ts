@@ -2315,11 +2315,15 @@ export class AgentLoop {
         await this.toolSystem.persistToolUse(this.botId, channelId, call, result)
       }
 
-      // Extract final text from completion
+      // Extract final text and image blocks from completion
       const completionText = (result?.content || [])
         .filter((c: any) => c.type === 'text')
         .map((c: any) => c.text)
         .join('')
+
+      // Capture generated image blocks (from image generation models like Gemini)
+      const generatedImageBlocks: ContentBlock[] = (result?.content || [])
+        .filter((c: any) => c.type === 'image')
 
       // Strip thinking blocks and tool XML
       const { stripped, content: thinkingContent } = this.stripThinkingBlocks(
@@ -2394,9 +2398,15 @@ export class AgentLoop {
       }
       this.ttsStreamContext = undefined
 
+      // Build content blocks: text + any generated images from image generation models
+      const nativeContentBlocks: ContentBlock[] = [{ type: 'text', text: displayText }]
+      if (generatedImageBlocks.length > 0) {
+        nativeContentBlocks.push(...generatedImageBlocks)
+      }
+
       return {
         completion: {
-          content: [{ type: 'text', text: displayText }],
+          content: nativeContentBlocks,
           stopReason: (result?.stopReason || 'end_turn') as any,
           usage: result?.usage || { inputTokens: 0, outputTokens: 0 },
           model: result?.model || '',
