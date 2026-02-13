@@ -17,7 +17,7 @@ import {
   type NormalizedResponse,
 } from './adapter.js';
 import { getFormatterForModel } from './factory.js';
-import { NativeFormatter, AnthropicXmlFormatter } from '@animalabs/membrane';
+import { NativeFormatter, AnthropicXmlFormatter, CompletionsFormatter } from '@animalabs/membrane';
 
 // ============================================================================
 // Membrane Interface (local definition until package is installed)
@@ -77,7 +77,9 @@ export class MembraneProvider {
         ? new NativeFormatter()
         : formatterType === 'anthropic-xml'
           ? new AnthropicXmlFormatter()
-          : undefined;
+          : formatterType === 'completions'
+            ? new CompletionsFormatter()
+            : undefined;
 
       if (formatter) {
         logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter override for model');
@@ -196,7 +198,9 @@ export class MembraneProvider {
         ? new NativeFormatter()
         : formatterType === 'anthropic-xml'
           ? new AnthropicXmlFormatter()
-          : undefined;
+          : formatterType === 'completions'
+            ? new CompletionsFormatter()
+            : undefined;
 
       if (formatterType) {
         logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter override for model');
@@ -526,6 +530,6 @@ export interface StreamOptions {
    * Use 'native' to disable prefill mode (required for claude-opus-4-* models).
    * Use 'anthropic-xml' for prefill mode with XML tools.
    */
-  formatterOverride?: 'native' | 'anthropic-xml';
+  formatterOverride?: 'native' | 'anthropic-xml' | 'completions';
 }
 
