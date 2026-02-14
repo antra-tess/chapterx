@@ -285,6 +285,7 @@ export class ConfigSystem {
       include_images: config.include_images ?? true,
       max_images: config.max_images || 5,
       generate_images: config.generate_images,
+      provider_params: config.provider_params,
 
       // Text attachment config
       include_text_attachments: config.include_text_attachments ?? true,

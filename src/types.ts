@@ -138,6 +138,7 @@ export interface ModelConfig {
   cache_ttl?: '5m' | '1h'  // Anthropic cache TTL - '5m' (default) or '1h' (extended)
   participant_stop_sequences?: boolean  // If true, membrane generates stop sequences from participant names (default: false)
   generate_images?: boolean  // If true, set responseModalities for image generation (overrides auto-detect from model name)
+  provider_params?: Record<string, unknown>  // Arbitrary params passed through to the LLM provider (e.g., reasoning config)
 }
 
 /**
@@ -222,6 +223,10 @@ export interface BotConfig {
   // When true, auto-generates stop sequences from participant names to prevent
   // the model from "speaking as" other users. Default: false (allows frags/quotes)
   participant_stop_sequences?: boolean
+
+  // Provider-specific params (passed through to LLM provider as-is)
+  // e.g., { reasoning: { effort: "none" } } for OpenRouter/grok
+  provider_params?: Record<string, unknown>
 
   // TTS relay integration
   // Connects to a WebSocket relay server to stream visible text chunks

@@ -356,10 +356,16 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     normalizedRequest.stopSequences = request.stop_sequences;
   }
 
+  // Pass through provider-specific params (e.g., reasoning config for OpenRouter)
+  if (request.config.provider_params) {
+    normalizedRequest.providerParams = { ...request.config.provider_params };
+  }
+
   // Handle explicit image generation config override
   // Flows through providerParams → extra → Gemini generationConfig
   if (request.config.generate_images !== undefined) {
     normalizedRequest.providerParams = {
+      ...normalizedRequest.providerParams,
       generationConfig: {
         responseModalities: request.config.generate_images ? ['TEXT', 'IMAGE'] : ['TEXT'],
       },
