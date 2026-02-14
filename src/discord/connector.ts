@@ -27,6 +27,17 @@ export interface ConnectorOptions {
 
 const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
 
+/** Extract a Unix timestamp (ms) from a Discord snowflake ID */
+function snowflakeToTimestamp(id: string): number {
+  const DISCORD_EPOCH = 1420070400000
+  return Number(BigInt(id) >> 22n) + DISCORD_EPOCH
+}
+
+interface FetchHistoryState {
+  originChannelId: string | null
+  didClear: boolean
+}
+
 export interface FetchContextParams {
   channelId: string
   depth: number  // Max messages
@@ -304,9 +315,8 @@ export class DiscordConnector {
         throw new DiscordError(`Channel ${channelId} not found or not text-based`)
       }
 
-      // Reset history trackers for this fetch
-      this.lastHistoryOriginChannelId = null
-      this.lastHistoryDidClear = false
+      // Per-call history state (replaces old instance variables to avoid cross-channel leaks)
+      const historyState: FetchHistoryState = { originChannelId: null, didClear: false }
 
       // Use recursive fetch with automatic .history processing
       // Note: Don't pass firstMessageId to recursive call - each .history has its own boundaries
@@ -326,7 +336,8 @@ export class DiscordConnector {
         undefined,  // Let .history commands define their own boundaries
         depth,
         authorized_roles,
-        ignoreHistory
+        ignoreHistory,
+        historyState
       )
       endProfile('messagesFetch')
       
@@ -337,7 +348,7 @@ export class DiscordConnector {
       let threadParentChannel: TextChannel | undefined = undefined
       let threadStartMessageId: string | undefined = undefined
       
-      if (channel.isThread() && this.lastHistoryDidClear) {
+      if (channel.isThread() && historyState.didClear) {
         logger.debug('Skipping parent context fetch - .history cleared context')
       } else if (channel.isThread()) {
         startProfile('threadParentFetch')
@@ -361,7 +372,8 @@ export class DiscordConnector {
             undefined,
             Math.max(0, depth - messages.length),  // Remaining message budget
             authorized_roles,
-            ignoreHistory
+            ignoreHistory,
+            historyState
           )
           
           logger.debug({
@@ -395,63 +407,85 @@ export class DiscordConnector {
       // This ensures cache stability - we fetch back far enough to include the cached portion
       // If firstMessageId is specified, ensure it's included by extending fetch if needed
       // NEVER trim data - cache stability should only ADD data, not remove it
-      if (firstMessageId && !this.lastHistoryDidClear) {
+      let activeFirstMessageId = firstMessageId  // Mutable — may be cleared by temporal check
+      if (activeFirstMessageId && !historyState.didClear) {
         logger.debug({
           currentMessageCount: messages.length,
-          lookingFor: firstMessageId
+          lookingFor: activeFirstMessageId
         }, 'Checking if cache marker is in fetch window')
 
-        let firstIndex = messages.findIndex(m => m.id === firstMessageId)
-        
+        let firstIndex = messages.findIndex(m => m.id === activeFirstMessageId)
+
         // If not found, extend fetch backwards until we find it (or hit limit)
         const oldestMessage = messages[0]
+
+        // Temporal sanity check: if the anchor is much older than the natural
+        // fetch window, don't extend — it's from a different conversation era
+        // and would create a feedback loop with hard-limit truncation.
         if (firstIndex < 0 && oldestMessage) {
+          const anchorTs = snowflakeToTimestamp(activeFirstMessageId)
+          const oldestTs = snowflakeToTimestamp(oldestMessage.id)
+          const gapMs = oldestTs - anchorTs
+          const MAX_ANCHOR_GAP_MS = 24 * 60 * 60 * 1000  // 24 hours
+
+          if (gapMs > MAX_ANCHOR_GAP_MS) {
+            logger.warn({
+              firstMessageId: activeFirstMessageId,
+              oldestNaturalId: oldestMessage.id,
+              gapHours: Math.round(gapMs / (60 * 60 * 1000)),
+            }, 'Cache anchor too old relative to natural window — skipping extension to prevent feedback loop')
+            // Don't extend. loop.ts will detect cacheIdx === -1 and reset the anchor.
+            activeFirstMessageId = undefined
+          }
+        }
+
+        if (firstIndex < 0 && oldestMessage && activeFirstMessageId) {
           const maxExtend = 500  // Maximum additional messages to fetch for cache stability
           let extended = 0
           let currentBefore = oldestMessage.id  // Oldest message in current window
-          
+
           // Determine which channel to extend from:
           // - For threads: if oldest message is from parent channel (ID < thread start), extend from parent
           // - Otherwise: extend from the original channel
           const isOldestFromParent = threadStartMessageId && oldestMessage.id < threadStartMessageId
           const extensionChannel = (isOldestFromParent && threadParentChannel) ? threadParentChannel : channel
-          
-          logger.debug({ 
-            currentBefore, 
+
+          logger.debug({
+            currentBefore,
             maxExtend,
-            firstMessageId,
+            firstMessageId: activeFirstMessageId,
             isThread: channel.isThread(),
             isOldestFromParent,
             extensionChannelId: extensionChannel.id
           }, 'Cache marker not in window, extending fetch backwards')
-          
+
           while (extended < maxExtend) {
             const batch = await this.cachedFetchMessages(extensionChannel, { limit: 100, before: currentBefore })
             if (batch.size === 0) break
-            
+
             const batchMessages = Array.from(batch.values()).sort((a, b) => a.id.localeCompare(b.id))
             messages = [...batchMessages, ...messages]
             extended += batchMessages.length
-            
+
             // Check if we found the cache marker
-            firstIndex = messages.findIndex(m => m.id === firstMessageId)
+            firstIndex = messages.findIndex(m => m.id === activeFirstMessageId)
             if (firstIndex >= 0) {
-              logger.debug({ 
-                extended, 
+              logger.debug({
+                extended,
                 firstIndex,
-                totalMessages: messages.length 
+                totalMessages: messages.length
               }, 'Found cache marker after extending fetch')
               break
             }
-            
+
             const oldestBatch = batchMessages[0]
             if (!oldestBatch) break
             currentBefore = oldestBatch.id
           }
-          
+
           if (firstIndex < 0) {
-            logger.warn({ 
-              firstMessageId, 
+            logger.warn({
+              firstMessageId: activeFirstMessageId,
               extended,
               totalMessages: messages.length,
               oldestId: messages[0]?.id,
@@ -459,19 +493,19 @@ export class DiscordConnector {
             }, 'Cache marker not found even after extending fetch - may have been deleted')
           }
         }
-        
+
         // Note: We intentionally do NOT trim to cache marker
         // Cache stability should only add data, never remove it
         if (firstIndex >= 0) {
-          logger.debug({ 
+          logger.debug({
             cacheMarkerIndex: firstIndex,
             totalMessages: messages.length,
-            firstMessageId
+            firstMessageId: activeFirstMessageId
           }, 'Cache marker found in fetch window (no trimming)')
         }
-      } else if (firstMessageId && this.lastHistoryDidClear) {
+      } else if (activeFirstMessageId && historyState.didClear) {
         logger.debug({
-          firstMessageId,
+          firstMessageId: activeFirstMessageId,
           messageCount: messages.length
         }, 'Skipping cache stability extension - .history clear truncated context')
       }
@@ -553,10 +587,10 @@ export class DiscordConnector {
         const thread = channel as any
         inheritanceInfo.parentChannelId = thread.parentId
       }
-      if (this.lastHistoryOriginChannelId) {
-        inheritanceInfo.historyOriginChannelId = this.lastHistoryOriginChannelId
+      if (historyState.originChannelId) {
+        inheritanceInfo.historyOriginChannelId = historyState.originChannelId
       }
-      if (this.lastHistoryDidClear) {
+      if (historyState.didClear) {
         inheritanceInfo.historyDidClear = true
       }
 
@@ -616,15 +650,9 @@ export class DiscordConnector {
   }
 
   /**
-   * Track history origin during recursive fetch (reset per fetchContext call)
+   * Per-call state for .history tracking, passed through the fetchContext → fetchMessagesRecursive chain.
+   * Avoids shared instance state that leaks across concurrent activations for different channels.
    */
-  private lastHistoryOriginChannelId: string | null = null
-  
-  /**
-   * Track whether .history cleared context (reset per fetchContext call)
-   * When true, parent channel context should not be fetched for threads
-   */
-  private lastHistoryDidClear: boolean = false
 
   /**
    * Recursively fetch messages with .history support
@@ -636,7 +664,8 @@ export class DiscordConnector {
     stopAtId: string | undefined,
     maxMessages: number,
     authorizedRoles?: string[],
-    ignoreHistory?: boolean
+    ignoreHistory?: boolean,
+    historyState?: FetchHistoryState
   ): Promise<Message[]> {
     const results: Message[] = []
     let currentBefore = startFromId
@@ -768,7 +797,7 @@ export class DiscordConnector {
                 batchResultsCount: batchResults.length,
                 hadPendingNewerMessages: !!(this as any)[pendingKey],
               }, 'Empty .history command - discarding older, collecting newer')
-              this.lastHistoryDidClear = true  // Signal to skip parent fetch for threads
+              if (historyState) historyState.didClear = true  // Signal to skip parent fetch for threads
 
               // If we previously processed a .history range in this batch, the historical
               // messages it fetched are now in `results`. Since this .history clear is
@@ -798,8 +827,8 @@ export class DiscordConnector {
 
                 // Track that we jumped from this channel via .history
                 // This is used for plugin state inheritance
-                this.lastHistoryOriginChannelId = channel.id
-                this.lastHistoryDidClear = true  // Prevent cache stability from extending past range boundary
+                if (historyState) historyState.originChannelId = channel.id
+                if (historyState) historyState.didClear = true  // Prevent cache stability from extending past range boundary
 
                 logger.debug({
                   historyTarget: historyRange.last,
@@ -817,7 +846,8 @@ export class DiscordConnector {
                   histFirstId,     // Start point (stop when reached, or undefined)
                   maxMessages - results.length - batchResults.length,  // Account for current batch
                   authorizedRoles,
-                  ignoreHistory    // Pass through (though this path only runs when ignoreHistory is false)
+                  ignoreHistory,   // Pass through (though this path only runs when ignoreHistory is false)
+                  historyState     // Pass through for cross-recursion state tracking
                 )
 
                 logger.debug({ 
