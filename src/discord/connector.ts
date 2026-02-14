@@ -3,7 +3,7 @@
  * Handles all Discord API interactions
  */
 
-import { Attachment, Client, GatewayIntentBits, Message, PermissionFlagsBits, OAuth2Scopes, TextChannel } from 'discord.js'
+import { Attachment, Client, Collection, GatewayIntentBits, Message, PermissionFlagsBits, OAuth2Scopes, TextChannel } from 'discord.js'
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -261,7 +261,7 @@ export class DiscordConnector {
       if (!channel || !channel.isTextBased()) {
         return []
       }
-      const pinnedMessages = await channel.messages.fetchPinned(false)
+      const pinnedMessages = await this.fetchPinnedWithTimeout(channel, 10000)
       const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
       const configs = this.extractConfigs(sortedPinned)
 
@@ -492,7 +492,7 @@ export class DiscordConnector {
         logger.debug({ pinnedCount: pinnedConfigs.length }, 'Using pre-fetched pinned configs')
       } else {
       // Fetch pinned messages for config (cache: false to always get fresh data)
-      const pinnedMessages = await channel.messages.fetchPinned(false)
+      const pinnedMessages = await this.fetchPinnedWithTimeout(channel, 10000)
       // Sort by ID (oldest first) so newer pins override older ones in merge
       const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
       logger.debug({ pinnedCount: pinnedMessages.size, pinnedIds: sortedPinned.map(m => m.id) }, 'Fetched pinned messages (sorted oldest-first)')
@@ -2087,6 +2087,25 @@ export class DiscordConnector {
       mentions: Array.from(msg.mentions.users.keys()),
       referencedMessage: msg.reference?.messageId,
     }
+  }
+
+  /**
+   * Fetch pinned messages with a timeout to prevent hanging the event loop.
+   * fetchPinned() can hang indefinitely in some conditions, which blocks
+   * the entire event processing loop. Returns empty collection on timeout
+   * to gracefully degrade (no channel config overrides, but bot still works).
+   */
+  private async fetchPinnedWithTimeout(channel: TextChannel, timeoutMs: number = 10000): Promise<Collection<string, Message>> {
+    const fetchPromise = channel.messages.fetchPinned(false)
+
+    const timeoutPromise = new Promise<Collection<string, Message>>((resolve) => {
+      setTimeout(() => {
+        logger.warn({ channelId: channel.id, timeoutMs }, 'fetchPinned timed out — returning empty (no channel config overrides)')
+        resolve(new Collection<string, Message>())
+      }, timeoutMs)
+    })
+
+    return Promise.race([fetchPromise, timeoutPromise])
   }
 
   private extractConfigs(messages: Message[]): string[] {
