@@ -291,6 +291,9 @@ export class ConfigSystem {
       include_text_attachments: config.include_text_attachments ?? true,
       max_text_attachment_kb: config.max_text_attachment_kb || 100,  // 100KB default
 
+      // Reply tag config
+      include_reply_tags: config.include_reply_tags ?? true,
+
       // Tool config
       tools_enabled: config.tools_enabled ?? true,
       tool_output_visible: config.tool_output_visible ?? false,

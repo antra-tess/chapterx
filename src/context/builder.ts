@@ -962,7 +962,16 @@ export class ContextBuilder {
           }
         }
       }
-      
+
+      // Strip reply tags from context if configured
+      if (!config.include_reply_tags) {
+        for (const block of content) {
+          if (block.type === 'text') {
+            block.text = block.text.replace(/^<reply:@[^>]+>\s*/, '')
+          }
+        }
+      }
+
       participantMessages.push({
         participant,
         content,
