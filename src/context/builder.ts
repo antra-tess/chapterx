@@ -539,11 +539,19 @@ export class ContextBuilder {
   }
 
   private filterDotMessages(messages: DiscordMessage[]): DiscordMessage[] {
-    return messages.filter((msg) => {
-      // Filter messages starting with period (after stripping reply prefix)
+    const lastIndex = messages.length - 1
+    return messages.filter((msg, index) => {
+      // Never filter the last message — it's the trigger that activated the bot.
+      // Dropping it causes the conversation to end with an assistant message,
+      // which models that don't support prefill will reject.
+      if (index === lastIndex) return true
+
+      // Filter dot commands (after stripping reply prefix)
+      // Dot commands are a period followed by a letter: .config, .history, .m, etc.
+      // Must NOT match ellipsis (... or ..) which users type as normal conversation
       // Replies look like "<reply:@username> .test" so we need to strip the prefix
       const contentWithoutReply = msg.content.trim().replace(/^<reply:@[^>]+>\s*/, '')
-      if (contentWithoutReply.startsWith('.')) {
+      if (/^\.[a-zA-Z]/.test(contentWithoutReply)) {
         return false
       }
       // Filter messages with dotted_line_face reaction (🫥)
