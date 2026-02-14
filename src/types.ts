@@ -181,7 +181,7 @@ export interface BotConfig {
   max_text_attachment_kb: number  // Max size per text attachment in KB
 
   // Reply tag config
-  include_reply_tags?: boolean  // If false, strip <reply:@username> from context (default: true)
+  include_reply_tags?: boolean  // If true, keep <reply:@username> in context (default: false, matching Chapter2)
 
   // Tool config
   tools_enabled: boolean
