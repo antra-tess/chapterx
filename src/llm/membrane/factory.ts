@@ -107,6 +107,8 @@ export interface OpenAIResponsesConfig {
   baseUrl?: string;
   /** Model patterns this provider serves (e.g., ["gpt-image-*"]) */
   provides?: string[];
+  /** Allow image editing via /v1/images/edits when images in context (default: true) */
+  allowImageEditing?: boolean;
 }
 
 export type FormatterType = 'anthropic-xml' | 'native' | 'completions';
@@ -701,6 +703,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
         const responsesAdapter = new OpenAIResponsesAdapter({
           apiKey: providerConfig.apiKey,
           baseURL: providerConfig.baseUrl,
+          allowImageEditing: providerConfig.allowImageEditing,
         });
         adapters.set(adapterKey, responsesAdapter);
 
@@ -1036,23 +1039,26 @@ export function createMembraneFromVendorConfigs(
       logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenRouter vendor (uses native API)');
 
     } else if (vendorName.startsWith('openairesponses')) {
-      // OpenAI Responses adapter (for gpt-image-1 and similar /v1/responses models)
+      // OpenAI Images adapter (for gpt-image-1 and similar image generation models)
       const openaiKey = config?.openai_api_key ?? config?.api_key;
       if (openaiKey) {
+        // allow_image_editing defaults to true — set to "false" in vendor config to disable
+        const allowEditing = config?.allow_image_editing !== 'false';
         openaiResponsesProviders.push({
           apiKey: openaiKey,
           name: vendorName,
           baseUrl: baseUrl,
           provides: vendorConfig.provides,
+          allowImageEditing: allowEditing,
         });
       }
 
-      // Auto-detect native formatter for Responses vendors
+      // Auto-detect native formatter for image vendors
       if (!detectedFormatter) {
         detectedFormatter = 'native';
       }
 
-      logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenAI Responses vendor (/v1/responses API)');
+      logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenAI Images vendor (/v1/images API)');
 
     } else if (vendorName.startsWith('openaicompletion')) {
       // OpenAI Completions adapter (base models using /v1/completions)
