@@ -994,13 +994,13 @@ export class AgentLoop {
         // Check bot reply chain depth to prevent bot loops
         const chainDepth = await this.connector.getBotReplyChainDepth(channelId, message)
         
-        // Load config if not already loaded
+        // Load config if not already loaded (lightweight — pinned configs only, no message fetch)
         if (!config) {
           try {
-            const configFetch = await this.connector.fetchContext({ channelId, depth: 10, maxImages: 0 })
+            const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
             const inheritedPinnedConfigs = await this.collectPinnedConfigsWithInheritance(
               channelId,
-              configFetch.pinnedConfigs
+              pinnedConfigs
             )
             config = this.configSystem.loadConfig({
               botName: this.botId,
@@ -1042,12 +1042,12 @@ export class AgentLoop {
 
       // 4. Random chance activation
       if (!config) {
-        // Load config once for this batch
+        // Load config once for this batch (lightweight — pinned configs only, no message fetch)
         try {
-          const configFetch = await this.connector.fetchContext({ channelId, depth: 10, maxImages: 0 })
+          const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
           const inheritedPinnedConfigs = await this.collectPinnedConfigsWithInheritance(
             channelId,
-            configFetch.pinnedConfigs
+            pinnedConfigs
           )
           config = this.configSystem.loadConfig({
             botName: this.botId,
