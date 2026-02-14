@@ -143,8 +143,8 @@ export function toMembraneContentBlock(block: ContentBlock): MembraneContentBloc
         text: block.text,
       };
       
-    case 'image':
-      return {
+    case 'image': {
+      const imgResult: MembraneContentBlock = {
         type: 'image',
         source: block.source.type === 'base64'
           ? {
@@ -158,6 +158,12 @@ export function toMembraneContentBlock(block: ContentBlock): MembraneContentBloc
             },
         tokenEstimate: (block as any).tokenEstimate,
       };
+      // Preserve sourceUrl for providers that need URL-as-text fallback (Gemini 3.x)
+      if ((block as any).sourceUrl) {
+        (imgResult as any).sourceUrl = (block as any).sourceUrl;
+      }
+      return imgResult;
+    }
       
     case 'tool_use':
       return {
