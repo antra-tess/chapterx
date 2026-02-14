@@ -934,23 +934,23 @@ export class AgentLoop {
       }
     }
 
-    // Load config early for API-only mode check
-    let config: any = null
+    // Check API-only mode early (doesn't need channel configs)
     try {
-      config = this.configSystem.loadConfig({
+      const baseConfig = this.configSystem.loadConfig({
         botName: this.botId,
         guildId,
-        channelConfigs: [],  // No channel configs needed for this check
+        channelConfigs: [],
       })
+      if (baseConfig?.api_only) {
+        logger.debug('API-only mode enabled - skipping activation')
+        return false
+      }
     } catch {
-      // Config will be loaded again below if needed
+      // Config will be loaded properly below with channel configs
     }
 
-    // Check if API-only mode is enabled
-    if (config?.api_only) {
-      logger.debug('API-only mode enabled - skipping activation')
-      return false
-    }
+    // Full config (with channel overrides) loaded lazily below
+    let config: any = null
 
     // Check each message event for activation triggers
     for (const event of events) {
