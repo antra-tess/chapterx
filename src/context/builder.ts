@@ -898,6 +898,7 @@ export class ContextBuilder {
                   media_type: mediaType,  // Anthropic API uses snake_case
                 },
                 tokenEstimate,  // For accurate context size calculation
+                sourceUrl: attachment.url,  // Preserved for providers that use URL-as-text (Gemini 3.x)
               } as any)
               
               logger.debug({ 
