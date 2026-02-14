@@ -17,6 +17,7 @@ import {
   OpenAICompletionsAdapter,
   BedrockAdapter,
   GeminiAdapter,
+  OpenAIResponsesAdapter,
   AnthropicXmlFormatter,
   NativeFormatter,
   CompletionsFormatter,
@@ -97,6 +98,17 @@ export interface GeminiConfig {
   provides?: string[];
 }
 
+export interface OpenAIResponsesConfig {
+  /** OpenAI API key */
+  apiKey: string;
+  /** Vendor/provider name (e.g., "openai-responses-gpt-image") */
+  name: string;
+  /** Base URL (optional, defaults to api.openai.com) */
+  baseUrl?: string;
+  /** Model patterns this provider serves (e.g., ["gpt-image-*"]) */
+  provides?: string[];
+}
+
 export type FormatterType = 'anthropic-xml' | 'native' | 'completions';
 
 export interface MembraneFactoryConfig {
@@ -169,6 +181,12 @@ export interface MembraneFactoryConfig {
    * Uses Google AI API key for authentication
    */
   gemini?: GeminiConfig;
+
+  /**
+   * Multiple OpenAI Responses API providers (for gpt-image-1 and similar models)
+   * Uses /v1/responses endpoint instead of /v1/chat/completions
+   */
+  openaiResponsesProviders?: OpenAIResponsesConfig[];
 
   /**
    * Bot/assistant name for prefill mode
@@ -674,6 +692,37 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
     logger.debug('Membrane: No Google API key provided, Gemini adapter not created');
   }
 
+  // Create OpenAI Responses adapters (for gpt-image-1 and similar)
+  if (config.openaiResponsesProviders && config.openaiResponsesProviders.length > 0) {
+    for (const providerConfig of config.openaiResponsesProviders) {
+      const adapterKey = `openai-responses-${providerConfig.name}`;
+
+      try {
+        const responsesAdapter = new OpenAIResponsesAdapter({
+          apiKey: providerConfig.apiKey,
+          baseURL: providerConfig.baseUrl,
+        });
+        adapters.set(adapterKey, responsesAdapter);
+
+        // Register pattern routes
+        if (providerConfig.provides && providerConfig.provides.length > 0) {
+          patternRoutes.push({
+            adapterKey,
+            patterns: providerConfig.provides,
+          });
+        }
+
+        logger.info({
+          name: providerConfig.name,
+          adapterKey,
+          patterns: providerConfig.provides ?? [],
+        }, 'Membrane: OpenAI Responses adapter initialized');
+      } catch (error) {
+        logger.error({ error, name: providerConfig.name }, 'Failed to create OpenAI Responses adapter');
+      }
+    }
+  }
+
   // Create OpenAI-compatible adapters
   // Support both legacy single config and new multiple configs
   const compatibleConfigs: OpenAICompatibleConfig[] = [];
@@ -768,7 +817,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
   if (adapters.size === 0) {
     throw new Error(
       'Membrane: No provider adapters could be created. ' +
-      'Please provide at least one of: anthropicApiKey, openrouterApiKey, openaiApiKey, bedrock, openaiCompatible, openaiCompatibleProviders, openaiCompletionsProviders'
+      'Please provide at least one of: anthropicApiKey, openrouterApiKey, openaiApiKey, bedrock, openaiCompatible, openaiCompatibleProviders, openaiCompletionsProviders, openaiResponsesProviders'
     );
   }
   
@@ -840,6 +889,7 @@ export { RoutingAdapter };
  * Adapter type is determined by vendor name prefix:
  * - 'anthropic-*' → Anthropic adapter
  * - 'openrouter-*' → OpenRouter adapter
+ * - 'openairesponses-*' → OpenAI Responses adapter (/v1/responses, for gpt-image-1)
  * - 'openaicompletion-*' → OpenAI Completions adapter (base models, /v1/completions)
  * - 'openai-*' → OpenAI Compatible adapter (chat, /v1/chat/completions)
  *
@@ -876,6 +926,7 @@ export function createMembraneFromVendorConfigs(
   let geminiConfig: GeminiConfig | undefined;
   const openaiCompatibleProviders: OpenAICompatibleConfig[] = [];
   const openaiCompletionsProviders: OpenAICompletionsConfig[] = [];
+  const openaiResponsesProviders: OpenAIResponsesConfig[] = [];
 
   // Track formatter from vendors (first one wins, can be overridden by options)
   let detectedFormatter: FormatterType | undefined;
@@ -984,6 +1035,25 @@ export function createMembraneFromVendorConfigs(
 
       logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenRouter vendor (uses native API)');
 
+    } else if (vendorName.startsWith('openairesponses')) {
+      // OpenAI Responses adapter (for gpt-image-1 and similar /v1/responses models)
+      const openaiKey = config?.openai_api_key ?? config?.api_key;
+      if (openaiKey) {
+        openaiResponsesProviders.push({
+          apiKey: openaiKey,
+          name: vendorName,
+          baseUrl: baseUrl,
+          provides: vendorConfig.provides,
+        });
+      }
+
+      // Auto-detect native formatter for Responses vendors
+      if (!detectedFormatter) {
+        detectedFormatter = 'native';
+      }
+
+      logger.debug({ vendorName, provides: vendorConfig.provides }, 'Found OpenAI Responses vendor (/v1/responses API)');
+
     } else if (vendorName.startsWith('openaicompletion')) {
       // OpenAI Completions adapter (base models using /v1/completions)
       if (baseUrl) {
@@ -1074,6 +1144,7 @@ export function createMembraneFromVendorConfigs(
     gemini: geminiConfig,
     openaiCompatibleProviders: openaiCompatibleProviders.length > 0 ? openaiCompatibleProviders : undefined,
     openaiCompletionsProviders: openaiCompletionsProviders.length > 0 ? openaiCompletionsProviders : undefined,
+    openaiResponsesProviders: openaiResponsesProviders.length > 0 ? openaiResponsesProviders : undefined,
     assistantName,
     formatter: finalFormatter,
     completionsConfig: finalCompletionsConfig,
