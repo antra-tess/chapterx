@@ -1704,14 +1704,48 @@ export class DiscordConnector {
   private pushMessageToCache(channelId: string, message: Message): void {
     const cache = this.messageCache.get(channelId)
     if (!cache) return
-    // If cache doesn't exist yet, we haven't done the initial fetch - don't start partial cache
-    const idx = cache.push(message) - 1
+
     let index = this.messageCacheIndex.get(channelId)
     if (!index) {
       index = new Map()
       this.messageCacheIndex.set(channelId, index)
     }
-    index.set(message.id, idx)
+
+    // Deduplicate: skip if already cached
+    if (index.has(message.id)) return
+
+    // Fast path: message is newer than or equal to newest cached (common case for messageCreate events)
+    const last = cache[cache.length - 1]
+    if (!last || message.id >= (last as Message).id) {
+      const idx = cache.push(message) - 1
+      index.set(message.id, idx)
+      return
+    }
+
+    // Slow path: message is older than newest cached (e.g., single-message fetch for thread start).
+    // Must insert in chronological position to maintain cache ordering.
+    // Without this, the batch fetch fast path (cache.slice(0, beforeIdx)) returns wrong messages
+    // because it assumes chronological ordering.
+    let lo = 0, hi = cache.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      const midMsg = cache[mid]
+      if (!midMsg || (midMsg as Message).id < message.id) lo = mid + 1
+      else hi = mid
+    }
+    cache.splice(lo, 0, message)
+
+    // Rebuild index since splice shifted all positions after insertion point
+    const newIndex = new Map<string, number>()
+    cache.forEach((m, i) => { if (m) newIndex.set((m as Message).id, i) })
+    this.messageCacheIndex.set(channelId, newIndex)
+
+    logger.debug({
+      channelId,
+      messageId: message.id,
+      insertedAt: lo,
+      cacheSize: cache.length,
+    }, 'Inserted out-of-order message into cache (maintained chronological order)')
   }
 
   private updateMessageInCache(channelId: string, message: Message): void {
@@ -1796,8 +1830,18 @@ export class DiscordConnector {
           const index = this.messageCacheIndex.get(channelId)
           const beforeIdx = index?.get(before)
           if (beforeIdx !== undefined) {
-            // Fast path: slice up to the known position, filter only tombstones
-            filtered = cache.slice(0, beforeIdx).filter((m): m is Message => m !== null)
+            // Fast path: slice up to the known position, filter only tombstones.
+            // Sanity check: verify the message at beforeIdx actually matches the expected ID.
+            // If the cache was corrupted (out-of-order insertion), fall back to comparison.
+            const msgAtIdx = cache[beforeIdx]
+            if (msgAtIdx && (msgAtIdx as Message).id === before) {
+              filtered = cache.slice(0, beforeIdx).filter((m): m is Message => m !== null)
+            } else {
+              // Index is stale or cache is out of order — use comparison-based filter
+              logger.warn({ channelId, before, beforeIdx, actualId: msgAtIdx ? (msgAtIdx as Message).id : 'null' },
+                'Cache index mismatch — falling back to comparison-based filter')
+              filtered = cache.filter((m): m is Message => m !== null && m.id < before)
+            }
           } else {
             // Fallback: before ID not in index (deleted/external), full scan
             filtered = cache.filter((m): m is Message => m !== null && m.id < before)
