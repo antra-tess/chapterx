@@ -2122,20 +2122,35 @@ export class DiscordConnector {
   /**
    * Fetch pinned messages with a timeout to prevent hanging the event loop.
    * fetchPinned() can hang indefinitely in some conditions, which blocks
-   * the entire event processing loop. Returns empty collection on timeout
-   * to gracefully degrade (no channel config overrides, but bot still works).
+   * the entire event processing loop. Retries once with a shorter timeout
+   * before giving up. Returns empty collection on final failure to gracefully
+   * degrade (no channel config overrides, but bot still works).
    */
   private async fetchPinnedWithTimeout(channel: TextChannel, timeoutMs: number = 10000): Promise<Collection<string, Message>> {
-    const fetchPromise = channel.messages.fetchPinned(false)
+    let currentTimeout = timeoutMs
 
-    const timeoutPromise = new Promise<Collection<string, Message>>((resolve) => {
-      setTimeout(() => {
-        logger.warn({ channelId: channel.id, timeoutMs }, 'fetchPinned timed out — returning empty (no channel config overrides)')
-        resolve(new Collection<string, Message>())
-      }, timeoutMs)
-    })
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const fetchPromise = channel.messages.fetchPinned(false)
 
-    return Promise.race([fetchPromise, timeoutPromise])
+      const timeoutPromise = new Promise<null>((resolve) => {
+        setTimeout(() => resolve(null), currentTimeout)
+      })
+
+      const result = await Promise.race([fetchPromise, timeoutPromise])
+      if (result !== null) return result
+
+      logger.warn({
+        channelId: channel.id,
+        timeoutMs: currentTimeout,
+        attempt,
+      }, 'fetchPinned timed out — retrying')
+      currentTimeout = Math.floor(currentTimeout / 2)  // Shorter retry
+    }
+
+    logger.error({
+      channelId: channel.id,
+    }, 'fetchPinned failed after retries — channel config overrides will be missing')
+    return new Collection<string, Message>()
   }
 
   private extractConfigs(messages: Message[]): string[] {

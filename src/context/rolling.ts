@@ -240,12 +240,13 @@ export function determineCacheMarker(
   messageIds: string[],
   lastMarker: string | null,
   didRoll: boolean,
-  buffer: number = 20
+  buffer: number = 20,
+  botMessageIds?: Set<string>
 ): string | null {
   if (messageIds.length === 0) {
     return null;
   }
-  
+
   // If we didn't roll, keep existing marker if still valid
   if (!didRoll && lastMarker) {
     if (messageIds.includes(lastMarker)) {
@@ -253,23 +254,60 @@ export function determineCacheMarker(
       return lastMarker;
     }
   }
-  
-  // Place new marker at (length - buffer)
-  const index = Math.max(0, messageIds.length - buffer);
-  const markerId = messageIds[index];
-  
+
+  const targetIndex = Math.max(0, messageIds.length - buffer);
+
+  // Prefer non-bot messages that won't be merged during activation injection.
+  // Bot messages are the ones that get merged in mergeConsecutiveBotMessages and
+  // mergeConsecutiveParticipantMessages, so placing the marker on one risks orphaning.
+  if (botMessageIds && botMessageIds.size > 0) {
+    // Search from target index, first forward then backward, for a non-bot message
+    for (let offset = 0; offset < buffer; offset++) {
+      const fwdIdx = targetIndex + offset;
+      if (fwdIdx < messageIds.length && !botMessageIds.has(messageIds[fwdIdx]!)) {
+        logger.debug({
+          targetIndex,
+          selectedIndex: fwdIdx,
+          messagesLength: messageIds.length,
+          buffer,
+          markerId: messageIds[fwdIdx],
+          didRoll,
+          direction: 'forward',
+        }, 'Setting new cache marker (non-bot preference)');
+        return messageIds[fwdIdx]!;
+      }
+      const bwdIdx = targetIndex - offset;
+      if (bwdIdx >= 0 && !botMessageIds.has(messageIds[bwdIdx]!)) {
+        logger.debug({
+          targetIndex,
+          selectedIndex: bwdIdx,
+          messagesLength: messageIds.length,
+          buffer,
+          markerId: messageIds[bwdIdx],
+          didRoll,
+          direction: 'backward',
+        }, 'Setting new cache marker (non-bot preference)');
+        return messageIds[bwdIdx]!;
+      }
+    }
+    // All messages in range are bot messages — fall through to original behavior
+  }
+
+  // Fallback: use target index directly (original behavior)
+  const markerId = messageIds[targetIndex];
+
   if (!markerId) {
     return null;
   }
-  
+
   logger.debug({
-    index,
+    index: targetIndex,
     messagesLength: messageIds.length,
     buffer,
     markerId,
     didRoll,
   }, 'Setting new cache marker');
-  
+
   return markerId;
 }
 

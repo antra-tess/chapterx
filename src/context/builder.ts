@@ -107,13 +107,19 @@ export class ContextBuilder {
     let imageSelectionMarker = lastCacheMarker
     if (!imageSelectionMarker && messages.length > 0) {
       // On first activation (no existing marker), calculate where new marker will be
-      // This mirrors the logic in determineCacheMarker for new markers
+      // This mirrors the logic in determineCacheMarker for new markers,
+      // including non-bot preference to stay consistent with actual marker placement
       const buffer = 20
-      const markerIndex = Math.max(0, messages.length - buffer)
-      imageSelectionMarker = messages[markerIndex]?.id ?? null
+      const messageIds = messages.map(m => m.id)
+      const botIds = new Set<string>()
+      for (const m of messages) {
+        if (m.author.displayName === botDisplayName) {
+          botIds.add(m.id)
+        }
+      }
+      imageSelectionMarker = determineCacheMarker(messageIds, null, true, buffer, botIds.size > 0 ? botIds : undefined)
       logger.debug({
         calculatedMarker: imageSelectionMarker,
-        markerIndex,
         messagesLength: messages.length,
       }, 'Pre-calculated cache marker for image selection (first activation)')
     }
@@ -218,7 +224,7 @@ export class ContextBuilder {
     }
 
     // 6. Determine cache marker using membrane's pattern
-    let cacheMarker = this.determineCacheMarkerFromMessages(messages, lastCacheMarker, didTruncate)
+    let cacheMarker = this.determineCacheMarkerFromMessages(messages, lastCacheMarker, didTruncate, botDisplayName)
 
     // Apply cache marker using membrane's function (sets cacheBreakpoint)
     // IMPORTANT: The marker was selected from raw messages, but some messages may have been
@@ -231,7 +237,7 @@ export class ContextBuilder {
       if (!markerExists) {
         // Marker message was merged/filtered - find a valid fallback using helper
         const fallbackMarker = findFallbackCacheMarker(participantMessages, config.name)
-        
+
         if (fallbackMarker) {
           logger.warn({
             originalMarker: cacheMarker,
@@ -240,11 +246,25 @@ export class ContextBuilder {
           }, 'Cache marker orphaned - using fallback')
           cacheMarker = fallbackMarker
         } else {
-          logger.warn({
-            originalMarker: cacheMarker,
-            totalMessages: participantMessages.length,
-          }, 'Cache marker orphaned, no fallback - caching disabled')
-          cacheMarker = null
+          // Last resort: pick ANY message near the tail as cache boundary.
+          // A slightly unstable prefix is far better than 0 caching (full cost every activation).
+          const lastResortIdx = Math.max(0, participantMessages.length - 20)
+          const lastResortMarker = participantMessages[lastResortIdx]?.messageId ?? null
+          if (lastResortMarker) {
+            logger.warn({
+              originalMarker: cacheMarker,
+              lastResortMarker,
+              lastResortIdx,
+              totalMessages: participantMessages.length,
+            }, 'Cache marker orphaned, using last-resort marker to preserve caching')
+            cacheMarker = lastResortMarker
+          } else {
+            logger.warn({
+              originalMarker: cacheMarker,
+              totalMessages: participantMessages.length,
+            }, 'Cache marker orphaned, no messages available - caching disabled')
+            cacheMarker = null
+          }
         }
       }
       
@@ -665,15 +685,30 @@ export class ContextBuilder {
   /**
    * Determine cache marker position using membrane's pattern.
    * Delegates to ./rolling.ts helpers.
+   * Passes bot message IDs so the marker preferrs non-bot messages
+   * that won't be merged during activation injection.
    */
   private determineCacheMarkerFromMessages(
     messages: DiscordMessage[],
     lastMarker: string | null,
-    didRoll: boolean
+    didRoll: boolean,
+    botDisplayName?: string
   ): string | null {
     // Extract message IDs and delegate to helper
     const messageIds = messages.map(m => m.id)
-    return determineCacheMarker(messageIds, lastMarker, didRoll)
+
+    // Build set of bot message IDs so determineCacheMarker can avoid them
+    let botMessageIds: Set<string> | undefined
+    if (botDisplayName) {
+      botMessageIds = new Set<string>()
+      for (const m of messages) {
+        if (m.author.displayName === botDisplayName) {
+          botMessageIds.add(m.id)
+        }
+      }
+    }
+
+    return determineCacheMarker(messageIds, lastMarker, didRoll, 20, botMessageIds)
   }
 
   private async formatMessages(
