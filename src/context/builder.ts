@@ -1341,16 +1341,31 @@ export class ContextBuilder {
     }, 'Built context maps')
     
     // Build phantom insertions: messageId -> completions to insert after
+    // Skip thinking-only phantoms — injecting them into context creates a feedback loop
+    // where the model sees "I was activated and only thought, never responded" and repeats.
     const phantomInsertions = new Map<string, Completion[]>()
     for (const activation of activations) {
       let currentAnchor = activation.trigger.anchorMessageId
-      
+
       for (const completion of activation.completions) {
         if (completion.sentMessageIds.length === 0) {
-          // Phantom - insert after current anchor
-          const existing = phantomInsertions.get(currentAnchor) || []
-          existing.push(completion)
-          phantomInsertions.set(currentAnchor, existing)
+          // Phantom — check if it has any visible content beyond thinking tags
+          const visibleText = completion.text
+            .replace(/<thinking>[\s\S]*?<\/thinking>/g, '')
+            .trim()
+
+          if (visibleText.length > 0) {
+            // Has visible content - insert as phantom
+            const existing = phantomInsertions.get(currentAnchor) || []
+            existing.push(completion)
+            phantomInsertions.set(currentAnchor, existing)
+          } else {
+            // Thinking-only phantom - skip injection to prevent cascade
+            logger.debug({
+              activationId: activation.id,
+              textPreview: completion.text.substring(0, 80),
+            }, 'Skipping thinking-only phantom (no visible content)')
+          }
         } else {
           // Update anchor to last sent message
           currentAnchor = completion.sentMessageIds[completion.sentMessageIds.length - 1] || currentAnchor
@@ -1703,7 +1718,14 @@ export class ContextBuilder {
 
     // Add participant names with newline prefix (in priority order - most recent first)
     // Use all collected participants - post-hoc truncation catches everyone anyway
+    // When prefill_thinking is enabled, exclude the bot's own name — the model may
+    // legitimately emit "\nBotName:" after </thinking> to start the visible response.
+    // Without this, the stop sequence fires before any visible text is generated,
+    // creating phantom (thinking-only) completions.
     for (const participant of recentParticipants) {
+      if (config.prefill_thinking && participant === config.name) {
+        continue
+      }
       sequences.push(`\n${participant}:`)
     }
 
