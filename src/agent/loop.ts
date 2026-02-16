@@ -467,20 +467,46 @@ export class AgentLoop {
     const triggeringEvent = this.findTriggeringMessageEvent(events)
     const triggeringMessageId = triggeringEvent?.data?.id
 
-    // Check for m command and delete it
+    // Check for m command
     const mCommandEvent = events.find((e) => e.type === 'message' && (e.data as any)._isMCommand)
     if (mCommandEvent) {
       const message = mCommandEvent.data as any
+
+      // Before deleting, check if this is a chat-mode bot that can't handle m continue.
+      // Chat-mode bots don't support prefill, so the conversation can't end with an
+      // assistant turn — which is what m continue produces after stripping the empty completion.
+      try {
+        const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
+        const modeCheckConfig = this.configSystem.loadConfig({
+          botName: this.botId,
+          guildId,
+          channelConfigs: pinnedConfigs,
+        })
+        if (modeCheckConfig.mode === 'chat') {
+          logger.info({ channelId, botId: this.botId, mode: 'chat' },
+            'm continue rejected — chat-mode bots do not support continuation')
+          // Delete the m command immediately, then react to whatever is now the latest message
+          await this.connector.deleteMessage(channelId, message.id)
+            .catch((err: any) => logger.debug({ error: err.message }, 'Failed to delete rejected m continue'))
+          await this.connector.reactToLatestMessage(channelId, '🚫')
+          return
+        }
+      } catch (error: any) {
+        // Config load failure — allow activation to proceed (fail-open)
+        logger.warn({ error: error.message }, 'Failed to check mode for m continue — proceeding')
+      }
+
+      // Delete the m command message
       try {
         await this.connector.deleteMessage(channelId, message.id)
-        logger.info({ 
-          messageId: message.id, 
+        logger.info({
+          messageId: message.id,
           channelId,
           author: message.author?.username,
           content: message.content?.substring(0, 50)
         }, 'Deleted m command message')
       } catch (error: any) {
-        logger.error({ 
+        logger.error({
           error: error.message,
           code: error.code,
           messageId: message.id,
@@ -970,10 +996,20 @@ export class AgentLoop {
         continue
       }
 
+      // Skip dot messages — hidden/command messages should never trigger activation
+      // Strip leading Discord mentions (<@userId>) and ChapterX reply tags (<reply:@...>)
+      // so ".test @bot" is caught regardless of mention position
+      const content = message.content?.trim()
+      const contentForDotCheck = content
+        ?.replace(/^(<@!?\d+>\s*)+/, '')    // Strip leading Discord mentions
+        ?.replace(/^<reply:@[^>]+>\s*/, '') // Strip ChapterX reply prefix
+      if (contentForDotCheck && /^\.[a-zA-Z]/.test(contentForDotCheck)) {
+        continue
+      }
+
       // 1. Check for m command FIRST (before mention check)
       // This ensures "m continue <@bot>" gets flagged for deletion
       // Only trigger/delete if addressed to THIS bot (mention or reply)
-      const content = message.content?.trim()
       if (content?.startsWith('m ')) {
         const mentionsUs = this.botUserId && message.mentions?.has(this.botUserId)
         const repliesTo = message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)

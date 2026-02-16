@@ -1682,6 +1682,25 @@ export class DiscordConnector {
   }
 
   /**
+   * Add a reaction to the most recent message in a channel.
+   * Fetches directly from Discord API (no cache) to get the latest message.
+   */
+  async reactToLatestMessage(channelId: string, emoji: string): Promise<void> {
+    try {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+      if (!channel || !channel.isTextBased()) return
+      const recent = await channel.messages.fetch({ limit: 1 })
+      const lastMsg = recent.first()
+      if (lastMsg) {
+        await lastMsg.react(emoji)
+        logger.debug({ channelId, messageId: lastMsg.id, emoji }, 'Reacted to latest message')
+      }
+    } catch (error) {
+      logger.warn({ error, channelId, emoji }, 'Failed to react to latest message')
+    }
+  }
+
+  /**
    * Close the Discord client
    */
   async close(): Promise<void> {

@@ -337,6 +337,9 @@ export class ConfigSystem {
       // Participant stop sequences - default false (allows frags/quotes)
       participant_stop_sequences: config.participant_stop_sequences ?? false,
 
+      // Bot mode (chat vs prefill)
+      mode: config.mode,  // 'chat' or 'prefill' (default: undefined = prefill)
+
       // TTS relay
       tts_relay: config.tts_relay,
     }
