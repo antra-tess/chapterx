@@ -355,7 +355,7 @@ export class DiscordConnector {
         const thread = channel as any  // Discord.js ThreadChannel
         threadParentChannel = thread.parent as TextChannel
         threadStartMessageId = thread.id  // Thread ID is the same as the message ID that started it
-        
+
         if (threadParentChannel && threadParentChannel.isTextBased()) {
           logger.debug({
             threadId: thread.id,
@@ -364,7 +364,16 @@ export class DiscordConnector {
             currentMessageCount: messages.length,
             remainingDepth: depth - messages.length
           }, 'Thread detected, fetching parent channel context')
-          
+
+          // Use a SEPARATE historyState for the parent fetch.
+          // A .history clear in the parent channel should truncate parent messages (which
+          // fetchMessagesRecursive handles internally), but should NOT:
+          //   1. Suppress cache stability extension for the thread (line ~411)
+          //   2. Reset the thread's cacheOldestMessageId in loop.ts
+          // Previously, sharing historyState caused parent .history clears to corrupt
+          // thread-level cache anchors, leading to context shuffling on subsequent activations.
+          const parentHistoryState: FetchHistoryState = { originChannelId: null, didClear: false }
+
           // Fetch from parent channel up to (and including) the thread's starting message
           const parentMessages = await this.fetchMessagesRecursive(
             threadParentChannel,
@@ -373,7 +382,7 @@ export class DiscordConnector {
             Math.max(0, depth - messages.length),  // Remaining message budget
             authorized_roles,
             ignoreHistory,
-            historyState
+            parentHistoryState
           )
           
           logger.debug({
@@ -399,6 +408,20 @@ export class DiscordConnector {
 
           // Prepend parent messages (they're older than thread messages)
           messages = [...parentMessages, ...messages]
+
+          // Propagate parent's .history origin for plugin state inheritance,
+          // but do NOT propagate didClear — that only applies to parent context,
+          // not to the thread's cache stability or ChannelState decisions.
+          if (parentHistoryState.originChannelId && !historyState.originChannelId) {
+            historyState.originChannelId = parentHistoryState.originChannelId
+          }
+
+          if (parentHistoryState.didClear) {
+            logger.debug({
+              parentChannelId: threadParentChannel.id,
+              threadId: thread.id,
+            }, 'Parent channel had .history clear — parent messages truncated but thread state unaffected')
+          }
         }
         endProfile('threadParentFetch')
       }
