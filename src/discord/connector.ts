@@ -2223,7 +2223,7 @@ export class DiscordConnector {
 
     let currentTimeout = timeoutMs
 
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), currentTimeout)
 
@@ -2241,6 +2241,19 @@ export class DiscordConnector {
         clearTimeout(timer)
 
         if (!response.ok) {
+          if (response.status === 429) {
+            const retryAfter = parseFloat(response.headers.get('retry-after') || '0')
+            const retryMs = retryAfter > 0 ? Math.ceil(retryAfter * 1000) : 2000
+            logger.warn({
+              channelId: channel.id,
+              retryAfterSec: retryAfter,
+              retryMs,
+              attempt,
+            }, 'Direct pins fetch rate limited — waiting before retry')
+            clearTimeout(timer)
+            await new Promise(resolve => setTimeout(resolve, retryMs))
+            continue
+          }
           logger.warn({
             channelId: channel.id,
             status: response.status,
@@ -2250,9 +2263,21 @@ export class DiscordConnector {
           continue
         }
 
-        const data = await response.json() as any[]
+        const data = await response.json() as any
+
+        // The /pins endpoint may return an array (old format) or { items: [...] } (new format)
+        const rawMessages = Array.isArray(data) ? data : (data?.items?.map((item: any) => item.message) ?? data?.items ?? [])
+
+        logger.debug({
+          channelId: channel.id,
+          isArray: Array.isArray(data),
+          dataKeys: !Array.isArray(data) ? Object.keys(data || {}) : undefined,
+          rawCount: rawMessages.length,
+          attempt,
+        }, 'Direct pins fetch response shape')
+
         const messages = new Collection<string, Message>()
-        for (const raw of data) {
+        for (const raw of rawMessages) {
           // Use discord.js's internal _add to construct Message objects
           // Private in types but needed to build proper Message instances from raw API data
           const msg = (channel.messages as any)._add(raw, false)
