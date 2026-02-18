@@ -2207,47 +2207,86 @@ export class DiscordConnector {
 
   /**
    * Fetch pinned messages with a timeout to prevent hanging the event loop.
-   * Uses the new fetchPins() API (fetchPinned is deprecated and hangs indefinitely
-   * under certain conditions). Retries once with a shorter timeout before giving up.
+   * Bypasses discord.js REST manager entirely — long-running clients exhibit a bug
+   * where the REST manager hangs indefinitely on pins endpoints (both fetchPinned
+   * and fetchPins), while message fetching works fine. Uses native fetch() to hit
+   * the Discord API directly. Retries once with a shorter timeout before giving up.
    * Returns empty collection on final failure to gracefully degrade
    * (no channel config overrides, but bot still works).
    */
   private async fetchPinnedWithTimeout(channel: TextChannel, timeoutMs: number = 10000): Promise<Collection<string, Message>> {
+    const token = this.client.token
+    if (!token) {
+      logger.error({ channelId: channel.id }, 'No bot token available for direct pins fetch')
+      return new Collection<string, Message>()
+    }
+
     let currentTimeout = timeoutMs
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      const fetchPromise = channel.messages.fetchPins({ cache: false }).then(response => {
-        const messages = new Collection<string, Message>()
-        for (const item of response.items) {
-          messages.set(item.message.id, item.message)
-        }
-        if (response.hasMore) {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), currentTimeout)
+
+      try {
+        const response = await fetch(
+          `https://discord.com/api/v10/channels/${channel.id}/pins`,
+          {
+            headers: {
+              Authorization: `Bot ${token}`,
+              'Content-Type': 'application/json',
+            },
+            signal: controller.signal,
+          }
+        )
+        clearTimeout(timer)
+
+        if (!response.ok) {
           logger.warn({
             channelId: channel.id,
-            fetchedCount: response.items.length,
-          }, 'fetchPins returned hasMore=true — some pinned configs may be missing')
+            status: response.status,
+            statusText: response.statusText,
+            attempt,
+          }, 'Direct pins fetch returned error')
+          continue
         }
+
+        const data = await response.json() as any[]
+        const messages = new Collection<string, Message>()
+        for (const raw of data) {
+          // Use discord.js's internal _add to construct Message objects
+          // Private in types but needed to build proper Message instances from raw API data
+          const msg = (channel.messages as any)._add(raw, false)
+          messages.set(msg.id, msg)
+        }
+
+        logger.debug({
+          channelId: channel.id,
+          count: messages.size,
+          attempt,
+        }, 'Fetched pinned messages via direct API')
         return messages
-      })
-
-      const timeoutPromise = new Promise<null>((resolve) => {
-        setTimeout(() => resolve(null), currentTimeout)
-      })
-
-      const result = await Promise.race([fetchPromise, timeoutPromise])
-      if (result !== null) return result
-
-      logger.warn({
-        channelId: channel.id,
-        timeoutMs: currentTimeout,
-        attempt,
-      }, 'fetchPins timed out — retrying')
-      currentTimeout = Math.floor(currentTimeout / 2)  // Shorter retry
+      } catch (error: any) {
+        clearTimeout(timer)
+        if (error.name === 'AbortError') {
+          logger.warn({
+            channelId: channel.id,
+            timeoutMs: currentTimeout,
+            attempt,
+          }, 'Direct pins fetch timed out — retrying')
+        } else {
+          logger.warn({
+            channelId: channel.id,
+            error: error.message,
+            attempt,
+          }, 'Direct pins fetch failed — retrying')
+        }
+        currentTimeout = Math.floor(currentTimeout / 2)
+      }
     }
 
     logger.error({
       channelId: channel.id,
-    }, 'fetchPins failed after retries — channel config overrides will be missing')
+    }, 'Pins fetch failed after retries — channel config overrides will be missing')
     return new Collection<string, Message>()
   }
 
