@@ -4,7 +4,7 @@
  */
 
 import { Attachment, Client, Collection, GatewayIntentBits, Message, PermissionFlagsBits, OAuth2Scopes, TextChannel } from 'discord.js'
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
 import sharp from 'sharp'
@@ -22,6 +22,7 @@ import { retryDiscord } from '../utils/retry.js'
 export interface ConnectorOptions {
   token: string
   cacheDir: string
+  pinCacheDir?: string  // Directory for persisting pinned config cache to disk
   maxBackoffMs: number
 }
 
@@ -62,6 +63,7 @@ export class DiscordConnector {
   private messageCachePopulated = new Set<string>()  // channels that had initial API fetch
   private pinnedConfigCache = new Map<string, string[]>()  // channelId → pinned config strings
   private pinnedConfigDirty = new Set<string>()  // channels whose pins changed since last fetch
+  private fetchPinnedFailed = false  // Set when fetchPinnedWithTimeout fails (for disk cache fallback)
 
   // Cache observability and maintenance
   private cacheStats = { hits: 0, misses: 0, apiCalls: 0, evictions: 0 }
@@ -91,6 +93,58 @@ export class DiscordConnector {
     // Load URL to filename map for persistent disk cache
     this.urlMapPath = join(options.cacheDir, 'url-map.json')
     this.loadUrlMap()
+
+    // Initialize disk-based pin cache directory
+    if (options.pinCacheDir) {
+      if (!existsSync(options.pinCacheDir)) {
+        mkdirSync(options.pinCacheDir, { recursive: true })
+      }
+      this.loadPinCacheFromDisk()
+    }
+  }
+
+  /**
+   * Load all persisted pin caches from disk into memory on startup.
+   */
+  private loadPinCacheFromDisk(): void {
+    const dir = this.options.pinCacheDir
+    if (!dir || !existsSync(dir)) return
+
+    try {
+      const files = readdirSync(dir).filter(f => f.endsWith('.json'))
+      let loaded = 0
+      for (const file of files) {
+        try {
+          const channelId = file.replace('.json', '')
+          const data = JSON.parse(readFileSync(join(dir, file), 'utf-8'))
+          if (Array.isArray(data)) {
+            this.pinnedConfigCache.set(channelId, data)
+            loaded++
+          }
+        } catch {
+          // Skip corrupted files
+        }
+      }
+      if (loaded > 0) {
+        logger.info({ loaded, dir }, 'Loaded pinned config cache from disk')
+      }
+    } catch (error) {
+      logger.warn({ error, dir }, 'Failed to read pin cache directory')
+    }
+  }
+
+  /**
+   * Persist pinned configs for a channel to disk.
+   */
+  private savePinCacheToDisk(channelId: string, configs: string[]): void {
+    const dir = this.options.pinCacheDir
+    if (!dir) return
+
+    try {
+      writeFileSync(join(dir, `${channelId}.json`), JSON.stringify(configs), 'utf-8')
+    } catch (error) {
+      logger.warn({ error, channelId }, 'Failed to write pin cache to disk')
+    }
   }
   
   /**
@@ -257,10 +311,11 @@ export class DiscordConnector {
 
   /**
    * Fetch just pinned configs from a channel (fast - single API call)
-   * Used to load config BEFORE determining fetch depth
+   * Used to load config BEFORE determining fetch depth.
+   * Falls back to disk cache if API call fails (e.g. Cloudflare 429).
    */
   async fetchPinnedConfigs(channelId: string): Promise<string[]> {
-    // Check push-based cache first
+    // Check push-based memory cache first
     const cached = this.getCachedPinnedConfigs(channelId)
     if (cached !== null) {
       logger.debug({ channelId }, 'Pinned config cache hit')
@@ -273,18 +328,58 @@ export class DiscordConnector {
         return []
       }
       const pinnedMessages = await this.fetchPinnedWithTimeout(channel, 10000)
-      const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
-      const configs = this.extractConfigs(sortedPinned)
 
-      // Store in cache
-      this.cachePinnedConfigs(channelId, configs)
-      logger.debug({ channelId }, 'Pinned config cache miss - fetched from API')
+      // Empty collection could mean either "no pins" or "fetch failed"
+      // If we got messages, treat as authoritative (even if empty — channel may have no configs)
+      if (pinnedMessages.size > 0 || !this.fetchPinnedFailed) {
+        const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
+        const configs = this.extractConfigs(sortedPinned)
 
-      return configs
+        // Store in memory + disk
+        this.cachePinnedConfigs(channelId, configs)
+        this.savePinCacheToDisk(channelId, configs)
+        logger.debug({ channelId, configCount: configs.length }, 'Pinned config cache miss - fetched from API')
+
+        return configs
+      }
+
+      // Fetch failed (timeout/429) — fall back to disk cache
+      return this.loadPinCacheForChannel(channelId)
     } catch (error) {
       logger.warn({ error, channelId }, 'Failed to fetch pinned configs')
-      return []
+      return this.loadPinCacheForChannel(channelId)
     }
+  }
+
+  /**
+   * Load pinned configs for a single channel from disk cache.
+   * Returns empty array if no disk cache exists.
+   */
+  private loadPinCacheForChannel(channelId: string): string[] {
+    // Check if memory was populated from disk on startup
+    const memCached = this.pinnedConfigCache.get(channelId)
+    if (memCached) {
+      logger.info({ channelId, configCount: memCached.length }, 'Using disk-cached pinned configs (API unavailable)')
+      return memCached
+    }
+
+    // Try reading directly from disk
+    const dir = this.options.pinCacheDir
+    if (!dir) return []
+    const filePath = join(dir, `${channelId}.json`)
+    if (!existsSync(filePath)) return []
+
+    try {
+      const data = JSON.parse(readFileSync(filePath, 'utf-8'))
+      if (Array.isArray(data)) {
+        this.pinnedConfigCache.set(channelId, data)
+        logger.info({ channelId, configCount: data.length }, 'Loaded pinned configs from disk fallback')
+        return data
+      }
+    } catch {
+      // Corrupted file
+    }
+    return []
   }
 
   /**
@@ -2207,25 +2302,25 @@ export class DiscordConnector {
 
   /**
    * Fetch pinned messages with a timeout to prevent hanging the event loop.
-   * Bypasses discord.js REST manager entirely — long-running clients exhibit a bug
-   * where the REST manager hangs indefinitely on pins endpoints (both fetchPinned
-   * and fetchPins), while message fetching works fine. Uses native fetch() to hit
-   * the Discord API directly. Retries once with a shorter timeout before giving up.
-   * Returns empty collection on final failure to gracefully degrade
-   * (no channel config overrides, but bot still works).
+   * Bypasses discord.js REST manager entirely (it hangs on pins endpoints due to
+   * Cloudflare Error 1015 rate limiting on servers with many bots sharing one IP).
+   * Uses native fetch() to the Discord API directly with AbortController timeout.
+   * On 429/failure, sets fetchPinnedFailed flag so caller can fall back to disk cache.
+   * Does NOT wait on rate limits — falls through immediately to disk cache instead.
    */
   private async fetchPinnedWithTimeout(channel: TextChannel, timeoutMs: number = 10000): Promise<Collection<string, Message>> {
+    this.fetchPinnedFailed = false
+
     const token = this.client.token
     if (!token) {
       logger.error({ channelId: channel.id }, 'No bot token available for direct pins fetch')
+      this.fetchPinnedFailed = true
       return new Collection<string, Message>()
     }
 
-    let currentTimeout = timeoutMs
-
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), currentTimeout)
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
 
       try {
         const response = await fetch(
@@ -2243,22 +2338,16 @@ export class DiscordConnector {
         if (!response.ok) {
           if (response.status === 429) {
             const retryAfter = parseFloat(response.headers.get('retry-after') || '0')
-            const retryMs = retryAfter > 0 ? Math.ceil(retryAfter * 1000) : 2000
-            // Dump all headers and body for diagnosis
-            const bodyText = await response.text().catch(() => '<unreadable>')
-            const allHeaders: Record<string, string> = {}
-            response.headers.forEach((value, key) => { allHeaders[key] = value })
+            // Don't wait — Cloudflare 1015 bans can be hours long.
+            // Fall through immediately so caller can use disk cache.
             logger.warn({
               channelId: channel.id,
               retryAfterSec: retryAfter,
-              retryMs,
               attempt,
-              headers: allHeaders,
-              body: bodyText,
-            }, 'Direct pins fetch rate limited — waiting before retry')
-            clearTimeout(timer)
-            await new Promise(resolve => setTimeout(resolve, retryMs))
-            continue
+              server: response.headers.get('server'),
+            }, 'Pins fetch rate limited (Cloudflare 1015) — falling back to disk cache')
+            this.fetchPinnedFailed = true
+            return new Collection<string, Message>()
           }
           logger.warn({
             channelId: channel.id,
@@ -2271,21 +2360,12 @@ export class DiscordConnector {
 
         const data = await response.json() as any
 
-        // The /pins endpoint may return an array (old format) or { items: [...] } (new format)
+        // The /pins endpoint returns an array of message objects
         const rawMessages = Array.isArray(data) ? data : (data?.items?.map((item: any) => item.message) ?? data?.items ?? [])
-
-        logger.debug({
-          channelId: channel.id,
-          isArray: Array.isArray(data),
-          dataKeys: !Array.isArray(data) ? Object.keys(data || {}) : undefined,
-          rawCount: rawMessages.length,
-          attempt,
-        }, 'Direct pins fetch response shape')
 
         const messages = new Collection<string, Message>()
         for (const raw of rawMessages) {
           // Use discord.js's internal _add to construct Message objects
-          // Private in types but needed to build proper Message instances from raw API data
           const msg = (channel.messages as any)._add(raw, false)
           messages.set(msg.id, msg)
         }
@@ -2301,7 +2381,7 @@ export class DiscordConnector {
         if (error.name === 'AbortError') {
           logger.warn({
             channelId: channel.id,
-            timeoutMs: currentTimeout,
+            timeoutMs,
             attempt,
           }, 'Direct pins fetch timed out — retrying')
         } else {
@@ -2311,13 +2391,13 @@ export class DiscordConnector {
             attempt,
           }, 'Direct pins fetch failed — retrying')
         }
-        currentTimeout = Math.floor(currentTimeout / 2)
       }
     }
 
     logger.error({
       channelId: channel.id,
-    }, 'Pins fetch failed after retries — channel config overrides will be missing')
+    }, 'Pins fetch failed after retries — will use disk cache if available')
+    this.fetchPinnedFailed = true
     return new Collection<string, Message>()
   }
 
