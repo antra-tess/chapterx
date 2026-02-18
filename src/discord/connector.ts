@@ -548,7 +548,7 @@ export class DiscordConnector {
         pinnedConfigs = params.pinnedConfigs
         logger.debug({ pinnedCount: pinnedConfigs.length }, 'Using pre-fetched pinned configs')
       } else {
-      // Fetch pinned messages for config (cache: false to always get fresh data)
+      // Fetch pinned messages for config
       const pinnedMessages = await this.fetchPinnedWithTimeout(channel, 10000)
       // Sort by ID (oldest first) so newer pins override older ones in merge
       const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
@@ -2207,16 +2207,28 @@ export class DiscordConnector {
 
   /**
    * Fetch pinned messages with a timeout to prevent hanging the event loop.
-   * fetchPinned() can hang indefinitely in some conditions, which blocks
-   * the entire event processing loop. Retries once with a shorter timeout
-   * before giving up. Returns empty collection on final failure to gracefully
-   * degrade (no channel config overrides, but bot still works).
+   * Uses the new fetchPins() API (fetchPinned is deprecated and hangs indefinitely
+   * under certain conditions). Retries once with a shorter timeout before giving up.
+   * Returns empty collection on final failure to gracefully degrade
+   * (no channel config overrides, but bot still works).
    */
   private async fetchPinnedWithTimeout(channel: TextChannel, timeoutMs: number = 10000): Promise<Collection<string, Message>> {
     let currentTimeout = timeoutMs
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      const fetchPromise = channel.messages.fetchPinned(false)
+      const fetchPromise = channel.messages.fetchPins({ cache: false }).then(response => {
+        const messages = new Collection<string, Message>()
+        for (const item of response.items) {
+          messages.set(item.message.id, item.message)
+        }
+        if (response.hasMore) {
+          logger.warn({
+            channelId: channel.id,
+            fetchedCount: response.items.length,
+          }, 'fetchPins returned hasMore=true — some pinned configs may be missing')
+        }
+        return messages
+      })
 
       const timeoutPromise = new Promise<null>((resolve) => {
         setTimeout(() => resolve(null), currentTimeout)
@@ -2229,13 +2241,13 @@ export class DiscordConnector {
         channelId: channel.id,
         timeoutMs: currentTimeout,
         attempt,
-      }, 'fetchPinned timed out — retrying')
+      }, 'fetchPins timed out — retrying')
       currentTimeout = Math.floor(currentTimeout / 2)  // Shorter retry
     }
 
     logger.error({
       channelId: channel.id,
-    }, 'fetchPinned failed after retries — channel config overrides will be missing')
+    }, 'fetchPins failed after retries — channel config overrides will be missing')
     return new Collection<string, Message>()
   }
 
