@@ -2244,11 +2244,20 @@ export class DiscordConnector {
           if (response.status === 429) {
             const retryAfter = parseFloat(response.headers.get('retry-after') || '0')
             const retryMs = retryAfter > 0 ? Math.ceil(retryAfter * 1000) : 2000
+            // Read rate limit diagnostic headers
+            const rateLimitBody = await response.json().catch(() => ({})) as any
             logger.warn({
               channelId: channel.id,
               retryAfterSec: retryAfter,
               retryMs,
               attempt,
+              scope: response.headers.get('x-ratelimit-scope'),
+              bucket: response.headers.get('x-ratelimit-bucket'),
+              limit: response.headers.get('x-ratelimit-limit'),
+              remaining: response.headers.get('x-ratelimit-remaining'),
+              resetAfter: response.headers.get('x-ratelimit-reset-after'),
+              global: rateLimitBody?.global,
+              message: rateLimitBody?.message,
             }, 'Direct pins fetch rate limited — waiting before retry')
             clearTimeout(timer)
             await new Promise(resolve => setTimeout(resolve, retryMs))
