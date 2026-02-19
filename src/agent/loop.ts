@@ -960,23 +960,40 @@ export class AgentLoop {
       }
     }
 
-    // Check API-only mode early (doesn't need channel configs)
-    try {
-      const baseConfig = this.configSystem.loadConfig({
-        botName: this.botId,
-        guildId,
-        channelConfigs: [],
-      })
-      if (baseConfig?.api_only) {
-        logger.debug('API-only mode enabled - skipping activation')
-        return false
+    // Use cached pin configs if available (populated by previous handleActivation calls),
+    // otherwise fall back to base config (shared + guild + bot YAML, no channel overrides).
+    // NEVER hit the pins API here — this is the hot path (every message batch).
+    // Hitting the API triggers Cloudflare 1015 rate limiting on servers with many bots.
+    let config: any = null
+    const loadConfig = () => {
+      if (!config) {
+        try {
+          // Check memory cache for pin configs (instant, no API call)
+          const cachedPins = this.connector.getCachedPinnedConfigs(channelId)
+          let channelConfigs: string[] = []
+          if (cachedPins !== null) {
+            // Use cached pin configs for accurate activation decisions
+            channelConfigs = cachedPins
+          }
+          config = this.configSystem.loadConfig({
+            botName: this.botId,
+            guildId,
+            channelConfigs,
+          })
+        } catch (error) {
+          logger.warn({ error }, 'Failed to load config for activation check')
+          return false
+        }
       }
-    } catch {
-      // Config will be loaded properly below with channel configs
+      return true
     }
 
-    // Full config (with channel overrides) loaded lazily below
-    let config: any = null
+    // Check API-only mode early
+    if (!loadConfig()) return false
+    if (config?.api_only) {
+      logger.debug('API-only mode enabled - skipping activation')
+      return false
+    }
 
     // Check each message event for activation triggers
     for (const event of events) {
@@ -1013,7 +1030,7 @@ export class AgentLoop {
       if (content?.startsWith('m ')) {
         const mentionsUs = this.botUserId && message.mentions?.has(this.botUserId)
         const repliesTo = message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)
-        
+
         if (mentionsUs || repliesTo) {
           logger.debug({ messageId: message.id, command: content, mentionsUs, repliesTo }, 'Activated by m command addressed to us')
           // Store m command event for deletion (only if addressed to us)
@@ -1029,38 +1046,21 @@ export class AgentLoop {
       if (this.botUserId && message.mentions?.has(this.botUserId)) {
         // Check bot reply chain depth to prevent bot loops
         const chainDepth = await this.connector.getBotReplyChainDepth(channelId, message)
-        
-        // Load config if not already loaded (lightweight — pinned configs only, no message fetch)
-        if (!config) {
-          try {
-            const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
-            const inheritedPinnedConfigs = await this.collectPinnedConfigsWithInheritance(
-              channelId,
-              pinnedConfigs
-            )
-            config = this.configSystem.loadConfig({
-              botName: this.botId,
-              guildId,
-              channelConfigs: inheritedPinnedConfigs,
-            })
-          } catch (error) {
-            logger.warn({ error }, 'Failed to load config for chain depth check')
-            return false
-          }
-        }
-        
+
+        if (!loadConfig()) return false
+
         if (chainDepth >= config.max_bot_reply_chain_depth) {
-          logger.info({ 
-            messageId: message.id, 
-            chainDepth, 
-            limit: config.max_bot_reply_chain_depth 
+          logger.info({
+            messageId: message.id,
+            chainDepth,
+            limit: config.max_bot_reply_chain_depth
           }, 'Bot reply chain depth limit reached, blocking activation')
-          
+
           // Add reaction to indicate chain depth limit reached
           await this.connector.addReaction(channelId, message.id, config.bot_reply_chain_depth_emote)
           continue  // Check next event instead of returning false (might be random activation)
         }
-        
+
         logger.debug({ messageId: message.id, chainDepth }, 'Activated by mention')
         return true
       }
@@ -1077,25 +1077,8 @@ export class AgentLoop {
       }
 
       // 4. Random chance activation
-      if (!config) {
-        // Load config once for this batch (lightweight — pinned configs only, no message fetch)
-        try {
-          const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
-          const inheritedPinnedConfigs = await this.collectPinnedConfigsWithInheritance(
-            channelId,
-            pinnedConfigs
-          )
-          config = this.configSystem.loadConfig({
-            botName: this.botId,
-            guildId,
-            channelConfigs: inheritedPinnedConfigs,
-          })
-        } catch (error) {
-          logger.warn({ error }, 'Failed to load config for random check')
-          return false
-        }
-      }
-      
+      if (!loadConfig()) return false
+
       if (config.reply_on_random > 0) {
         const chance = Math.random()
         if (chance < 1 / config.reply_on_random) {

@@ -63,7 +63,6 @@ export class DiscordConnector {
   private messageCachePopulated = new Set<string>()  // channels that had initial API fetch
   private pinnedConfigCache = new Map<string, string[]>()  // channelId → pinned config strings
   private pinnedConfigDirty = new Set<string>()  // channels whose pins changed since last fetch
-  private fetchPinnedFailed = false  // Set when fetchPinnedWithTimeout fails (for disk cache fallback)
 
   // Cache observability and maintenance
   private cacheStats = { hits: 0, misses: 0, apiCalls: 0, evictions: 0 }
@@ -327,15 +326,15 @@ export class DiscordConnector {
       if (!channel || !channel.isTextBased()) {
         return []
       }
-      const pinnedMessages = await this.fetchPinnedWithTimeout(channel, 10000)
+      const { messages: pinnedMessages, failed } = await this.fetchPinnedWithTimeout(channel, 10000)
 
-      // Empty collection could mean either "no pins" or "fetch failed"
-      // If we got messages, treat as authoritative (even if empty — channel may have no configs)
-      if (pinnedMessages.size > 0 || !this.fetchPinnedFailed) {
+      // Only cache if the fetch actually succeeded (not rate limited/timed out).
+      // A successful fetch with 0 pins is valid — channel genuinely has no configs.
+      if (!failed) {
         const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
         const configs = this.extractConfigs(sortedPinned)
 
-        // Store in memory + disk
+        // Store in memory + disk (also clears dirty flag)
         this.cachePinnedConfigs(channelId, configs)
         this.savePinCacheToDisk(channelId, configs)
         logger.debug({ channelId, configCount: configs.length }, 'Pinned config cache miss - fetched from API')
@@ -643,8 +642,8 @@ export class DiscordConnector {
         pinnedConfigs = params.pinnedConfigs
         logger.debug({ pinnedCount: pinnedConfigs.length }, 'Using pre-fetched pinned configs')
       } else {
-      // Fetch pinned messages for config
-      const pinnedMessages = await this.fetchPinnedWithTimeout(channel, 10000)
+      // Fetch pinned messages for config (fallback path — handleActivation normally pre-fetches)
+      const { messages: pinnedMessages } = await this.fetchPinnedWithTimeout(channel, 10000)
       // Sort by ID (oldest first) so newer pins override older ones in merge
       const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
       logger.debug({ pinnedCount: pinnedMessages.size, pinnedIds: sortedPinned.map(m => m.id) }, 'Fetched pinned messages (sorted oldest-first)')
@@ -2114,12 +2113,12 @@ export class DiscordConnector {
 
   /**
    * Get cached pinned configs, or null if cache is empty/dirty.
+   * Does NOT clear the dirty flag — that only happens on successful API fetch
+   * (via cachePinnedConfigs). This ensures failed refetches don't lose dirty state.
    */
   getCachedPinnedConfigs(channelId: string): string[] | null {
     if (this.pinnedConfigDirty.has(channelId)) {
-      this.pinnedConfigDirty.delete(channelId)
-      this.pinnedConfigCache.delete(channelId)
-      return null
+      return null  // Force refetch, but keep dirty flag until API succeeds
     }
     return this.pinnedConfigCache.get(channelId) || null
   }
@@ -2305,17 +2304,16 @@ export class DiscordConnector {
    * Bypasses discord.js REST manager entirely (it hangs on pins endpoints due to
    * Cloudflare Error 1015 rate limiting on servers with many bots sharing one IP).
    * Uses native fetch() to the Discord API directly with AbortController timeout.
-   * On 429/failure, sets fetchPinnedFailed flag so caller can fall back to disk cache.
+   * Returns { messages, failed } so caller can distinguish "no pins" from "fetch failed".
    * Does NOT wait on rate limits — falls through immediately to disk cache instead.
    */
-  private async fetchPinnedWithTimeout(channel: TextChannel, timeoutMs: number = 10000): Promise<Collection<string, Message>> {
-    this.fetchPinnedFailed = false
+  private async fetchPinnedWithTimeout(channel: TextChannel, timeoutMs: number = 10000): Promise<{ messages: Collection<string, Message>, failed: boolean }> {
+    const empty = new Collection<string, Message>()
 
     const token = this.client.token
     if (!token) {
       logger.error({ channelId: channel.id }, 'No bot token available for direct pins fetch')
-      this.fetchPinnedFailed = true
-      return new Collection<string, Message>()
+      return { messages: empty, failed: true }
     }
 
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -2346,8 +2344,7 @@ export class DiscordConnector {
               attempt,
               server: response.headers.get('server'),
             }, 'Pins fetch rate limited (Cloudflare 1015) — falling back to disk cache')
-            this.fetchPinnedFailed = true
-            return new Collection<string, Message>()
+            return { messages: empty, failed: true }
           }
           logger.warn({
             channelId: channel.id,
@@ -2375,7 +2372,7 @@ export class DiscordConnector {
           count: messages.size,
           attempt,
         }, 'Fetched pinned messages via direct API')
-        return messages
+        return { messages, failed: false }
       } catch (error: any) {
         clearTimeout(timer)
         if (error.name === 'AbortError') {
@@ -2397,8 +2394,7 @@ export class DiscordConnector {
     logger.error({
       channelId: channel.id,
     }, 'Pins fetch failed after retries — will use disk cache if available')
-    this.fetchPinnedFailed = true
-    return new Collection<string, Message>()
+    return { messages: empty, failed: true }
   }
 
   private extractConfigs(messages: Message[]): string[] {
