@@ -2211,12 +2211,36 @@ export class DiscordConnector {
     })
 
     this.client.on('channelPinsUpdate', (channel) => {
-      // Mark pinned config cache as dirty for this channel
+      // Proactively fetch new pins on gateway event (like Chapter2).
+      // This is safe because pin updates are rare (someone manually pinning/unpinning),
+      // unlike the old shouldActivate path which hit the API on every message batch.
+      // Small random jitter (0-2s) prevents 80+ bots from fetching simultaneously.
       const channelId = (channel as any).id
-      if (channelId) {
-        this.pinnedConfigDirty.add(channelId)
-        logger.debug({ channelId }, 'Pinned messages updated, cache invalidated')
-      }
+      if (!channelId) return
+
+      const jitterMs = Math.random() * 2000
+      setTimeout(async () => {
+        try {
+          const ch = await this.client.channels.fetch(channelId) as TextChannel
+          if (!ch || !ch.isTextBased()) return
+
+          const { messages: pinnedMessages, failed } = await this.fetchPinnedWithTimeout(ch, 10000)
+          if (!failed) {
+            const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
+            const configs = this.extractConfigs(sortedPinned)
+            this.cachePinnedConfigs(channelId, configs)
+            this.savePinCacheToDisk(channelId, configs)
+            logger.info({ channelId, configCount: configs.length }, 'Pinned configs refreshed via gateway event')
+          } else {
+            // API failed (e.g., Cloudflare 429) — mark dirty so handleActivation retries
+            this.pinnedConfigDirty.add(channelId)
+            logger.warn({ channelId }, 'Pins gateway refresh failed — marked dirty for retry')
+          }
+        } catch (error) {
+          this.pinnedConfigDirty.add(channelId)
+          logger.warn({ error, channelId }, 'Pins gateway refresh error — marked dirty for retry')
+        }
+      }, jitterMs)
     })
   }
 
