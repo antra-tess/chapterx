@@ -222,6 +222,12 @@ export interface MembraneFactoryConfig {
   };
 
   /**
+   * Maximum retry attempts for LLM calls (default: 0 = no retries).
+   * Rate limit (429) errors always retry regardless of this setting.
+   */
+  retries?: number;
+
+  /**
    * Enable debug logging
    */
   debug?: boolean;
@@ -839,6 +845,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
     formatter,
     hooks: createTracingHooks() as any,
     debug: config.debug,
+    retry: config.retries != null ? { maxRetries: config.retries } : undefined,
   };
 
   // Create and return Membrane instance
@@ -917,6 +924,7 @@ export function createMembraneFromVendorConfigs(
     formatter?: FormatterType;
     completionsConfig?: MembraneFactoryConfig['completionsConfig'];
     maxParticipantsForStop?: number;
+    retries?: number;
   }
 ): Membrane {
   // Reset formatter routes before processing vendors (adapter routes are reset in createMembrane)
@@ -1155,6 +1163,7 @@ export function createMembraneFromVendorConfigs(
     formatter: finalFormatter,
     completionsConfig: finalCompletionsConfig,
     maxParticipantsForStop: options?.maxParticipantsForStop,
+    retries: options?.retries,
   });
 }
 

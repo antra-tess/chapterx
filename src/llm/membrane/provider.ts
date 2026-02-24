@@ -71,8 +71,10 @@ export class MembraneProvider {
     try {
       const normalizedRequest = toMembraneRequest(request);
 
-      // Determine formatter: per-model config > default (undefined)
-      const formatterType = getFormatterForModel(request.config.model);
+      // Determine formatter: per-model config > smart default by model name
+      // Claude models default to prefill (anthropic-xml), everything else defaults to native (chat)
+      const formatterType = getFormatterForModel(request.config.model)
+        ?? (request.config.model.startsWith('claude-') ? 'anthropic-xml' : 'native');
       const formatter = formatterType === 'native'
         ? new NativeFormatter()
         : formatterType === 'anthropic-xml'
@@ -81,9 +83,7 @@ export class MembraneProvider {
             ? new CompletionsFormatter()
             : undefined;
 
-      if (formatter) {
-        logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter override for model');
-      }
+      logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter for model');
 
       // Cast to any because our local types may not exactly match membrane's updated types
       const response = await this.membrane.complete(normalizedRequest as any, {
@@ -192,8 +192,10 @@ export class MembraneProvider {
     const llmResponseRefs: string[] = [];
 
     try {
-      // Determine formatter: explicit override > per-model config > default (undefined)
-      const formatterType = options.formatterOverride ?? getFormatterForModel(request.config.model);
+      // Determine formatter: explicit override > per-model config > smart default by model name
+      const formatterType = options.formatterOverride
+        ?? getFormatterForModel(request.config.model)
+        ?? (request.config.model.startsWith('claude-') ? 'anthropic-xml' : 'native');
       const formatter = formatterType === 'native'
         ? new NativeFormatter()
         : formatterType === 'anthropic-xml'
@@ -202,9 +204,7 @@ export class MembraneProvider {
             ? new CompletionsFormatter()
             : undefined;
 
-      if (formatterType) {
-        logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter override for model');
-      }
+      logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter for model');
 
       // Cast to any because our local types may not exactly match membrane's updated types
       const streamOptions: any = {

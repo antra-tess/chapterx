@@ -151,7 +151,9 @@ async function main() {
       agentLoop.setMembrane(new MockMembrane() as any)
       logger.info('Using MockMembrane (MOCK_LLM=1) - no real LLM calls')
     } else {
-      const membrane = createMembraneFromVendorConfigs(vendorConfigs, membraneAssistantName)
+      const membrane = createMembraneFromVendorConfigs(vendorConfigs, membraneAssistantName, {
+        retries: botConfigOnly.llm_retries,
+      })
       agentLoop.setMembrane(membrane)
       logger.info({ assistantName: membraneAssistantName }, 'Membrane initialized for agent loop')
     }
