@@ -1176,59 +1176,48 @@ export class AgentLoop {
       endProfile('fetchContext')
 
       // Cache stability: maintain a consistent starting point for prompt caching
-      // Skip if prompt caching is disabled
+      // Note: fetch overshoot trimming is now handled in fetchContext Stage 3.
+      // This block only handles anchor initialization, resets, and expansion.
       if (promptCachingEnabled) {
         const cacheOldestId = state.cacheOldestMessageId
         const fetchedOldestId = discordContext.messages[0]?.id
 
-        // If .history clear was used, reset cache marker to the new oldest message
-        // This prevents the next activation from extending backwards past the clear boundary
         if (discordContext.inheritanceInfo?.historyDidClear && fetchedOldestId) {
+          // .history clear → reset anchor to the new context boundary
           logger.debug({
             oldCacheMarker: cacheOldestId,
             newCacheMarker: fetchedOldestId,
-          }, 'Resetting cache marker after .history clear')
+          }, 'Resetting cache anchor after .history clear')
           this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
         } else if (!cacheOldestId && fetchedOldestId) {
-          // First activation - set cache marker to oldest fetched message
+          // First activation → initialize anchor
           this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
-          logger.debug({ channelId, oldestMessageId: fetchedOldestId }, 'Initialized cached starting point for cache stability')
+          logger.debug({ channelId, oldestMessageId: fetchedOldestId }, 'Initialized cache anchor for prompt stability')
         } else if (cacheOldestId && fetchedOldestId) {
           const cacheIdx = discordContext.messages.findIndex(m => m.id === cacheOldestId)
-          const historyWasUsed = !!discordContext.inheritanceInfo?.historyOriginChannelId
-          
-          if (cacheIdx > 0 && historyWasUsed) {
-            // .history command brought in older context - expand cache marker to include it
-            // This is expected behavior: .history intentionally loads historical messages
+
+          if (cacheIdx > 0) {
+            // Context is older than anchor — .history brought in historical messages.
+            // (Non-.history overshoot was already trimmed by fetchContext Stage 3.)
+            // Expand anchor to include the new older context.
             logger.debug({
               oldCacheMarker: cacheOldestId,
               newCacheMarker: fetchedOldestId,
               olderMessagesIncluded: cacheIdx,
-              historyOrigin: discordContext.inheritanceInfo?.historyOriginChannelId,
-            }, 'Expanding cache marker to include .history context')
+            }, 'Expanding cache anchor to include .history context')
             this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
-          } else if (cacheIdx > 0) {
-            // No .history used, but fetch overshot - trim older messages for cache stability
-            // This is overshoot from connector's batch fetching, not intentional context expansion
-            logger.debug({
-              cacheMarker: cacheOldestId,
-              fetchedOldest: fetchedOldestId,
-              trimmingCount: cacheIdx,
-              totalBefore: discordContext.messages.length,
-            }, 'Trimming fetch overshoot to maintain cache stability')
-            discordContext.messages = discordContext.messages.slice(cacheIdx)
           } else if (cacheIdx === -1) {
-            // Cached oldest message no longer in fetch - cache stability is broken
+            // Anchor message deleted or out of range → reset
             logger.warn({
               cacheOldestId,
               fetchedMessages: discordContext.messages.length,
-            }, 'Cached oldest message not found in fetch - resetting cached starting point')
+            }, 'Cache anchor not found in fetch — resetting')
             this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
           }
-          // If cacheIdx === 0, the cache marker is at the start - perfect, no action needed
+          // cacheIdx === 0 → perfect alignment, no action needed
         }
       } else {
-        logger.debug({ channelId }, 'Prompt caching disabled - skipping cache marker logic')
+        logger.debug({ channelId }, 'Prompt caching disabled — skipping cache anchor logic')
       }
       
       // Record raw Discord messages to trace (before any transformation)

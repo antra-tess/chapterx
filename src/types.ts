@@ -437,6 +437,8 @@ export interface DiscordContext {
     historyOriginChannelId?: string
     /** Whether .history clear was used to truncate context */
     historyDidClear?: boolean
+    /** Whether context was trimmed to the cache anchor (overshoot correction) */
+    cacheAnchorTrimmed?: boolean
   }
 }
 
