@@ -287,7 +287,17 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
  * - Direct claude-* models → xml (Anthropic prefill mode)
  * - Other models → native (likely going through OpenRouter)
  */
-export function resolveToolModeForModel(modelName: string): ToolMode {
+export function resolveToolModeForModel(
+  modelName: string,
+  mode?: 'chat' | 'prefill' | 'base-model'
+): ToolMode {
+  // Config mode takes precedence when explicitly set
+  if (mode === 'chat') return 'native';
+  if (mode === 'prefill') return 'xml';
+  if (mode === 'base-model') return 'native';
+
+  // Fall back to model-name heuristics when mode is not set
+
   // Check per-model formatter routes first (e.g., claude-opus-4-6 → native)
   const formatterOverride = getFormatterForModel(modelName);
   if (formatterOverride === 'native') {
@@ -342,7 +352,7 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     tools: request.tools?.map(toMembraneToolDefinition),
     // Explicitly set tool mode based on model to work around RoutingAdapter issue
     // Membrane's auto-detection checks adapter.name which is 'routing' for RoutingAdapter
-    toolMode: resolveToolModeForModel(request.config.model),
+    toolMode: resolveToolModeForModel(request.config.model, request.config.mode),
     // Control participant-based stop sequences:
     // - If participant_stop_sequences is false (default), disable them (set to 0)
     // - If participant_stop_sequences is true, use membrane default (don't set)

@@ -20,6 +20,21 @@ import { getFormatterForModel } from './factory.js';
 import { NativeFormatter, AnthropicXmlFormatter, CompletionsFormatter } from '@animalabs/membrane';
 
 // ============================================================================
+// Mode → Formatter Mapping
+// ============================================================================
+
+/**
+ * Resolve formatter type from explicit config mode.
+ * Returns undefined when mode is not set, falling back to model-name heuristics.
+ */
+function formatterFromMode(mode?: string): 'native' | 'anthropic-xml' | 'completions' | undefined {
+  if (mode === 'chat') return 'native';
+  if (mode === 'prefill') return 'anthropic-xml';
+  if (mode === 'base-model') return 'completions';
+  return undefined;
+}
+
+// ============================================================================
 // Membrane Interface (local definition until package is installed)
 // ============================================================================
 
@@ -71,9 +86,9 @@ export class MembraneProvider {
     try {
       const normalizedRequest = toMembraneRequest(request);
 
-      // Determine formatter: per-model config > smart default by model name
-      // Claude models default to prefill (anthropic-xml), everything else defaults to native (chat)
-      const formatterType = getFormatterForModel(request.config.model)
+      // Determine formatter: config mode > per-model config > smart default by model name
+      const formatterType = formatterFromMode(request.config.mode)
+        ?? getFormatterForModel(request.config.model)
         ?? (request.config.model.startsWith('claude-') ? 'anthropic-xml' : 'native');
       const formatter = formatterType === 'native'
         ? new NativeFormatter()
@@ -192,8 +207,9 @@ export class MembraneProvider {
     const llmResponseRefs: string[] = [];
 
     try {
-      // Determine formatter: explicit override > per-model config > smart default by model name
+      // Determine formatter: explicit override > config mode > per-model config > smart default by model name
       const formatterType = options.formatterOverride
+        ?? formatterFromMode(request.config.mode)
         ?? getFormatterForModel(request.config.model)
         ?? (request.config.model.startsWith('claude-') ? 'anthropic-xml' : 'native');
       const formatter = formatterType === 'native'

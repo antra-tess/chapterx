@@ -1572,9 +1572,9 @@ export class AgentLoop {
       // 6. Call LLM (with tool execution)
       startProfile('llmCall')
 
-      // Route to native tool execution for non-Claude models
+      // Route to native or inline tool execution based on config mode (or model name fallback)
       const hasTools = config.tools_enabled && (contextResult.request.tools?.length ?? 0) > 0
-      const toolMode = resolveToolModeForModel(config.continuation_model)
+      const toolMode = resolveToolModeForModel(config.continuation_model, config.mode)
 
       let executionResult: {
         completion: any;

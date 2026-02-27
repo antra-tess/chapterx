@@ -139,6 +139,7 @@ export interface ModelConfig {
   participant_stop_sequences?: boolean  // If true, membrane generates stop sequences from participant names (default: false)
   generate_images?: boolean  // If true, set responseModalities for image generation (overrides auto-detect from model name)
   provider_params?: Record<string, unknown>  // Arbitrary params passed through to the LLM provider (e.g., reasoning config)
+  mode?: 'chat' | 'prefill' | 'base-model'  // Bot mode — controls formatter and execution path routing
 }
 
 /**

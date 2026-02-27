@@ -1752,6 +1752,7 @@ export class ContextBuilder {
       participant_stop_sequences: config.participant_stop_sequences,
       generate_images: config.generate_images,
       provider_params: config.provider_params,
+      mode: config.mode,
     }
   }
 }
