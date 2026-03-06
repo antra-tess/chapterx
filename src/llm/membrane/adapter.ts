@@ -285,6 +285,7 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
  * Rules:
  * - Models with provider prefix (e.g., "anthropic/claude-3-opus") → native (OpenRouter)
  * - Direct claude-* models → xml (Anthropic prefill mode)
+ * - Bedrock claude models (anthropic.*) → xml (Anthropic prefill mode)
  * - Other models → native (likely going through OpenRouter)
  */
 export function resolveToolModeForModel(
@@ -312,8 +313,9 @@ export function resolveToolModeForModel(
     return 'native';
   }
 
-  // Direct Claude models use XML tools for prefill compatibility
-  if (modelName.startsWith('claude-')) {
+  // Claude models use XML tools for prefill compatibility
+  // Includes Bedrock model IDs (anthropic.claude-*) which are still Claude under the hood
+  if (modelName.startsWith('claude-') || modelName.startsWith('anthropic.')) {
     return 'xml';
   }
 

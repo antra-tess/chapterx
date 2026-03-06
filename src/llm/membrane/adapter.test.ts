@@ -770,8 +770,21 @@ describe('Edge Cases: Model-specific Tool Mode Selection', () => {
       'claude-2.1',
       'claude-instant-1.2',
     ];
-    
+
     for (const model of claudeModels) {
+      expect(resolveToolModeForModel(model)).toBe('xml');
+    }
+  });
+
+  it('should return xml for Bedrock Claude model IDs', () => {
+    const bedrockModels = [
+      'anthropic.claude-3-5-haiku-20241022-v1:0',
+      'anthropic.claude-3-5-sonnet-20241022-v2:0',
+      'anthropic.claude-3-opus-20240229-v1:0',
+      'anthropic.claude-v2:1',
+    ];
+
+    for (const model of bedrockModels) {
       expect(resolveToolModeForModel(model)).toBe('xml');
     }
   });
