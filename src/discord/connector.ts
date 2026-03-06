@@ -3,8 +3,8 @@
  * Handles all Discord API interactions
  */
 
-import { Attachment, Client, GatewayIntentBits, Message, TextChannel } from 'discord.js'
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
+import { Attachment, Client, Collection, GatewayIntentBits, Message, PermissionFlagsBits, OAuth2Scopes, TextChannel } from 'discord.js'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
 import sharp from 'sharp'
@@ -22,10 +22,22 @@ import { retryDiscord } from '../utils/retry.js'
 export interface ConnectorOptions {
   token: string
   cacheDir: string
+  pinCacheDir?: string  // Directory for persisting pinned config cache to disk
   maxBackoffMs: number
 }
 
 const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
+
+/** Extract a Unix timestamp (ms) from a Discord snowflake ID */
+function snowflakeToTimestamp(id: string): number {
+  const DISCORD_EPOCH = 1420070400000
+  return Number(BigInt(id) >> 22n) + DISCORD_EPOCH
+}
+
+interface FetchHistoryState {
+  originChannelId: string | null
+  didClear: boolean
+}
 
 export interface FetchContextParams {
   channelId: string
@@ -44,6 +56,18 @@ export class DiscordConnector {
   private imageCache = new Map<string, CachedImage>()
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
   private urlMapPath: string  // Path to URL map file
+
+  // Push-based caches (populated from gateway events, avoids API fetches)
+  private messageCache = new Map<string, (Message | null)[]>()  // channelId → messages (chronological, nulls are tombstones)
+  private messageCacheIndex = new Map<string, Map<string, number>>()  // channelId → (messageId → array index)
+  private messageCachePopulated = new Set<string>()  // channels that had initial API fetch
+  private pinnedConfigCache = new Map<string, string[]>()  // channelId → pinned config strings
+  private pinnedConfigDirty = new Set<string>()  // channels whose pins changed since last fetch
+
+  // Cache observability and maintenance
+  private cacheStats = { hits: 0, misses: 0, apiCalls: 0, evictions: 0 }
+  private cacheStatsInterval?: NodeJS.Timeout
+  private evictionInterval?: NodeJS.Timeout
 
   constructor(
     private queue: EventQueue,
@@ -68,6 +92,58 @@ export class DiscordConnector {
     // Load URL to filename map for persistent disk cache
     this.urlMapPath = join(options.cacheDir, 'url-map.json')
     this.loadUrlMap()
+
+    // Initialize disk-based pin cache directory
+    if (options.pinCacheDir) {
+      if (!existsSync(options.pinCacheDir)) {
+        mkdirSync(options.pinCacheDir, { recursive: true })
+      }
+      this.loadPinCacheFromDisk()
+    }
+  }
+
+  /**
+   * Load all persisted pin caches from disk into memory on startup.
+   */
+  private loadPinCacheFromDisk(): void {
+    const dir = this.options.pinCacheDir
+    if (!dir || !existsSync(dir)) return
+
+    try {
+      const files = readdirSync(dir).filter(f => f.endsWith('.json'))
+      let loaded = 0
+      for (const file of files) {
+        try {
+          const channelId = file.replace('.json', '')
+          const data = JSON.parse(readFileSync(join(dir, file), 'utf-8'))
+          if (Array.isArray(data)) {
+            this.pinnedConfigCache.set(channelId, data)
+            loaded++
+          }
+        } catch {
+          // Skip corrupted files
+        }
+      }
+      if (loaded > 0) {
+        logger.info({ loaded, dir }, 'Loaded pinned config cache from disk')
+      }
+    } catch (error) {
+      logger.warn({ error, dir }, 'Failed to read pin cache directory')
+    }
+  }
+
+  /**
+   * Persist pinned configs for a channel to disk.
+   */
+  private savePinCacheToDisk(channelId: string, configs: string[]): void {
+    const dir = this.options.pinCacheDir
+    if (!dir) return
+
+    try {
+      writeFileSync(join(dir, `${channelId}.json`), JSON.stringify(configs), 'utf-8')
+    } catch (error) {
+      logger.warn({ error, channelId }, 'Failed to write pin cache to disk')
+    }
   }
   
   /**
@@ -110,6 +186,22 @@ export class DiscordConnector {
     try {
       await this.client.login(this.options.token)
       logger.info({ userId: this.client.user?.id, tag: this.client.user?.tag }, 'Discord connector started')
+
+      // Periodic cache stats logging
+      this.cacheStatsInterval = setInterval(() => {
+        if (this.cacheStats.hits + this.cacheStats.misses > 0) {
+          const hitRate = this.cacheStats.hits / (this.cacheStats.hits + this.cacheStats.misses)
+          logger.info({
+            ...this.cacheStats,
+            hitRate: hitRate.toFixed(3),
+            channels: this.messageCache.size,
+            totalMessages: Array.from(this.messageCache.values()).reduce((sum, msgs) => sum + msgs.filter(m => m !== null).length, 0),
+          }, 'Message cache stats')
+        }
+      }, 5 * 60 * 1000)
+
+      // Periodic cache eviction (compact tombstones, cap per-channel size)
+      this.evictionInterval = setInterval(() => this.evictStaleMessages(), 5 * 60 * 1000)
     } catch (error) {
       logger.error({ error }, 'Failed to start Discord connector')
       throw new DiscordError('Failed to connect to Discord', error)
@@ -131,6 +223,65 @@ export class DiscordConnector {
   }
 
   /**
+   * Generate a bot invite URL with required permissions
+   * 
+   * Default permissions include everything needed for a typical ChapterX bot:
+   * - View channels, read message history, send messages
+   * - Manage messages (for editing own messages, deleting in some cases)
+   * - Add reactions, use external emojis
+   * - Attach files, embed links
+   * - Use slash commands
+   */
+  generateInviteUrl(options?: {
+    /** Override default permissions (bigint or array of permission flags) */
+    permissions?: bigint | (keyof typeof PermissionFlagsBits)[];
+    /** Pre-select a specific guild */
+    guildId?: string;
+    /** Disable guild selection (only works with guildId) */
+    disableGuildSelect?: boolean;
+  }): string | undefined {
+    if (!this.client.user) {
+      return undefined
+    }
+
+    // Default permissions for ChapterX bots
+    const defaultPermissions = [
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.SendMessages,
+      PermissionFlagsBits.SendMessagesInThreads,
+      PermissionFlagsBits.ReadMessageHistory,
+      PermissionFlagsBits.ManageMessages,
+      PermissionFlagsBits.AddReactions,
+      PermissionFlagsBits.UseExternalEmojis,
+      PermissionFlagsBits.AttachFiles,
+      PermissionFlagsBits.EmbedLinks,
+    ].reduce((acc, perm) => acc | perm, 0n)
+
+    // Calculate permissions
+    let permissions: bigint
+    if (options?.permissions) {
+      if (typeof options.permissions === 'bigint') {
+        permissions = options.permissions
+      } else {
+        // Array of permission names
+        permissions = options.permissions.reduce(
+          (acc, name) => acc | PermissionFlagsBits[name],
+          0n
+        )
+      }
+    } else {
+      permissions = defaultPermissions
+    }
+
+    return this.client.generateInvite({
+      scopes: [OAuth2Scopes.Bot, OAuth2Scopes.ApplicationsCommands],
+      permissions,
+      guild: options?.guildId,
+      disableGuildSelect: options?.disableGuildSelect,
+    })
+  }
+
+  /**
    * Get channel name by ID (for display purposes)
    */
   async getChannelName(channelId: string): Promise<string | undefined> {
@@ -142,23 +293,92 @@ export class DiscordConnector {
     }
   }
 
+  async getChannelMeta(channelId: string): Promise<{ name?: string; isThread: boolean; parentChannelId?: string }> {
+    try {
+      const channel = await this.client.channels.fetch(channelId)
+      if (!channel) return { isThread: false }
+      const isThread = 'isThread' in channel && typeof channel.isThread === 'function' ? channel.isThread() : false
+      return {
+        name: 'name' in channel ? (channel.name as string) || undefined : undefined,
+        isThread,
+        parentChannelId: isThread && 'parentId' in channel ? (channel.parentId as string) || undefined : undefined,
+      }
+    } catch {
+      return { isThread: false }
+    }
+  }
+
   /**
    * Fetch just pinned configs from a channel (fast - single API call)
-   * Used to load config BEFORE determining fetch depth
+   * Used to load config BEFORE determining fetch depth.
+   * Falls back to disk cache if API call fails (e.g. Cloudflare 429).
    */
   async fetchPinnedConfigs(channelId: string): Promise<string[]> {
+    // Check push-based memory cache first
+    const cached = this.getCachedPinnedConfigs(channelId)
+    if (cached !== null) {
+      logger.debug({ channelId }, 'Pinned config cache hit')
+      return cached
+    }
+
     try {
       const channel = await this.client.channels.fetch(channelId) as TextChannel
       if (!channel || !channel.isTextBased()) {
         return []
       }
-      const pinnedMessages = await channel.messages.fetchPinned(false)
-      const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
-      return this.extractConfigs(sortedPinned)
+      const { messages: pinnedMessages, failed } = await this.fetchPinnedWithTimeout(channel, 10000)
+
+      // Only cache if the fetch actually succeeded (not rate limited/timed out).
+      // A successful fetch with 0 pins is valid — channel genuinely has no configs.
+      if (!failed) {
+        const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
+        const configs = this.extractConfigs(sortedPinned)
+
+        // Store in memory + disk (also clears dirty flag)
+        this.cachePinnedConfigs(channelId, configs)
+        this.savePinCacheToDisk(channelId, configs)
+        logger.debug({ channelId, configCount: configs.length }, 'Pinned config cache miss - fetched from API')
+
+        return configs
+      }
+
+      // Fetch failed (timeout/429) — fall back to disk cache
+      return this.loadPinCacheForChannel(channelId)
     } catch (error) {
       logger.warn({ error, channelId }, 'Failed to fetch pinned configs')
-      return []
+      return this.loadPinCacheForChannel(channelId)
     }
+  }
+
+  /**
+   * Load pinned configs for a single channel from disk cache.
+   * Returns empty array if no disk cache exists.
+   */
+  private loadPinCacheForChannel(channelId: string): string[] {
+    // Check if memory was populated from disk on startup
+    const memCached = this.pinnedConfigCache.get(channelId)
+    if (memCached) {
+      logger.info({ channelId, configCount: memCached.length }, 'Using disk-cached pinned configs (API unavailable)')
+      return memCached
+    }
+
+    // Try reading directly from disk
+    const dir = this.options.pinCacheDir
+    if (!dir) return []
+    const filePath = join(dir, `${channelId}.json`)
+    if (!existsSync(filePath)) return []
+
+    try {
+      const data = JSON.parse(readFileSync(filePath, 'utf-8'))
+      if (Array.isArray(data)) {
+        this.pinnedConfigCache.set(channelId, data)
+        logger.info({ channelId, configCount: data.length }, 'Loaded pinned configs from disk fallback')
+        return data
+      }
+    } catch {
+      // Corrupted file
+    }
+    return []
   }
 
   /**
@@ -189,9 +409,8 @@ export class DiscordConnector {
         throw new DiscordError(`Channel ${channelId} not found or not text-based`)
       }
 
-      // Reset history trackers for this fetch
-      this.lastHistoryOriginChannelId = null
-      this.lastHistoryDidClear = false
+      // Per-call history state (replaces old instance variables to avoid cross-channel leaks)
+      const historyState: FetchHistoryState = { originChannelId: null, didClear: false }
 
       // Use recursive fetch with automatic .history processing
       // Note: Don't pass firstMessageId to recursive call - each .history has its own boundaries
@@ -211,47 +430,92 @@ export class DiscordConnector {
         undefined,  // Let .history commands define their own boundaries
         depth,
         authorized_roles,
-        ignoreHistory
+        ignoreHistory,
+        historyState
       )
       endProfile('messagesFetch')
       
       // For threads: implicitly fetch parent channel context up to the branching point
       // This happens even without an explicit .history message
       // Skip if .history explicitly cleared context
-      if (channel.isThread() && this.lastHistoryDidClear) {
+      // Track parent channel for cache anchor extension (needed if anchor is in parent context)
+      let threadParentChannel: TextChannel | undefined = undefined
+      let threadStartMessageId: string | undefined = undefined
+      
+      if (channel.isThread() && historyState.didClear) {
         logger.debug('Skipping parent context fetch - .history cleared context')
       } else if (channel.isThread()) {
         startProfile('threadParentFetch')
         const thread = channel as any  // Discord.js ThreadChannel
-        const parentChannel = thread.parent as TextChannel
-        const threadStartMessageId = thread.id  // Thread ID is the same as the message ID that started it
-        
-        if (parentChannel && parentChannel.isTextBased()) {
+        threadParentChannel = thread.parent as TextChannel
+        threadStartMessageId = thread.id  // Thread ID is the same as the message ID that started it
+
+        if (threadParentChannel && threadParentChannel.isTextBased()) {
           logger.debug({
             threadId: thread.id,
-            parentChannelId: parentChannel.id,
+            parentChannelId: threadParentChannel.id,
             threadStartMessageId,
             currentMessageCount: messages.length,
             remainingDepth: depth - messages.length
           }, 'Thread detected, fetching parent channel context')
-          
+
+          // Use a SEPARATE historyState for the parent fetch.
+          // A .history clear in the parent channel should truncate parent messages (which
+          // fetchMessagesRecursive handles internally), but should NOT:
+          //   1. Suppress cache stability extension for the thread (line ~411)
+          //   2. Reset the thread's cacheOldestMessageId in loop.ts
+          // Previously, sharing historyState caused parent .history clears to corrupt
+          // thread-level cache anchors, leading to context shuffling on subsequent activations.
+          const parentHistoryState: FetchHistoryState = { originChannelId: null, didClear: false }
+
           // Fetch from parent channel up to (and including) the thread's starting message
           const parentMessages = await this.fetchMessagesRecursive(
-            parentChannel,
+            threadParentChannel,
             threadStartMessageId,  // End at the message that started the thread
             undefined,
             Math.max(0, depth - messages.length),  // Remaining message budget
             authorized_roles,
-            ignoreHistory
+            ignoreHistory,
+            parentHistoryState
           )
           
           logger.debug({
             parentMessageCount: parentMessages.length,
             threadMessageCount: messages.length
           }, 'Fetched parent context for thread')
-          
+
+          // Ensure thread starter message is included in parent context.
+          // fetchMessagesRecursive fetches messages BEFORE startFromId then appends the
+          // startFromId message itself — but when the starter is the first message in the
+          // channel, the "before" fetch returns empty and breaks before reaching that append.
+          if (threadStartMessageId && !parentMessages.some(m => m.id === threadStartMessageId)) {
+            try {
+              const starterMsg = await this.cachedFetchMessages(threadParentChannel, threadStartMessageId)
+              if (starterMsg) {
+                parentMessages.push(starterMsg as Message)
+                logger.debug({ threadStartMessageId }, 'Explicitly added missing thread starter to parent context')
+              }
+            } catch (error) {
+              logger.warn({ error, threadStartMessageId }, 'Failed to fetch thread starter message')
+            }
+          }
+
           // Prepend parent messages (they're older than thread messages)
           messages = [...parentMessages, ...messages]
+
+          // Propagate parent's .history origin for plugin state inheritance,
+          // but do NOT propagate didClear — that only applies to parent context,
+          // not to the thread's cache stability or ChannelState decisions.
+          if (parentHistoryState.originChannelId && !historyState.originChannelId) {
+            historyState.originChannelId = parentHistoryState.originChannelId
+          }
+
+          if (parentHistoryState.didClear) {
+            logger.debug({
+              parentChannelId: threadParentChannel.id,
+              threadId: thread.id,
+            }, 'Parent channel had .history clear — parent messages truncated but thread state unaffected')
+          }
         }
         endProfile('threadParentFetch')
       }
@@ -260,78 +524,109 @@ export class DiscordConnector {
       // This ensures cache stability - we fetch back far enough to include the cached portion
       // If firstMessageId is specified, ensure it's included by extending fetch if needed
       // NEVER trim data - cache stability should only ADD data, not remove it
-      // BUT: Skip if .history cleared context - the cache marker may be intentionally excluded
-      if (firstMessageId && this.lastHistoryDidClear) {
-        logger.debug({
-          firstMessageId,
-          currentMessageCount: messages.length
-        }, 'Skipping cache marker extension - .history cleared context')
-      } else if (firstMessageId) {
+      let activeFirstMessageId = firstMessageId  // Mutable — may be cleared by temporal check
+      if (activeFirstMessageId && !historyState.didClear) {
         logger.debug({
           currentMessageCount: messages.length,
-          lookingFor: firstMessageId
+          lookingFor: activeFirstMessageId
         }, 'Checking if cache marker is in fetch window')
-        
-        let firstIndex = messages.findIndex(m => m.id === firstMessageId)
-        
+
+        let firstIndex = messages.findIndex(m => m.id === activeFirstMessageId)
+
         // If not found, extend fetch backwards until we find it (or hit limit)
         const oldestMessage = messages[0]
+
+        // Temporal sanity check: if the anchor is much older than the natural
+        // fetch window, don't extend — it's from a different conversation era
+        // and would create a feedback loop with hard-limit truncation.
         if (firstIndex < 0 && oldestMessage) {
+          const anchorTs = snowflakeToTimestamp(activeFirstMessageId)
+          const oldestTs = snowflakeToTimestamp(oldestMessage.id)
+          const gapMs = oldestTs - anchorTs
+          const MAX_ANCHOR_GAP_MS = 24 * 60 * 60 * 1000  // 24 hours
+
+          if (gapMs > MAX_ANCHOR_GAP_MS) {
+            logger.warn({
+              firstMessageId: activeFirstMessageId,
+              oldestNaturalId: oldestMessage.id,
+              gapHours: Math.round(gapMs / (60 * 60 * 1000)),
+            }, 'Cache anchor too old relative to natural window — skipping extension to prevent feedback loop')
+            // Don't extend. loop.ts will detect cacheIdx === -1 and reset the anchor.
+            activeFirstMessageId = undefined
+          }
+        }
+
+        if (firstIndex < 0 && oldestMessage && activeFirstMessageId) {
           const maxExtend = 500  // Maximum additional messages to fetch for cache stability
           let extended = 0
           let currentBefore = oldestMessage.id  // Oldest message in current window
-          
-          logger.debug({ 
-            currentBefore, 
+
+          // Determine which channel to extend from:
+          // - For threads: if oldest message is from parent channel (ID < thread start), extend from parent
+          // - Otherwise: extend from the original channel
+          const isOldestFromParent = threadStartMessageId && oldestMessage.id < threadStartMessageId
+          const extensionChannel = (isOldestFromParent && threadParentChannel) ? threadParentChannel : channel
+
+          logger.debug({
+            currentBefore,
             maxExtend,
-            firstMessageId 
+            firstMessageId: activeFirstMessageId,
+            isThread: channel.isThread(),
+            isOldestFromParent,
+            extensionChannelId: extensionChannel.id
           }, 'Cache marker not in window, extending fetch backwards')
-          
+
           while (extended < maxExtend) {
-            const batch = await channel.messages.fetch({ limit: 100, before: currentBefore })
+            const batch = await this.cachedFetchMessages(extensionChannel, { limit: 100, before: currentBefore })
             if (batch.size === 0) break
-            
-            const batchMessages = Array.from(batch.values()).sort((a, b) => a.id.localeCompare(b.id))
+
+            const batchMessages = (Array.from(batch.values()) as Message[]).sort((a, b) => a.id.localeCompare(b.id))
             messages = [...batchMessages, ...messages]
             extended += batchMessages.length
-            
+
             // Check if we found the cache marker
-            firstIndex = messages.findIndex(m => m.id === firstMessageId)
+            firstIndex = messages.findIndex(m => m.id === activeFirstMessageId)
             if (firstIndex >= 0) {
-              logger.debug({ 
-                extended, 
+              logger.debug({
+                extended,
                 firstIndex,
-                totalMessages: messages.length 
+                totalMessages: messages.length
               }, 'Found cache marker after extending fetch')
               break
             }
-            
+
             const oldestBatch = batchMessages[0]
             if (!oldestBatch) break
             currentBefore = oldestBatch.id
           }
-          
+
           if (firstIndex < 0) {
-            logger.warn({ 
-              firstMessageId, 
+            logger.warn({
+              firstMessageId: activeFirstMessageId,
               extended,
               totalMessages: messages.length,
-              oldestId: messages[0]?.id
+              oldestId: messages[0]?.id,
+              extensionChannelId: extensionChannel.id
             }, 'Cache marker not found even after extending fetch - may have been deleted')
           }
         }
-        
+
         // Note: We intentionally do NOT trim to cache marker
         // Cache stability should only add data, never remove it
         if (firstIndex >= 0) {
-          logger.debug({ 
+          logger.debug({
             cacheMarkerIndex: firstIndex,
             totalMessages: messages.length,
-            firstMessageId
+            firstMessageId: activeFirstMessageId
           }, 'Cache marker found in fetch window (no trimming)')
         }
+      } else if (activeFirstMessageId && historyState.didClear) {
+        logger.debug({
+          firstMessageId: activeFirstMessageId,
+          messageCount: messages.length
+        }, 'Skipping cache stability extension - .history clear truncated context')
       }
-      
+
       logger.debug({ finalMessageCount: messages.length }, 'Recursive fetch complete with .history processing')
 
       startProfile('messageConvert')
@@ -347,8 +642,8 @@ export class DiscordConnector {
         pinnedConfigs = params.pinnedConfigs
         logger.debug({ pinnedCount: pinnedConfigs.length }, 'Using pre-fetched pinned configs')
       } else {
-      // Fetch pinned messages for config (cache: false to always get fresh data)
-      const pinnedMessages = await channel.messages.fetchPinned(false)
+      // Fetch pinned messages for config (fallback path — handleActivation normally pre-fetches)
+      const { messages: pinnedMessages } = await this.fetchPinnedWithTimeout(channel, 10000)
       // Sort by ID (oldest first) so newer pins override older ones in merge
       const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
       logger.debug({ pinnedCount: pinnedMessages.size, pinnedIds: sortedPinned.map(m => m.id) }, 'Fetched pinned messages (sorted oldest-first)')
@@ -409,8 +704,11 @@ export class DiscordConnector {
         const thread = channel as any
         inheritanceInfo.parentChannelId = thread.parentId
       }
-      if (this.lastHistoryOriginChannelId) {
-        inheritanceInfo.historyOriginChannelId = this.lastHistoryOriginChannelId
+      if (historyState.originChannelId) {
+        inheritanceInfo.historyOriginChannelId = historyState.originChannelId
+      }
+      if (historyState.didClear) {
+        inheritanceInfo.historyDidClear = true
       }
 
       // Log fetch timings
@@ -436,15 +734,14 @@ export class DiscordConnector {
   private parseHistoryCommand(content: string): { first?: string; last: string } | null | false {
     const lines = content.split('\n')
 
-    // Support both ".history" alone and ".history\n---" formats
-    // Just ".history" with no other content = clear history
-    if (lines.length === 1 || (lines.length === 2 && lines[1]?.trim() === '')) {
-      return null  // Empty clear command
+    // Bare .history (or .history <@bot>) with no body = clear context
+    if (lines.length < 2 || lines.slice(1).every(l => !l.trim())) {
+      return null
     }
 
-    // If there's more content, require --- separator
-    if (lines[1] !== '---') {
-      return false  // Malformed command (has content but no ---)
+    // Must have --- separator for YAML body
+    if (lines[1]?.trim() !== '---') {
+      return false  // Malformed command
     }
 
     let first: string | undefined
@@ -470,15 +767,9 @@ export class DiscordConnector {
   }
 
   /**
-   * Track history origin during recursive fetch (reset per fetchContext call)
+   * Per-call state for .history tracking, passed through the fetchContext → fetchMessagesRecursive chain.
+   * Avoids shared instance state that leaks across concurrent activations for different channels.
    */
-  private lastHistoryOriginChannelId: string | null = null
-  
-  /**
-   * Track whether .history cleared context (reset per fetchContext call)
-   * When true, parent channel context should not be fetched for threads
-   */
-  private lastHistoryDidClear: boolean = false
 
   /**
    * Recursively fetch messages with .history support
@@ -490,7 +781,8 @@ export class DiscordConnector {
     stopAtId: string | undefined,
     maxMessages: number,
     authorizedRoles?: string[],
-    ignoreHistory?: boolean
+    ignoreHistory?: boolean,
+    historyState?: FetchHistoryState
   ): Promise<Message[]> {
     const results: Message[] = []
     let currentBefore = startFromId
@@ -528,10 +820,10 @@ export class DiscordConnector {
         isFirstBatch
       }, 'Fetching batch in while loop')
 
-      const fetched = await channel.messages.fetch(fetchOptions) as any
-      
+      const fetched = await this.cachedFetchMessages(channel, fetchOptions) as any
+
       logger.debug({ fetchedSize: fetched?.size || 0 }, 'Batch fetched')
-      
+
       if (!fetched || fetched.size === 0) {
         logger.debug('No more messages to fetch')
         break
@@ -549,11 +841,11 @@ export class DiscordConnector {
 
       // Collect messages from this batch (will prepend entire batch to results later)
       const batchResults: Message[] = []
-      
+
       // For first batch, include the startFromId message at the end (it's newest)
       if (isFirstBatch && startFromId) {
         try {
-          const startMsg = await channel.messages.fetch(startFromId)
+          const startMsg = await this.cachedFetchMessages(channel, startFromId)
           batchMessages.push(startMsg)  // Add to end of chronological batch
           logger.debug({ startFromId }, 'Added startFrom message to first batch')
         } catch (error) {
@@ -572,12 +864,14 @@ export class DiscordConnector {
           isHistory: message.content?.startsWith('.history')
         }, 'Processing message in recursive fetch')*/
 
-        // Check if we hit the stop point
+        // Check if we hit the range start (first: boundary)
+        // Discard everything older, keep from here onwards
         if (stopAtId && message.id === stopAtId) {
+          batchResults.length = 0  // Discard messages older than the range start
           batchResults.push(message)
-          results.unshift(...batchResults)  // Prepend this batch
-          logger.debug({ stopAtId, batchSize: batchResults.length }, 'Reached first message boundary, stopping')
-          return results
+          stopAtId = undefined  // Found it, stop looking
+          logger.debug({ foundFirstId: message.id }, 'Reached first message boundary, discarding older')
+          continue
         }
 
         // Check for .history command (skip if ignoreHistory is set)
@@ -598,48 +892,53 @@ export class DiscordConnector {
 
           if (authorized) {
             const historyRange = this.parseHistoryCommand(message.content)
-            
-            logger.debug({ 
+
+            logger.debug({
               historyRange,
               messageId: message.id,
               fullContent: message.content
             }, 'Parsed .history command')
 
+            // Check if .history targets a specific bot via mention (e.g., .history <@botId>)
+            // Extract target from the first line of the raw message content
+            const mentionMatch = message.content.match(/^\.history\s+<@!?(\d+)>/)
+            const historyBotTarget = mentionMatch?.[1]
+            const selfId = this.client.user?.id
+            if (historyBotTarget && historyBotTarget !== selfId) {
+              // Targeted at a different bot — skip this .history command entirely
+              logger.debug({ historyBotTarget, selfId, messageId: message.id }, 'Skipping .history targeted at different bot')
+              continue  // Don't add to batchResults — the .history message itself is always skipped
+            }
+
             if (historyRange === null) {
               // Empty .history - clear history BEFORE this point, keep messages AFTER
-              // Processing order (see comment at line ~526):
-              // - We process OLDEST-first within each batch (after reverse)
-              // - batchResults contains OLDER messages (already processed) - DISCARD these
-              // - Remaining messages in loop are NEWER - continue to collect them
-              // - results contains messages from PREVIOUS batches (which are NEWER) - keep
+              //
+              // Processing order: OLDEST-first (Discord returns newest-first, we reverse())
+              // So batchResults has OLDER messages (already iterated) → DISCARD
+              // Remaining messages in the loop are NEWER → KEEP (via continue)
               logger.debug({
                 resultsCount: results.length,
                 batchResultsCount: batchResults.length,
                 batchResultsIds: batchResults.map((m: any) => m.id).slice(0, 5),
                 resultsIds: results.map((m: any) => m.id).slice(0, 5),
                 hadPendingNewerMessages: !!(this as any)[pendingKey],
-              }, 'Empty .history command - keeping newer messages, discarding older (batchResults will be cleared)')
-              this.lastHistoryDidClear = true  // Signal to skip parent fetch for threads
-              
+              }, 'Empty .history command - discarding older, collecting newer')
+              if (historyState) historyState.didClear = true  // Signal to skip parent fetch for threads
+
               // If we previously processed a .history range in this batch, the historical
               // messages it fetched are now in `results`. Since this .history clear is
               // NEWER than that range, we need to discard those historical messages too.
               if ((this as any)[pendingKey]) {
-                // pendingKey has the ACTUAL newer messages we want to keep
-                // results has historical messages that should be discarded
-                results.length = 0
-                results.push(...(this as any)[pendingKey])
                 delete (this as any)[pendingKey]
-                logger.debug({
-                  restoredCount: results.length,
-                }, 'Restored newer messages after .history clear overrode earlier .history range')
+                logger.debug('Discarded pending messages from earlier .history range (overridden by clear)')
               }
-              
-              // Clear batchResults (contains OLDER messages - already processed before hitting .history)
+
+              // Discard everything accumulated so far (older than .history)
+              results.length = 0
               batchResults.length = 0
               foundHistory = true
 
-              // Continue to collect remaining messages in batch (NEWER than .history)
+              // Continue collecting remaining messages in batch (NEWER than .history)
               continue
             } else if (historyRange) {
               // Recursively fetch from history target
@@ -654,9 +953,10 @@ export class DiscordConnector {
 
                 // Track that we jumped from this channel via .history
                 // This is used for plugin state inheritance
-                this.lastHistoryOriginChannelId = channel.id
+                if (historyState) historyState.originChannelId = channel.id
+                if (historyState) historyState.didClear = true  // Prevent cache stability from extending past range boundary
 
-                logger.debug({ 
+                logger.debug({
                   historyTarget: historyRange.last,
                   targetChannelId,
                   histLastId,
@@ -672,7 +972,8 @@ export class DiscordConnector {
                   histFirstId,     // Start point (stop when reached, or undefined)
                   maxMessages - results.length - batchResults.length,  // Account for current batch
                   authorizedRoles,
-                  ignoreHistory    // Pass through (though this path only runs when ignoreHistory is false)
+                  ignoreHistory,   // Pass through (though this path only runs when ignoreHistory is false)
+                  historyState     // Pass through for cross-recursion state tracking
                 )
 
                 logger.debug({ 
@@ -680,37 +981,32 @@ export class DiscordConnector {
                   currentResultsCount: results.length,
                 }, 'Fetched historical messages, combining with current results')
 
-                // Mark that we found .history (stop after this batch)
+                // Mark that we found .history (stop after this batch completes)
                 foundHistory = true
 
-                // Processing order (see comment at line ~526):
-                // - We process OLDEST-first within each batch
-                // - batchResults = messages OLDER than .history (already processed) - discard
-                // - results = messages from PREVIOUS batches (NEWER than current batch) - keep
-                // - Remaining messages in loop = NEWER than .history - continue to collect
+                // Processing order: OLDEST-first (after reverse())
+                // batchResults has OLDER messages in current channel (before .history) → DISCARD
+                // Remaining messages in the loop are NEWER → KEEP (via continue)
                 //
-                // Save only results (from previous/newer batches), NOT batchResults
-                const newerMessages = [...results]
+                // Build new results: historical messages + (newer messages collected after continue)
+                // Save any existing results from older batches to pendingKey
+                const existingResults = [...results]
 
-                // Reset results with historical messages
+                // Reset results with historical messages (oldest context)
                 results.length = 0
                 results.push(...historicalMessages)
 
-                // Store newer messages to append after we collect remaining messages
-                ;(this as any)[pendingKey] = newerMessages
+                // Store batchResults from older batches in pendingKey (these go AFTER historical)
+                // Note: batchResults contains messages OLDER than .history in current batch - discard
+                ;(this as any)[pendingKey] = existingResults
 
-                // Clear batchResults (older messages we don't want)
                 batchResults.length = 0
                 logger.debug({
                   historicalAdded: historicalMessages.length,
-                  historicalIds: historicalMessages.map((m: any) => m.id).slice(0, 5),
-                  newerMessagesSaved: newerMessages.length,
-                  newerMessageIds: newerMessages.map((m: any) => m.id).slice(0, 5),
-                  batchResultsDiscarded: batchResults.length,
-                  batchResultsDiscardedIds: batchResults.map((m: any) => m.id).slice(0, 5),
-                }, 'Reset results with historical, saved newer messages, discarded batchResults')
+                  existingResultsSaved: existingResults.length,
+                }, 'Reset results with historical, continuing to collect newer messages')
 
-                // Continue to collect remaining messages in batch (NEWER than .history)
+                // Continue collecting remaining messages in batch (NEWER than .history)
                 continue
               }
             }
@@ -805,7 +1101,7 @@ export class DiscordConnector {
     
     // First, fetch the last message
     try {
-      const lastMsg = await channel.messages.fetch(lastMessageId)
+      const lastMsg = await this.cachedFetchMessages(channel, lastMessageId)
       allMessages.push(lastMsg)
     } catch (error) {
       logger.warn({ error, lastMessageId }, 'Failed to fetch last message')
@@ -815,33 +1111,33 @@ export class DiscordConnector {
     // Then fetch older messages in batches until we reach first (or limit)
     let currentBefore = lastMessageId
     let foundFirst = false
-    
+
     const maxBatches = Math.ceil(maxMessages / 100)
-    
+
     for (let batch = 0; batch < maxBatches && !foundFirst; batch++) {
       // Stop if we've already fetched enough
       if (allMessages.length >= maxMessages) {
         break
       }
-      
+
       try {
         const batchSize = Math.min(100, maxMessages - allMessages.length)
-        const fetched = await channel.messages.fetch({ 
-          limit: batchSize, 
-          before: currentBefore 
+        const fetched = await this.cachedFetchMessages(channel, {
+          limit: batchSize,
+          before: currentBefore
         })
 
         if (fetched.size === 0) break
 
         // Discord returns messages newest-first, so reverse for chronological order
-        const batchMessages = Array.from(fetched.values()).reverse()
-        
+        const batchMessages = Array.from(fetched.values()).reverse() as Message[]
+
         // Add to beginning (older messages go before newer ones)
         allMessages.unshift(...batchMessages)
 
         // Check if we found the first message
         if (firstMessageId) {
-          if (batchMessages.some(m => m.id === firstMessageId)) {
+          if (batchMessages.some((m: Message) => m.id === firstMessageId)) {
             foundFirst = true
             break
           }
@@ -988,6 +1284,7 @@ export class DiscordConnector {
         if (i === 0 && replyToMessageId) {
           try {
             options.reply = { messageReference: replyToMessageId }
+            options.allowedMentions = { repliedUser: false }
             const sent = await channel.send({ content: chunk, ...options })
             messageIds.push(sent.id)
           } catch (error: any) {
@@ -1042,6 +1339,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
+          options.allowedMentions = { repliedUser: false }
           const sent = await channel.send(options)
           logger.debug({ channelId, attachmentName: attachment.name, replyTo: replyToMessageId }, 'Sent message with attachment')
           return [sent.id]
@@ -1104,6 +1402,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
+          options.allowedMentions = { repliedUser: false }
           const sent = await channel.send(options)
           logger.debug({ channelId, filename, replyTo: replyToMessageId }, 'Sent image attachment')
           return [sent.id]
@@ -1159,6 +1458,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
+          options.allowedMentions = { repliedUser: false }
           const sent = await channel.send(options)
           logger.debug({ channelId, filename, size: fileBuffer.length, replyTo: replyToMessageId }, 'Sent file attachment')
           return [sent.id]
@@ -1289,23 +1589,129 @@ export class DiscordConnector {
       try {
         const channel = await this.client.channels.fetch(channelId) as TextChannel
         const message = await channel.messages.fetch(messageId)
-        
+
         // Check if bot has permission to delete messages
         const permissions = channel.permissionsFor(this.client.user!)
         if (!permissions?.has('ManageMessages')) {
           logger.error({ channelId, messageId }, 'Bot lacks MANAGE_MESSAGES permission to delete message')
           throw new Error('Missing MANAGE_MESSAGES permission')
         }
-        
+
         await message.delete()
         logger.info({ channelId, messageId, author: message.author?.username }, 'Successfully deleted m command message')
       } catch (error: any) {
-        logger.error({ 
-          error: error.message, 
+        logger.error({
+          error: error.message,
           code: error.code,
-          channelId, 
-          messageId 
+          channelId,
+          messageId
         }, 'Failed to delete message')
+        throw error
+      }
+    }, this.options.maxBackoffMs)
+  }
+
+  /**
+   * Edit a message by ID
+   */
+  async editMessage(channelId: string, messageId: string, newContent: string): Promise<void> {
+    return retryDiscord(async () => {
+      try {
+        const channel = await this.client.channels.fetch(channelId) as TextChannel
+        if (!channel || !channel.isTextBased()) {
+          throw new DiscordError(`Channel ${channelId} not found`)
+        }
+
+        const message = await channel.messages.fetch(messageId)
+
+        // Can only edit own messages
+        if (message.author.id !== this.client.user?.id) {
+          throw new DiscordError(`Cannot edit message ${messageId} - not authored by bot`)
+        }
+
+        await message.edit(newContent)
+        logger.debug({ channelId, messageId, newLength: newContent.length }, 'Edited message')
+      } catch (error: any) {
+        logger.error({
+          error: error.message,
+          code: error.code,
+          channelId,
+          messageId
+        }, 'Failed to edit message')
+        throw error
+      }
+    }, this.options.maxBackoffMs)
+  }
+
+  /**
+   * Find a recent bot message by content prefix and edit it.
+   * Used for TTS interruption - finds the message that starts with the spoken text
+   * and truncates it to only contain what was actually spoken.
+   *
+   * @param channelId - The channel to search in
+   * @param contentPrefix - The content the message should start with
+   * @param newContent - The new content to replace with (usually same as contentPrefix)
+   * @param maxMessages - How many recent messages to search (default: 20)
+   * @returns true if message was found and edited, false otherwise
+   */
+  async findAndEditBotMessage(
+    channelId: string,
+    contentPrefix: string,
+    newContent: string,
+    maxMessages: number = 20
+  ): Promise<boolean> {
+    return retryDiscord(async () => {
+      try {
+        const channel = await this.client.channels.fetch(channelId) as TextChannel
+        if (!channel || !channel.isTextBased()) {
+          throw new DiscordError(`Channel ${channelId} not found`)
+        }
+
+        const botUserId = this.client.user?.id
+        if (!botUserId) {
+          throw new DiscordError('Bot user ID not available')
+        }
+
+        // Fetch recent messages
+        const messages = await channel.messages.fetch({ limit: maxMessages })
+
+        // Find the bot's message that starts with contentPrefix
+        // Trim whitespace and try both exact match and trimmed match
+        const trimmedPrefix = contentPrefix.trim()
+        const targetMessage = messages.find(msg => {
+          if (msg.author.id !== botUserId) return false
+          const content = msg.content
+          // Try exact match first
+          if (content.startsWith(contentPrefix)) return true
+          // Try trimmed match
+          if (content.startsWith(trimmedPrefix)) return true
+          // Try if message content trimmed matches prefix trimmed
+          if (content.trim().startsWith(trimmedPrefix)) return true
+          return false
+        })
+
+        if (!targetMessage) {
+          logger.warn(
+            { channelId, prefixLength: contentPrefix.length, searched: messages.size },
+            'Could not find bot message matching content prefix'
+          )
+          return false
+        }
+
+        // Edit the message
+        await targetMessage.edit(newContent)
+        logger.info(
+          { channelId, messageId: targetMessage.id, oldLength: targetMessage.content.length, newLength: newContent.length },
+          'Found and edited bot message by content prefix'
+        )
+        return true
+      } catch (error: any) {
+        logger.error({
+          error: error.message,
+          code: error.code,
+          channelId,
+          prefixLength: contentPrefix.length
+        }, 'Failed to find and edit bot message')
         throw error
       }
     }, this.options.maxBackoffMs)
@@ -1412,6 +1818,25 @@ export class DiscordConnector {
   }
 
   /**
+   * Add a reaction to the most recent message in a channel.
+   * Fetches directly from Discord API (no cache) to get the latest message.
+   */
+  async reactToLatestMessage(channelId: string, emoji: string): Promise<void> {
+    try {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+      if (!channel || !channel.isTextBased()) return
+      const recent = await channel.messages.fetch({ limit: 1 })
+      const lastMsg = recent.first()
+      if (lastMsg) {
+        await lastMsg.react(emoji)
+        logger.debug({ channelId, messageId: lastMsg.id, emoji }, 'Reacted to latest message')
+      }
+    } catch (error) {
+      logger.warn({ error, channelId, emoji }, 'Failed to react to latest message')
+    }
+  }
+
+  /**
    * Close the Discord client
    */
   async close(): Promise<void> {
@@ -1419,14 +1844,322 @@ export class DiscordConnector {
     for (const interval of this.typingIntervals.values()) {
       clearInterval(interval)
     }
+    // Clear cache maintenance intervals
+    if (this.cacheStatsInterval) clearInterval(this.cacheStatsInterval)
+    if (this.evictionInterval) clearInterval(this.evictionInterval)
 
     await this.client.destroy()
     logger.info('Discord connector closed')
   }
 
+  // ===========================================================================
+  // Push-based Message Cache
+  // ===========================================================================
+
+  private pushMessageToCache(channelId: string, message: Message): void {
+    const cache = this.messageCache.get(channelId)
+    if (!cache) return
+
+    let index = this.messageCacheIndex.get(channelId)
+    if (!index) {
+      index = new Map()
+      this.messageCacheIndex.set(channelId, index)
+    }
+
+    // Deduplicate: skip if already cached
+    if (index.has(message.id)) return
+
+    // Fast path: message is newer than or equal to newest cached (common case for messageCreate events)
+    const last = cache[cache.length - 1]
+    if (!last || message.id >= (last as Message).id) {
+      const idx = cache.push(message) - 1
+      index.set(message.id, idx)
+      return
+    }
+
+    // Slow path: message is older than newest cached (e.g., single-message fetch for thread start).
+    // Must insert in chronological position to maintain cache ordering.
+    // Without this, the batch fetch fast path (cache.slice(0, beforeIdx)) returns wrong messages
+    // because it assumes chronological ordering.
+    let lo = 0, hi = cache.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      const midMsg = cache[mid]
+      if (!midMsg || (midMsg as Message).id < message.id) lo = mid + 1
+      else hi = mid
+    }
+    cache.splice(lo, 0, message)
+
+    // Rebuild index since splice shifted all positions after insertion point
+    const newIndex = new Map<string, number>()
+    cache.forEach((m, i) => { if (m) newIndex.set((m as Message).id, i) })
+    this.messageCacheIndex.set(channelId, newIndex)
+
+    logger.debug({
+      channelId,
+      messageId: message.id,
+      insertedAt: lo,
+      cacheSize: cache.length,
+    }, 'Inserted out-of-order message into cache (maintained chronological order)')
+  }
+
+  private updateMessageInCache(channelId: string, message: Message): void {
+    const index = this.messageCacheIndex.get(channelId)
+    const cache = this.messageCache.get(channelId)
+    if (!index || !cache) return
+    const idx = index.get(message.id)
+    if (idx !== undefined && cache[idx] !== null) {
+      cache[idx] = message
+    }
+  }
+
+  private removeMessageFromCache(channelId: string, messageId: string): void {
+    const index = this.messageCacheIndex.get(channelId)
+    const cache = this.messageCache.get(channelId)
+    if (!index || !cache) return
+    const idx = index.get(messageId)
+    if (idx !== undefined) {
+      cache[idx] = null  // tombstone — compacted by evictStaleMessages()
+      index.delete(messageId)
+    }
+  }
+
+  /**
+   * Cached wrapper around channel.messages.fetch().
+   * After the first API fetch populates the cache, subsequent requests
+   * are served from memory. Push events keep the cache current.
+   *
+   * Supports:
+   *   { limit: N }              → last N messages
+   *   { limit: N, before: id }  → N messages before given ID
+   *   messageId (string)        → single message by ID
+   */
+  async cachedFetchMessages(channel: TextChannel, options: any): Promise<any> {
+    const channelId = channel.id
+
+    // Bypass cache for debugging
+    if (process.env.NO_MSG_CACHE) {
+      if (typeof options === 'string') return channel.messages.fetch(options)
+      return channel.messages.fetch(options)
+    }
+
+    // Single message fetch by ID — O(1) via index
+    if (typeof options === 'string') {
+      const index = this.messageCacheIndex.get(channelId)
+      const cache = this.messageCache.get(channelId)
+      if (index && cache) {
+        const idx = index.get(options)
+        if (idx !== undefined && cache[idx] !== null) {
+          this.cacheStats.hits++
+          return cache[idx]
+        }
+      }
+      // Cache miss for single message - fetch from API
+      this.cacheStats.misses++
+      this.cacheStats.apiCalls++
+      const msg = await channel.messages.fetch(options)
+      // Add to cache if we have one
+      if (msg && this.messageCache.has(channelId)) {
+        this.pushMessageToCache(channelId, msg)
+      }
+      return msg
+    }
+
+    // Batch fetch
+    const limit = options.limit || 50
+    const before = options.before as string | undefined
+    const cache = this.messageCache.get(channelId)
+
+    if (cache && this.messageCachePopulated.has(channelId)) {
+      if (before) {
+        // Check if query goes beyond the oldest cached message — if so, fall through
+        // to API so pagination can extend backwards into channel history
+        const oldestCached = cache.find((m): m is Message => m !== null)
+        if (oldestCached && before <= oldestCached.id) {
+          // Beyond cache boundary — fall through to API fetch below
+          logger.debug({ channelId, before, oldestCached: oldestCached.id }, 'Cache pagination boundary — falling through to API')
+        } else {
+          // Within cache range — serve from cache
+          this.cacheStats.hits++
+          let filtered: Message[]
+          const index = this.messageCacheIndex.get(channelId)
+          const beforeIdx = index?.get(before)
+          if (beforeIdx !== undefined) {
+            // Fast path: slice up to the known position, filter only tombstones.
+            // Sanity check: verify the message at beforeIdx actually matches the expected ID.
+            // If the cache was corrupted (out-of-order insertion), fall back to comparison.
+            const msgAtIdx = cache[beforeIdx]
+            if (msgAtIdx && (msgAtIdx as Message).id === before) {
+              filtered = cache.slice(0, beforeIdx).filter((m): m is Message => m !== null)
+            } else {
+              // Index is stale or cache is out of order — use comparison-based filter
+              logger.warn({ channelId, before, beforeIdx, actualId: msgAtIdx ? (msgAtIdx as Message).id : 'null' },
+                'Cache index mismatch — falling back to comparison-based filter')
+              filtered = cache.filter((m): m is Message => m !== null && m.id < before)
+            }
+          } else {
+            // Fallback: before ID not in index (deleted/external), full scan
+            filtered = cache.filter((m): m is Message => m !== null && m.id < before)
+          }
+
+          const slice = filtered.slice(-limit).reverse()
+          const map = new Map(slice.map(m => [m.id, m]))
+          ;(map as any).values = map.values.bind(map)
+          ;(map as any).first = () => slice[0]
+          return map
+        }
+      } else {
+        // No 'before' — return most recent messages from cache
+        this.cacheStats.hits++
+        const filtered = cache.filter((m): m is Message => m !== null)
+        const slice = filtered.slice(-limit).reverse()
+        const map = new Map(slice.map(m => [m.id, m]))
+        ;(map as any).values = map.values.bind(map)
+        ;(map as any).first = () => slice[0]
+        return map
+      }
+    }
+
+    // Cache miss or beyond cache boundary - fetch from API
+    this.cacheStats.misses++
+    this.cacheStats.apiCalls++
+    const fetched = await channel.messages.fetch(options) as unknown as Collection<string, Message>
+
+    if (!this.messageCachePopulated.has(channelId)) {
+      // First population — store as initial cache
+      const msgs = Array.from(fetched.values()).reverse()  // chronological order
+      this.messageCache.set(channelId, msgs)
+      const index = new Map<string, number>()
+      msgs.forEach((m, i) => index.set(m.id, i))
+      this.messageCacheIndex.set(channelId, index)
+      this.messageCachePopulated.add(channelId)
+      logger.debug({ channelId, count: msgs.length }, 'Message cache populated from API')
+    } else if (before && cache) {
+      // Extend cache backwards with older messages from API
+      const msgs = Array.from(fetched.values()).reverse()
+      const existingIndex = this.messageCacheIndex.get(channelId) ?? new Map<string, number>()
+      const newMsgs = msgs.filter(m => !existingIndex.has(m.id))
+      if (newMsgs.length > 0) {
+        cache.unshift(...newMsgs)
+        // Rebuild index (positions shifted by prepend)
+        const newIndex = new Map<string, number>()
+        cache.forEach((m, i) => { if (m) newIndex.set(m.id, i) })
+        this.messageCacheIndex.set(channelId, newIndex)
+        logger.debug({ channelId, extended: newMsgs.length, total: cache.length }, 'Cache extended backwards')
+      }
+    }
+
+    return fetched
+  }
+
+  /**
+   * Evict stale messages: compact tombstones and cap per-channel size.
+   * Runs periodically via evictionInterval.
+   */
+  private evictStaleMessages(): void {
+    const maxPerChannel = 2000
+    let totalEvicted = 0
+
+    for (const [channelId, cache] of this.messageCache) {
+      // Step 1: Compact tombstones (filter out nulls)
+      const compacted = cache.filter((m): m is Message => m !== null)
+
+      // Step 2: Evict oldest if over cap
+      let evicted = 0
+      if (compacted.length > maxPerChannel) {
+        evicted = compacted.length - maxPerChannel
+        compacted.splice(0, evicted)  // remove oldest (array is chronological)
+      }
+
+      // Step 3: Rebuild array and index
+      this.messageCache.set(channelId, compacted)
+      const newIndex = new Map<string, number>()
+      compacted.forEach((m, i) => newIndex.set(m.id, i))
+      this.messageCacheIndex.set(channelId, newIndex)
+
+      totalEvicted += evicted
+    }
+
+    if (totalEvicted > 0) {
+      this.cacheStats.evictions += totalEvicted
+      logger.debug({ evicted: totalEvicted, channels: this.messageCache.size }, 'Cache eviction complete')
+    }
+  }
+
+  /**
+   * Prefetch channels to warm the message cache on startup.
+   * Called fire-and-forget from the ready handler.
+   */
+  private async prefetchChannels(channelIds: string[]): Promise<void> {
+    const concurrency = 5
+    const targetMessages = 1000  // Warm cache deep enough for most recency_window_messages configs
+    let fetched = 0
+
+    for (let i = 0; i < channelIds.length; i += concurrency) {
+      const batch = channelIds.slice(i, i + concurrency)
+      await Promise.allSettled(
+        batch.map(async (channelId) => {
+          try {
+            const channel = await this.client.channels.fetch(channelId) as TextChannel
+            if (!channel?.isTextBased()) return
+
+            // First batch populates the cache
+            await this.cachedFetchMessages(channel, { limit: 100 })
+            const cache = this.messageCache.get(channelId)
+            if (!cache || cache.length === 0) return
+
+            // Paginate backwards to fill cache up to target
+            let totalFetched = cache.length
+            while (totalFetched < targetMessages) {
+              const oldest = cache.find((m): m is Message => m !== null)
+              if (!oldest) break
+              const older = await this.cachedFetchMessages(channel, { limit: 100, before: oldest.id })
+              if (!older || older.size === 0) break  // Reached beginning of channel
+              totalFetched += older.size
+            }
+
+            fetched++
+            logger.debug({ channelId, messages: cache.length }, 'Channel prefetch complete')
+          } catch (error) {
+            logger.warn({ channelId, error }, 'Failed to prefetch channel')
+          }
+        })
+      )
+    }
+
+    logger.info({ requested: channelIds.length, fetched, targetMessages }, 'Channel prefetch complete')
+  }
+
+  /**
+   * Get cached pinned configs, or null if cache is empty/dirty.
+   * Does NOT clear the dirty flag — that only happens on successful API fetch
+   * (via cachePinnedConfigs). This ensures failed refetches don't lose dirty state.
+   */
+  getCachedPinnedConfigs(channelId: string): string[] | null {
+    if (this.pinnedConfigDirty.has(channelId)) {
+      return null  // Force refetch, but keep dirty flag until API succeeds
+    }
+    return this.pinnedConfigCache.get(channelId) || null
+  }
+
+  /**
+   * Store pinned configs in cache after API fetch.
+   */
+  cachePinnedConfigs(channelId: string, configs: string[]): void {
+    this.pinnedConfigCache.set(channelId, configs)
+    this.pinnedConfigDirty.delete(channelId)
+  }
+
   private setupEventHandlers(): void {
     this.client.on('ready', () => {
       logger.info({ user: this.client.user?.tag }, 'Discord client ready')
+
+      // Optional: prefetch channels to warm the cache on startup
+      const prefetchChannels = process.env.PREFETCH_CHANNELS
+      if (prefetchChannels) {
+        const channelIds = prefetchChannels.split(',').map(s => s.trim()).filter(Boolean)
+        this.prefetchChannels(channelIds)  // fire-and-forget
+      }
     })
 
     this.client.on('messageCreate', (message) => {
@@ -1439,17 +2172,26 @@ export class DiscordConnector {
         },
         'Received messageCreate event'
       )
-      
+
+      // Update message cache
+      this.pushMessageToCache(message.channelId, message)
+
       this.queue.push({
         type: 'message',
         channelId: message.channelId,
         guildId: message.guildId || '',
         data: message,
         timestamp: new Date(),
+        receivedAt: Date.now(),
       })
     })
 
     this.client.on('messageUpdate', (oldMsg, newMsg) => {
+      // Update message cache
+      if (newMsg.id && newMsg.channelId) {
+        this.updateMessageInCache(newMsg.channelId, newMsg as Message)
+      }
+
       this.queue.push({
         type: 'edit',
         channelId: newMsg.channelId,
@@ -1460,6 +2202,11 @@ export class DiscordConnector {
     })
 
     this.client.on('messageDelete', (message) => {
+      // Update message cache
+      if (message.id && message.channelId) {
+        this.removeMessageFromCache(message.channelId, message.id)
+      }
+
       this.queue.push({
         type: 'delete',
         channelId: message.channelId,
@@ -1467,6 +2214,52 @@ export class DiscordConnector {
         data: message,
         timestamp: new Date(),
       })
+    })
+
+    this.client.on('messageReactionAdd', (reaction) => {
+      // Refresh cached message so reaction data is up to date
+      if (reaction.message.id && reaction.message.channelId) {
+        this.updateMessageInCache(reaction.message.channelId, reaction.message as Message)
+      }
+    })
+
+    this.client.on('messageReactionRemove', (reaction) => {
+      if (reaction.message.id && reaction.message.channelId) {
+        this.updateMessageInCache(reaction.message.channelId, reaction.message as Message)
+      }
+    })
+
+    this.client.on('channelPinsUpdate', (channel) => {
+      // Proactively fetch new pins on gateway event (like Chapter2).
+      // This is safe because pin updates are rare (someone manually pinning/unpinning),
+      // unlike the old shouldActivate path which hit the API on every message batch.
+      // Small random jitter (0-2s) prevents 80+ bots from fetching simultaneously.
+      const channelId = (channel as any).id
+      if (!channelId) return
+
+      const jitterMs = Math.random() * 2000
+      setTimeout(async () => {
+        try {
+          const ch = await this.client.channels.fetch(channelId) as TextChannel
+          if (!ch || !ch.isTextBased()) return
+
+          const { messages: pinnedMessages, failed } = await this.fetchPinnedWithTimeout(ch, 10000)
+          if (!failed) {
+            const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
+            const configs = this.extractConfigs(sortedPinned)
+            this.cachePinnedConfigs(channelId, configs)
+            this.savePinCacheToDisk(channelId, configs)
+            logger.info({ channelId, configCount: configs.length }, 'Pinned configs refreshed via gateway event')
+          } else {
+            // API failed (e.g., Cloudflare 429) — mark dirty so handleActivation retries
+            this.pinnedConfigDirty.add(channelId)
+            logger.warn({ channelId }, 'Pins gateway refresh failed — marked dirty for retry')
+          }
+        } catch (error) {
+          this.pinnedConfigDirty.add(channelId)
+          logger.warn({ error, channelId }, 'Pins gateway refresh error — marked dirty for retry')
+        }
+      }, jitterMs)
     })
   }
 
@@ -1547,6 +2340,104 @@ export class DiscordConnector {
       mentions: Array.from(msg.mentions.users.keys()),
       referencedMessage: msg.reference?.messageId,
     }
+  }
+
+  /**
+   * Fetch pinned messages with a timeout to prevent hanging the event loop.
+   * Bypasses discord.js REST manager entirely (it hangs on pins endpoints due to
+   * Cloudflare Error 1015 rate limiting on servers with many bots sharing one IP).
+   * Uses native fetch() to the Discord API directly with AbortController timeout.
+   * Returns { messages, failed } so caller can distinguish "no pins" from "fetch failed".
+   * Does NOT wait on rate limits — falls through immediately to disk cache instead.
+   */
+  private async fetchPinnedWithTimeout(channel: TextChannel, timeoutMs: number = 10000): Promise<{ messages: Collection<string, Message>, failed: boolean }> {
+    const empty = new Collection<string, Message>()
+
+    const token = this.client.token
+    if (!token) {
+      logger.error({ channelId: channel.id }, 'No bot token available for direct pins fetch')
+      return { messages: empty, failed: true }
+    }
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+      try {
+        const response = await fetch(
+          `https://discord.com/api/v10/channels/${channel.id}/pins`,
+          {
+            headers: {
+              Authorization: `Bot ${token}`,
+              'Content-Type': 'application/json',
+            },
+            signal: controller.signal,
+          }
+        )
+        clearTimeout(timer)
+
+        if (!response.ok) {
+          if (response.status === 429) {
+            const retryAfter = parseFloat(response.headers.get('retry-after') || '0')
+            // Don't wait — Cloudflare 1015 bans can be hours long.
+            // Fall through immediately so caller can use disk cache.
+            logger.warn({
+              channelId: channel.id,
+              retryAfterSec: retryAfter,
+              attempt,
+              server: response.headers.get('server'),
+            }, 'Pins fetch rate limited (Cloudflare 1015) — falling back to disk cache')
+            return { messages: empty, failed: true }
+          }
+          logger.warn({
+            channelId: channel.id,
+            status: response.status,
+            statusText: response.statusText,
+            attempt,
+          }, 'Direct pins fetch returned error')
+          continue
+        }
+
+        const data = await response.json() as any
+
+        // The /pins endpoint returns an array of message objects
+        const rawMessages = Array.isArray(data) ? data : (data?.items?.map((item: any) => item.message) ?? data?.items ?? [])
+
+        const messages = new Collection<string, Message>()
+        for (const raw of rawMessages) {
+          // Use discord.js's internal _add to construct Message objects
+          const msg = (channel.messages as any)._add(raw, false)
+          messages.set(msg.id, msg)
+        }
+
+        logger.debug({
+          channelId: channel.id,
+          count: messages.size,
+          attempt,
+        }, 'Fetched pinned messages via direct API')
+        return { messages, failed: false }
+      } catch (error: any) {
+        clearTimeout(timer)
+        if (error.name === 'AbortError') {
+          logger.warn({
+            channelId: channel.id,
+            timeoutMs,
+            attempt,
+          }, 'Direct pins fetch timed out — retrying')
+        } else {
+          logger.warn({
+            channelId: channel.id,
+            error: error.message,
+            attempt,
+          }, 'Direct pins fetch failed — retrying')
+        }
+      }
+    }
+
+    logger.error({
+      channelId: channel.id,
+    }, 'Pins fetch failed after retries — will use disk cache if available')
+    return { messages: empty, failed: true }
   }
 
   private extractConfigs(messages: Message[]): string[] {
@@ -1672,10 +2563,24 @@ export class DiscordConnector {
     // 3. Download image (cache miss)
     try {
       const response = await fetch(url)
+
+      if (!response.ok) {
+        logger.warn({ url, status: response.status }, 'Image download failed (non-200 status)')
+        return null
+      }
+
       const buffer = Buffer.from(await response.arrayBuffer())
 
       // Detect actual image format from magic bytes (don't trust Discord's contentType)
-      const actualMediaType = this.detectImageType(buffer) || contentType
+      const detectedType = this.detectImageType(buffer)
+
+      // Reject non-image data (e.g., HTML error pages from expired CDN URLs)
+      if (!detectedType) {
+        logger.warn({ url, bufferSize: buffer.length }, 'Downloaded data has no valid image magic bytes, skipping')
+        return null
+      }
+
+      const actualMediaType = detectedType
       
       const hash = createHash('sha256').update(buffer).digest('hex')
       const ext = actualMediaType.split('/')[1] || 'jpg'

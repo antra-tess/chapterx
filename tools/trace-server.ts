@@ -1,19 +1,20 @@
 #!/usr/bin/env npx tsx
 /**
  * Trace Viewer Web Server
- * 
+ *
  * A web UI for debugging activation traces across multiple bots.
  * Supports authentication, multi-bot views, and channel name resolution.
- * 
+ *
  * Environment variables:
  *   PORT          - Server port (default: 3847)
  *   AUTH_TOKEN    - Bearer token for authentication (optional, no auth if not set)
- *   LOGS_DIR      - Base logs directory (default: ./logs)
+ *   LOGS_DIRS     - Comma-separated list of base logs directories (default: ./logs)
+ *   LOGS_DIR      - (deprecated) Single logs directory, use LOGS_DIRS instead
  *   BOTS_CONFIG   - Path to bots config directory for channel name lookup
- * 
+ *
  * Usage:
  *   ./tools/trace-server.ts
- *   AUTH_TOKEN=secret PORT=3847 ./tools/trace-server.ts
+ *   AUTH_TOKEN=secret LOGS_DIRS=/opt/chapterx/logs,/opt/chapterx_staging/logs ./tools/trace-server.ts
  */
 
 import { createServer, IncomingMessage, ServerResponse } from 'http'
@@ -24,8 +25,14 @@ import { ActivationTrace, TraceIndex } from '../src/trace/types.js'
 
 const PORT = parseInt(process.env.PORT || '3847', 10)
 const AUTH_TOKEN = process.env.AUTH_TOKEN || ''
-const LOGS_DIR = process.env.LOGS_DIR || './logs'
-const TRACE_DIR = join(LOGS_DIR, 'traces')
+
+// Support multiple log directories (comma-separated)
+const LOGS_DIRS = (process.env.LOGS_DIRS || process.env.LOGS_DIR || './logs')
+  .split(',')
+  .map(d => d.trim())
+  .filter(Boolean)
+
+const TRACE_DIRS = LOGS_DIRS.map(d => join(d, 'traces'))
 
 // Channel name cache (loaded from traces)
 const channelNameCache = new Map<string, string>()
@@ -34,52 +41,84 @@ const channelNameCache = new Map<string, string>()
 // Index Cache
 // ============================================================================
 
-type IndexEntry = TraceIndex & { filename: string, botName?: string }
+type IndexEntry = TraceIndex & { filename: string, botName?: string, logsDir?: string }
 
 let indexCache: IndexEntry[] | null = null
-let indexMtime: number = 0
+let indexMtimes: Map<string, number> = new Map()
 
 function getIndexCache(): IndexEntry[] {
-  const indexFile = join(TRACE_DIR, 'index.jsonl')
-  if (!existsSync(indexFile)) {
-    indexCache = []
-    indexMtime = 0
-    return []
-  }
-  
-  // Check if file changed since last load
-  const stat = statSync(indexFile)
-  if (indexCache !== null && stat.mtimeMs === indexMtime) {
-    // Cache hit - return cached data
-    return indexCache
-  }
-  
-  // Cache miss - reload from disk
-  console.log(`[cache] Reloading index (mtime changed: ${indexMtime} -> ${stat.mtimeMs})`)
-  const start = Date.now()
-  
-  const entries = readFileSync(indexFile, 'utf-8')
-    .split('\n')
-    .filter(Boolean)
-    .map(line => {
-      try { return JSON.parse(line) } 
-      catch { return null }
-    })
-    .filter(Boolean) as IndexEntry[]
-  
-  // Update channel name cache
-  for (const entry of entries) {
-    if (entry.channelName && entry.channelId) {
-      channelNameCache.set(entry.channelId, entry.channelName)
+  // Check if any index files have changed
+  let needsReload = indexCache === null
+
+  for (const traceDir of TRACE_DIRS) {
+    const indexFile = join(traceDir, 'index.jsonl')
+    if (!existsSync(indexFile)) continue
+
+    const stat = statSync(indexFile)
+    const cachedMtime = indexMtimes.get(indexFile) || 0
+    if (stat.mtimeMs !== cachedMtime) {
+      needsReload = true
+      break
     }
   }
-  
-  indexCache = entries
-  indexMtime = stat.mtimeMs
-  
-  console.log(`[cache] Loaded ${entries.length} index entries in ${Date.now() - start}ms`)
-  
-  return entries
+
+  if (!needsReload && indexCache !== null) {
+    return indexCache
+  }
+
+  // Cache miss - reload from all directories
+  console.log(`[cache] Reloading indexes from ${TRACE_DIRS.length} directories`)
+  const start = Date.now()
+
+  const allEntries: IndexEntry[] = []
+
+  for (let i = 0; i < TRACE_DIRS.length; i++) {
+    const traceDir = TRACE_DIRS[i]!
+    const logsDir = LOGS_DIRS[i]!
+    const indexFile = join(traceDir, 'index.jsonl')
+
+    if (!existsSync(indexFile)) continue
+
+    const stat = statSync(indexFile)
+    indexMtimes.set(indexFile, stat.mtimeMs)
+
+    const entries = readFileSync(indexFile, 'utf-8')
+      .split('\n')
+      .filter(Boolean)
+      .map(line => {
+        try {
+          const entry = JSON.parse(line) as IndexEntry
+          entry.logsDir = logsDir  // Track which logs dir this came from
+          return entry
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean) as IndexEntry[]
+
+    // Update channel name cache
+    for (const entry of entries) {
+      if (entry.channelName && entry.channelId) {
+        channelNameCache.set(entry.channelId, entry.channelName)
+      }
+    }
+
+    allEntries.push(...entries)
+  }
+
+  // Sort by timestamp descending (newest first)
+  // timestamp is Date but becomes string after JSON parse
+  allEntries.sort((a, b) => {
+    const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0
+    const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0
+    return timeB - timeA
+  })
+
+  indexCache = allEntries
+
+  console.log(`[cache] Loaded ${allEntries.length} total index entries in ${Date.now() - start}ms`)
+
+  return allEntries
 }
 
 // ============================================================================
@@ -87,13 +126,23 @@ function getIndexCache(): IndexEntry[] {
 // ============================================================================
 
 function discoverBots(): string[] {
-  if (!existsSync(TRACE_DIR)) return []
-  
-  return readdirSync(TRACE_DIR)
-    .filter(name => {
-      const path = join(TRACE_DIR, name)
-      return statSync(path).isDirectory() && name !== 'index.jsonl'
-    })
+  const bots = new Set<string>()
+
+  for (const traceDir of TRACE_DIRS) {
+    if (!existsSync(traceDir)) continue
+
+    const dirs = readdirSync(traceDir)
+      .filter(name => {
+        const path = join(traceDir, name)
+        return existsSync(path) && statSync(path).isDirectory() && name !== 'index.jsonl'
+      })
+
+    for (const dir of dirs) {
+      bots.add(dir)
+    }
+  }
+
+  return Array.from(bots)
 }
 
 function loadIndex(botName?: string): IndexEntry[] {
@@ -108,42 +157,79 @@ function loadIndex(botName?: string): IndexEntry[] {
 }
 
 function loadTrace(traceId: string): ActivationTrace | null {
-  // Search in all bot directories
-  const bots = discoverBots()
-  
-  for (const bot of bots) {
-    const botDir = join(TRACE_DIR, bot)
-    const files = readdirSync(botDir).filter(f => 
-      f.includes(traceId) && f.endsWith('.json')
+  // Search in all trace directories
+  for (const traceDir of TRACE_DIRS) {
+    if (!existsSync(traceDir)) continue
+
+    // Search in bot subdirectories
+    const bots = readdirSync(traceDir)
+      .filter(name => {
+        const path = join(traceDir, name)
+        return existsSync(path) && statSync(path).isDirectory() && name !== 'index.jsonl'
+      })
+
+    for (const bot of bots) {
+      const botDir = join(traceDir, bot)
+      const files = readdirSync(botDir).filter(f =>
+        f.includes(traceId) && f.endsWith('.json')
+      )
+      if (files.length > 0) {
+        const content = readFileSync(join(botDir, files[0]!), 'utf-8')
+        return JSON.parse(content)
+      }
+    }
+
+    // Also check root trace dir for legacy format
+    const rootFiles = readdirSync(traceDir).filter(f =>
+      f.includes(traceId) && f.endsWith('.json') && !f.includes('index')
     )
-    if (files.length > 0) {
-      const content = readFileSync(join(botDir, files[0]!), 'utf-8')
+    if (rootFiles.length > 0) {
+      const content = readFileSync(join(traceDir, rootFiles[0]!), 'utf-8')
       return JSON.parse(content)
     }
   }
-  
-  // Also check root trace dir for legacy format
-  const rootFiles = readdirSync(TRACE_DIR).filter(f => 
-    f.includes(traceId) && f.endsWith('.json') && !f.includes('index')
-  )
-  if (rootFiles.length > 0) {
-    const content = readFileSync(join(TRACE_DIR, rootFiles[0]!), 'utf-8')
-    return JSON.parse(content)
-  }
-  
+
   return null
 }
 
 function loadRequestBody(ref: string): any {
-  const path = join(LOGS_DIR, 'llm-requests', ref)
-  if (!existsSync(path)) return null
-  return JSON.parse(readFileSync(path, 'utf-8'))
+  for (const logsDir of LOGS_DIRS) {
+    const path = join(logsDir, 'llm-requests', ref)
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, 'utf-8'))
+    }
+  }
+  return null
 }
 
 function loadResponseBody(ref: string): any {
-  const path = join(LOGS_DIR, 'llm-responses', ref)
-  if (!existsSync(path)) return null
-  return JSON.parse(readFileSync(path, 'utf-8'))
+  for (const logsDir of LOGS_DIRS) {
+    const path = join(logsDir, 'llm-responses', ref)
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, 'utf-8'))
+    }
+  }
+  return null
+}
+
+function loadMembraneRequestBody(ref: string): any {
+  for (const logsDir of LOGS_DIRS) {
+    const path = join(logsDir, 'membrane-requests', ref)
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, 'utf-8'))
+    }
+  }
+  return null
+}
+
+function loadMembraneResponseBody(ref: string): any {
+  for (const logsDir of LOGS_DIRS) {
+    const path = join(logsDir, 'membrane-responses', ref)
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, 'utf-8'))
+    }
+  }
+  return null
 }
 
 function getChannelName(channelId: string): string {
@@ -274,27 +360,36 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
       return
     }
     
-    // GET /api/traces - List recent traces
+    // GET /api/traces - List traces (paginated, newest-first)
     if (path === '/api/traces') {
       const url = new URL(req.url!, `http://localhost:${PORT}`)
-      const limit = parseInt(url.searchParams.get('limit') || '50', 10)
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10), 1), 200)
+      const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10), 0)
       const channel = url.searchParams.get('channel')
       const failed = url.searchParams.get('failed') === 'true'
       const botFilter = url.searchParams.get('bot') || undefined
-      
-      let entries = loadIndex(botFilter).reverse()
+
+      // loadIndex already returns newest-first — no .reverse() needed
+      let entries = loadIndex(botFilter)
       if (channel) entries = entries.filter(e => e.channelId === channel)
       if (failed) entries = entries.filter(e => !e.success)
-      
+
+      const total = entries.length
+
       // Strip large arrays not needed for list view (only used for search)
       // This reduces response size from ~13KB to ~500 bytes per entry
-      const slimEntries = entries.slice(0, limit).map(e => ({
+      const slimEntries = entries.slice(offset, offset + limit).map(e => ({
         traceId: e.traceId,
         timestamp: e.timestamp,
         channelId: e.channelId,
         triggeringMessageId: e.triggeringMessageId,
         botName: e.botName,
         channelName: getChannelName(e.channelId),
+        activationReason: (e as any).activationReason,
+        triggerPreview: (e as any).triggerPreview,
+        responsePreview: (e as any).responsePreview,
+        isThread: (e as any).isThread,
+        parentChannelId: (e as any).parentChannelId,
         success: e.success,
         durationMs: e.durationMs,
         llmCallCount: e.llmCallCount,
@@ -302,8 +397,8 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
         totalTokens: e.totalTokens,
         // contextMessageIds and sentMessageIds intentionally omitted
       }))
-      
-      sendJson(req, res, slimEntries)
+
+      sendJson(req, res, { traces: slimEntries, total, offset, limit })
       return
     }
     
@@ -345,7 +440,33 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
       sendJson(req, res, body)
       return
     }
-    
+
+    // GET /api/membrane-request/<ref>
+    if (path.startsWith('/api/membrane-request/')) {
+      const ref = path.split('/')[3]
+      const body = loadMembraneRequestBody(ref!)
+      if (!body) {
+        res.statusCode = 404
+        res.end(JSON.stringify({ error: 'Membrane request body not found' }))
+        return
+      }
+      sendJson(req, res, body)
+      return
+    }
+
+    // GET /api/membrane-response/<ref>
+    if (path.startsWith('/api/membrane-response/')) {
+      const ref = path.split('/')[3]
+      const body = loadMembraneResponseBody(ref!)
+      if (!body) {
+        res.statusCode = 404
+        res.end(JSON.stringify({ error: 'Membrane response body not found' }))
+        return
+      }
+      sendJson(req, res, body)
+      return
+    }
+
     // GET /api/channels - List known channels
     if (path === '/api/channels') {
       const channels = Array.from(channelNameCache.entries()).map(([id, name]) => ({
@@ -861,6 +982,43 @@ const HTML = `<!DOCTYPE html>
       font-size: 0.85rem;
       color: var(--text-muted);
     }
+
+    .pagination {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 16px;
+      padding: 12px 0;
+    }
+
+    .pagination-info {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    .pagination-buttons {
+      display: flex;
+      gap: 8px;
+    }
+
+    .pagination-buttons button {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+
+    .pagination-buttons button:hover:not(:disabled) {
+      border-color: var(--accent);
+    }
+
+    .pagination-buttons button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
     
     .llm-call {
       background: var(--bg);
@@ -949,6 +1107,7 @@ const HTML = `<!DOCTYPE html>
         <select id="botSelect" onchange="onBotChange()">
           <option value="">All Bots</option>
         </select>
+        <button id="failedToggle" class="filter-btn" onclick="toggleFailed()">Errors Only</button>
       </div>
     </div>
     
@@ -968,8 +1127,15 @@ const HTML = `<!DOCTYPE html>
       <div id="searchResults"></div>
       
       <div id="recentTraces">
-        <h2 style="font-size: 1rem; margin-bottom: 12px; color: var(--text-muted);">Recent Traces</h2>
+        <h2 style="font-size: 1rem; margin-bottom: 12px; color: var(--text-muted);">Traces</h2>
         <div id="recentList"></div>
+        <div id="pagination" class="pagination" style="display: none;">
+          <span id="paginationInfo" class="pagination-info"></span>
+          <div class="pagination-buttons">
+            <button id="prevPage" onclick="changePage(-1)">Previous</button>
+            <button id="nextPage" onclick="changePage(1)">Next</button>
+          </div>
+        </div>
       </div>
     </div>
     
@@ -985,6 +1151,10 @@ const HTML = `<!DOCTYPE html>
     let currentTrace = null;
     let authToken = localStorage.getItem('trace_viewer_token') || '';
     let currentBot = '';
+    let currentPage = 0;
+    let pageSize = 50;
+    let totalTraces = 0;
+    let failedOnly = false;
     
     // Check if auth is required
     async function checkAuth() {
@@ -1038,9 +1208,31 @@ const HTML = `<!DOCTYPE html>
     });
     
     async function init() {
+      // Restore state from URL params before loading data
+      const params = new URLSearchParams(window.location.search);
+      const urlBot = params.get('bot');
+      const urlPage = parseInt(params.get('page') || '0', 10);
+      if (urlPage > 0) currentPage = urlPage;
+      if (params.get('failed') === 'true') failedOnly = true;
+
       await loadBots();
-      loadRecentTraces();
-      
+
+      // Restore bot selector from URL after bots are loaded
+      if (urlBot) {
+        const select = document.getElementById('botSelect');
+        if (Array.from(select.options).some(o => o.value === urlBot)) {
+          select.value = urlBot;
+          currentBot = urlBot;
+        }
+      }
+
+      // Restore failed filter toggle
+      if (failedOnly) {
+        document.getElementById('failedToggle').classList.add('active');
+      }
+
+      await loadTraces();
+
       // Check URL for initial trace view or search
       const path = window.location.pathname;
       const traceMatch = path.match(/^\\/trace\\/([a-zA-Z0-9-]+)/);
@@ -1049,14 +1241,13 @@ const HTML = `<!DOCTYPE html>
         loadTrace(traceMatch[1]);
       } else {
         // Check for search query
-        const params = new URLSearchParams(window.location.search);
         const q = params.get('q');
         if (q) {
           document.getElementById('searchInput').value = q;
           search();
         }
       }
-      
+
       // Enter key to search
       document.getElementById('searchInput').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') search();
@@ -1078,7 +1269,35 @@ const HTML = `<!DOCTYPE html>
     
     function onBotChange() {
       currentBot = document.getElementById('botSelect').value;
-      loadRecentTraces();
+      currentPage = 0;
+      syncUrlState();
+      loadTraces();
+    }
+
+    function toggleFailed() {
+      failedOnly = !failedOnly;
+      currentPage = 0;
+      document.getElementById('failedToggle').classList.toggle('active', failedOnly);
+      syncUrlState();
+      loadTraces();
+    }
+
+    function syncUrlState() {
+      const params = new URLSearchParams();
+      if (currentBot) params.set('bot', currentBot);
+      if (currentPage > 0) params.set('page', String(currentPage));
+      if (failedOnly) params.set('failed', 'true');
+      const qs = params.toString();
+      history.replaceState({}, '', qs ? '?' + qs : window.location.pathname);
+    }
+
+    function changePage(delta) {
+      const maxPage = Math.max(0, Math.ceil(totalTraces / pageSize) - 1);
+      const newPage = currentPage + delta;
+      if (newPage < 0 || newPage > maxPage) return;
+      currentPage = newPage;
+      syncUrlState();
+      loadTraces();
     }
     
     function apiFetch(url, options = {}) {
@@ -1091,13 +1310,17 @@ const HTML = `<!DOCTYPE html>
       });
     }
     
-    async function loadRecentTraces() {
-      let url = '/api/traces?limit=10';
+    async function loadTraces() {
+      const offset = currentPage * pageSize;
+      let url = '/api/traces?limit=' + pageSize + '&offset=' + offset;
       if (currentBot) url += '&bot=' + encodeURIComponent(currentBot);
-      
+      if (failedOnly) url += '&failed=true';
+
       const res = await apiFetch(url);
-      const traces = await res.json();
-      
+      const data = await res.json();
+      const traces = data.traces;
+      totalTraces = data.total;
+
       const html = traces.map(t => \`
         <div class="result-card" onclick="loadTrace('\${t.traceId}')">
           <div class="result-header">
@@ -1114,8 +1337,27 @@ const HTML = `<!DOCTYPE html>
           </div>
         </div>
       \`).join('');
-      
+
       document.getElementById('recentList').innerHTML = html || '<div class="empty-state">No traces yet</div>';
+
+      // Update pagination controls
+      const paginationEl = document.getElementById('pagination');
+      if (totalTraces > pageSize) {
+        const start = offset + 1;
+        const end = Math.min(offset + pageSize, totalTraces);
+        const maxPage = Math.ceil(totalTraces / pageSize) - 1;
+        document.getElementById('paginationInfo').textContent = 'Showing ' + start + '–' + end + ' of ' + totalTraces + ' traces';
+        document.getElementById('prevPage').disabled = currentPage <= 0;
+        document.getElementById('nextPage').disabled = currentPage >= maxPage;
+        paginationEl.style.display = 'flex';
+      } else {
+        paginationEl.style.display = totalTraces > 0 ? 'flex' : 'none';
+        if (totalTraces > 0) {
+          document.getElementById('paginationInfo').textContent = totalTraces + ' trace' + (totalTraces !== 1 ? 's' : '');
+          document.getElementById('prevPage').disabled = true;
+          document.getElementById('nextPage').disabled = true;
+        }
+      }
     }
     
     async function search() {
@@ -1179,9 +1421,13 @@ const HTML = `<!DOCTYPE html>
     function showSearch() {
       document.getElementById('searchView').style.display = 'block';
       document.getElementById('traceView').classList.remove('active');
-      
-      // Update URL back to root
-      history.pushState({}, '', '/');
+
+      // Update URL back to list view, preserving filter state
+      const params = new URLSearchParams();
+      if (currentBot) params.set('bot', currentBot);
+      if (currentPage > 0) params.set('page', String(currentPage));
+      const qs = params.toString();
+      history.pushState({}, '', qs ? '/?' + qs : '/');
     }
     
     function showTrace() {
@@ -1211,7 +1457,7 @@ const HTML = `<!DOCTYPE html>
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
           <h2>Trace: \${t.traceId}</h2>
           <div style="display: flex; gap: 8px;">
-            \${t.llmCalls?.length > 0 ? \`<button onclick="viewRequest('\${t.llmCalls[0].requestBodyRef}')" class="view-json-btn" title="View first LLM request">📤 View Request</button>\` : ''}
+            \${t.llmCalls?.length > 0 ? \`<button onclick="viewRequest('\${t.llmCalls[0].requestBodyRef || (t.llmCalls[0].requestBodyRefs && t.llmCalls[0].requestBodyRefs[0])}')" class="view-json-btn" title="View first LLM request">📤 View Request</button>\` : ''}
             <button onclick="copyTraceLink()" class="view-json-btn" title="Copy shareable link">📋 Copy Link</button>
           </div>
         </div>
@@ -1389,9 +1635,15 @@ const HTML = `<!DOCTYPE html>
               <div class="llm-call">
                 <div class="llm-call-header">
                   <strong>Call #\${call.depth}</strong>
-                  <div>
-                    <button class="view-json-btn" onclick="viewRequest('\${call.requestBodyRef}')">View Request</button>
-                    <button class="view-json-btn" onclick="viewResponse('\${call.responseBodyRef}')">View Response</button>
+                  <div style="display: flex; flex-wrap: wrap; gap: 4px;">
+                    \${call.requestBodyRefs && call.requestBodyRefs.length > 1
+                      ? call.requestBodyRefs.map((ref, idx) => \`<button class="view-json-btn" onclick="viewRequest('\${ref}')" title="Raw LLM API request \${idx + 1}">Req \${idx + 1}</button>\`).join('')
+                      : \`<button class="view-json-btn" onclick="viewRequest('\${call.requestBodyRef || (call.requestBodyRefs && call.requestBodyRefs[0])}')" title="Raw LLM API request">Request</button>\`}
+                    \${call.responseBodyRefs && call.responseBodyRefs.length > 1
+                      ? call.responseBodyRefs.map((ref, idx) => \`<button class="view-json-btn" onclick="viewResponse('\${ref}')" title="Raw LLM API response \${idx + 1}">Resp \${idx + 1}</button>\`).join('')
+                      : \`<button class="view-json-btn" onclick="viewResponse('\${call.responseBodyRef || (call.responseBodyRefs && call.responseBodyRefs[0])}')" title="Raw LLM API response">Response</button>\`}
+                    \${call.membraneRequestRef ? \`<button class="view-json-btn" onclick="viewMembraneRequest('\${call.membraneRequestRef}')" title="Membrane normalized request" style="background: #4f46e5;">Membrane Req</button>\` : ''}
+                    \${call.membraneResponseRef ? \`<button class="view-json-btn" onclick="viewMembraneResponse('\${call.membraneResponseRef}')" title="Membrane normalized response" style="background: #4f46e5;">Membrane Resp</button>\` : ''}
                   </div>
                 </div>
                 <div class="llm-call-stats">
@@ -1403,6 +1655,7 @@ const HTML = `<!DOCTYPE html>
                   \${call.tokenUsage.cacheCreationTokens ? \`<span style="color: #f59e0b;">Cache created: \${formatTokens(call.tokenUsage.cacheCreationTokens)}</span>\` : ''}
                   <span>Stop: \${call.response.stopReason}</span>
                   \${call.response.toolUseCount > 0 ? \`<span>Tools: \${call.response.toolUseCount}</span>\` : ''}
+                  \${call.requestBodyRefs && call.requestBodyRefs.length > 1 ? \`<span style="color: #8b5cf6;">Tool loop: \${call.requestBodyRefs.length} calls</span>\` : ''}
                 </div>
                 \${call.error ? \`<div style="color: var(--error); margin-top: 8px;">Error: \${call.error.message}</div>\` : ''}
               </div>
@@ -1527,7 +1780,21 @@ const HTML = `<!DOCTYPE html>
       const data = await res.json();
       showJsonModal('LLM Response', data);
     }
-    
+
+    async function viewMembraneRequest(ref) {
+      if (!ref) { alert('No membrane request stored'); return; }
+      const res = await apiFetch('/api/membrane-request/' + ref);
+      const data = await res.json();
+      showJsonModal('Membrane Request', data);
+    }
+
+    async function viewMembraneResponse(ref) {
+      if (!ref) { alert('No membrane response stored'); return; }
+      const res = await apiFetch('/api/membrane-response/' + ref);
+      const data = await res.json();
+      showJsonModal('Membrane Response', data);
+    }
+
     function viewFullConfig() {
       if (!currentTrace?.config) { alert('No config stored for this trace'); return; }
       showJsonModal('Bot Configuration', currentTrace.config);
@@ -1579,17 +1846,212 @@ const HTML = `<!DOCTYPE html>
     }
     
     function renderFormattedLLMData(title, data) {
-      if (title.includes('Request')) {
+      if (title.includes('Membrane Request')) {
+        return renderFormattedMembraneRequest(data);
+      } else if (title.includes('Membrane Response')) {
+        return renderFormattedMembraneResponse(data);
+      } else if (title.includes('Request')) {
         return renderFormattedRequest(data);
       } else {
         return renderFormattedResponse(data);
       }
     }
-    
+
+    function renderFormattedMembraneRequest(data) {
+      let html = '';
+
+      // Config section
+      if (data.config) {
+        html += \`
+          <div style="margin-bottom: 20px; padding: 12px; background: var(--bg); border-radius: 8px; border-left: 3px solid #8b5cf6;">
+            <div style="font-weight: 600; color: #8b5cf6; margin-bottom: 8px;">⚙️ Config</div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; font-size: 0.85rem;">
+              <span>Model: <strong>\${data.config.model || 'default'}</strong></span>
+              <span>Max tokens: <strong>\${data.config.maxTokens || 'default'}</strong></span>
+              <span>Temperature: <strong>\${data.config.temperature ?? 'default'}</strong></span>
+              \${data.config.thinking ? \`<span>Thinking: <strong>\${JSON.stringify(data.config.thinking)}</strong></span>\` : ''}
+            </div>
+          </div>
+        \`;
+      }
+
+      // System prompt
+      if (data.system) {
+        html += \`
+          <div style="margin-bottom: 20px;">
+            <div style="font-weight: 600; color: var(--accent); margin-bottom: 8px; display: flex; justify-content: space-between;">
+              <span>📋 System Prompt</span>
+              <span style="color: var(--text-muted); font-weight: normal;">\${data.system.length} chars</span>
+            </div>
+            <div style="background: var(--bg); padding: 16px; border-radius: 8px; border-left: 3px solid #6366f1; white-space: pre-wrap; font-family: inherit; line-height: 1.6; max-height: 300px; overflow-y: auto;">\${escapeHtml(data.system)}</div>
+          </div>
+        \`;
+      }
+
+      // Messages (membrane format uses participant instead of role)
+      if (data.messages && data.messages.length > 0) {
+        html += \`<div style="font-weight: 600; color: var(--accent); margin-bottom: 12px;">💬 Messages (\${data.messages.length})</div>\`;
+
+        for (const msg of data.messages) {
+          const participant = msg.participant || 'unknown';
+          const isAssistant = participant.toLowerCase().includes('claude') || participant.toLowerCase().includes('assistant') || participant.toLowerCase().includes('bot');
+          const roleColor = isAssistant ? '#6366f1' : '#22c55e';
+          const roleIcon = isAssistant ? '🤖' : '👤';
+
+          // Check for cache_control in metadata
+          const hasCache = msg.metadata?.cacheControl;
+          const cacheBadge = hasCache ? '<span style="background: #10b981; color: white; font-size: 0.65rem; padding: 2px 6px; border-radius: 3px; margin-left: 8px;">📍 CACHED</span>' : '';
+          const cacheHighlight = hasCache ? 'border: 2px solid #10b981; box-shadow: 0 0 8px rgba(16, 185, 129, 0.3);' : '';
+
+          // Extract text content
+          let content = '';
+          if (Array.isArray(msg.content)) {
+            for (const block of msg.content) {
+              if (block.type === 'text') content += block.text;
+              else if (block.type === 'image') content += '[Image]';
+              else if (block.type === 'tool_use') content += \`[Tool: \${block.name}]\`;
+              else if (block.type === 'tool_result') content += \`[Tool Result]\`;
+            }
+          }
+
+          html += \`
+            <div style="margin-bottom: 16px; background: var(--bg); border-radius: 8px; overflow: hidden; \${cacheHighlight}">
+              <div style="padding: 8px 12px; background: var(--bg-tertiary); border-left: 3px solid \${roleColor}; display: flex; justify-content: space-between; align-items: center;">
+                <span>\${roleIcon} <strong style="color: \${roleColor};">\${participant}</strong>\${cacheBadge}</span>
+                <span style="color: var(--text-muted); font-size: 0.8rem;">\${content.length} chars</span>
+              </div>
+              <div style="padding: 12px; white-space: pre-wrap; font-family: inherit; line-height: 1.6; max-height: 400px; overflow-y: auto;">\${escapeHtml(content.trim())}</div>
+            </div>
+          \`;
+        }
+      }
+
+      // Tools
+      if (data.tools && data.tools.length > 0) {
+        html += \`
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div style="font-weight: 600; color: var(--warning); margin-bottom: 12px;">🔧 Tools (\${data.tools.length})</div>
+            <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+              \${data.tools.map(t => \`<span style="background: var(--bg-tertiary); padding: 4px 12px; border-radius: 4px; font-size: 0.85rem;">\${t.name}</span>\`).join('')}
+            </div>
+          </div>
+        \`;
+      }
+
+      // Other fields
+      const renderedKeys = new Set(['system', 'messages', 'config', 'tools', 'toolMode', 'stopSequences', 'maxParticipantsForStop']);
+      const otherKeys = Object.keys(data).filter(k => !renderedKeys.has(k));
+      if (otherKeys.length > 0) {
+        html += \`
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div style="font-weight: 600; color: var(--warning); margin-bottom: 12px;">📦 Other Fields (\${otherKeys.length})</div>
+            \${otherKeys.map(key => \`
+              <div style="margin-bottom: 12px;">
+                <div style="color: var(--accent); font-size: 0.85rem; margin-bottom: 4px;">\${key}:</div>
+                <div style="background: var(--bg); padding: 12px; border-radius: 4px; white-space: pre-wrap; font-family: monospace; font-size: 0.85rem; max-height: 200px; overflow-y: auto;">\${escapeHtml(typeof data[key] === 'string' ? data[key] : JSON.stringify(data[key], null, 2))}</div>
+              </div>
+            \`).join('')}
+          </div>
+        \`;
+      }
+
+      return html;
+    }
+
+    function renderFormattedMembraneResponse(data) {
+      let html = '';
+
+      // Content blocks
+      if (data.content && data.content.length > 0) {
+        html += \`<div style="font-weight: 600; color: var(--accent); margin-bottom: 12px;">📝 Content Blocks (\${data.content.length})</div>\`;
+
+        for (const block of data.content) {
+          if (block.type === 'text') {
+            html += \`
+              <div style="margin-bottom: 16px;">
+                <div style="font-size: 0.75rem; color: var(--accent); margin-bottom: 8px; display: flex; justify-content: space-between;">
+                  <span>TEXT</span>
+                  <span style="color: var(--text-muted);">\${block.text?.length || 0} chars</span>
+                </div>
+                <div style="background: var(--bg); padding: 16px; border-radius: 8px; border-left: 3px solid #6366f1; white-space: pre-wrap; line-height: 1.6;">\${escapeHtml(block.text || '')}</div>
+              </div>
+            \`;
+          } else if (block.type === 'tool_use') {
+            html += \`
+              <div style="margin-bottom: 16px;">
+                <div style="font-size: 0.75rem; color: var(--warning); margin-bottom: 8px;">🔧 TOOL USE: \${block.name}</div>
+                <div style="background: var(--bg); padding: 12px; border-radius: 8px; border-left: 3px solid #f59e0b;">
+                  <div style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 8px;">ID: \${block.id}</div>
+                  <pre style="margin: 0; white-space: pre-wrap;">\${escapeHtml(JSON.stringify(block.input, null, 2))}</pre>
+                </div>
+              </div>
+            \`;
+          } else {
+            html += \`
+              <div style="margin-bottom: 16px;">
+                <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 8px;">\${block.type?.toUpperCase() || 'UNKNOWN'}</div>
+                <div style="background: var(--bg); padding: 12px; border-radius: 8px; white-space: pre-wrap; font-family: monospace; font-size: 0.85rem;">\${escapeHtml(JSON.stringify(block, null, 2))}</div>
+              </div>
+            \`;
+          }
+        }
+      }
+
+      // Details section
+      if (data.details) {
+        html += \`
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div style="font-weight: 600; color: var(--accent); margin-bottom: 12px;">📊 Details</div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; font-size: 0.85rem;">
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Stop Reason</div>
+                <strong>\${data.details.stop?.reason || data.stopReason || 'unknown'}</strong>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Model</div>
+                <strong>\${data.details.model?.actual || 'unknown'}</strong>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Duration</div>
+                <strong>\${data.details.timing?.totalDurationMs || 0}ms</strong>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Attempts</div>
+                <strong>\${data.details.timing?.attempts || 1}</strong>
+              </div>
+            </div>
+          </div>
+        \`;
+      }
+
+      // Usage
+      if (data.usage || data.details?.usage) {
+        const usage = data.details?.usage || data.usage;
+        html += \`
+          <div style="margin-top: 16px;">
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; font-size: 0.85rem;">
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Input Tokens</div>
+                <strong>\${usage.inputTokens?.toLocaleString() || 0}</strong>
+              </div>
+              <div style="background: var(--bg); padding: 12px; border-radius: 4px;">
+                <div style="color: var(--text-muted); margin-bottom: 4px;">Output Tokens</div>
+                <strong>\${usage.outputTokens?.toLocaleString() || 0}</strong>
+              </div>
+              \${usage.cacheReadTokens ? \`<div style="background: var(--bg); padding: 12px; border-radius: 4px;"><div style="color: #10b981; margin-bottom: 4px;">Cache Read</div><strong>\${usage.cacheReadTokens?.toLocaleString()}</strong></div>\` : ''}
+              \${usage.cacheCreationTokens ? \`<div style="background: var(--bg); padding: 12px; border-radius: 4px;"><div style="color: #f59e0b; margin-bottom: 4px;">Cache Created</div><strong>\${usage.cacheCreationTokens?.toLocaleString()}</strong></div>\` : ''}
+            </div>
+          </div>
+        \`;
+      }
+
+      return html;
+    }
+
     function renderFormattedRequest(data) {
       let html = '';
       const renderedKeys = new Set(['system', 'messages', 'tools', 'model', 'max_tokens', 'temperature']);
-      
+
       if (data.system) {
         // System can be string or array with cache_control
         const isArraySystem = Array.isArray(data.system);
@@ -1848,5 +2310,10 @@ server.listen(PORT, HOST, () => {
   } else {
     console.log(`  ⚠️  No authentication (set AUTH_TOKEN for production)\n`)
   }
-  console.log(`  📁 Logs directory: ${LOGS_DIR}\n`)
+  console.log(`  📁 Logs directories:`)
+  for (const dir of LOGS_DIRS) {
+    const exists = existsSync(dir)
+    console.log(`     ${exists ? '✓' : '✗'} ${dir}`)
+  }
+  console.log()
 })

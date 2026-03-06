@@ -14,154 +14,24 @@ import type {
   StopReason,
 } from '../../types.js';
 
-// NOTE: membrane types are defined locally until membrane is installed
-// Once `npm install @animalabs/membrane` is run,
-// these can be replaced with: import type { ... } from '@animalabs/membrane';
+// Import types from @animalabs/membrane
+import type {
+  NormalizedMessage,
+  NormalizedRequest,
+  NormalizedResponse,
+  ContentBlock as MembraneContentBlock,
+  ImageContent as MembraneImageContent,
+  ToolUseContent as MembraneToolUseContent,
+  ToolResultContent as MembraneToolResultContent,
+  ToolDefinition as MembraneToolDefinition,
+  MessageMetadata,
+  GenerationConfig,
+  ToolMode,
+  StopReason as MembraneStopReason,
+} from '@animalabs/membrane';
+import { getFormatterForModel } from './factory.js';
 
-// ============================================================================
-// Membrane Types (local definitions until package is installed)
-// ============================================================================
-
-interface MessageMetadata {
-  timestamp?: Date;
-  sourceId?: string;
-  cacheControl?: { type: 'ephemeral' };
-  [key: string]: unknown;
-}
-
-interface NormalizedMessage {
-  participant: string;
-  content: MembraneContentBlock[];
-  metadata?: MessageMetadata;
-}
-
-interface GenerationConfig {
-  model: string;
-  maxTokens: number;
-  temperature?: number;
-  topP?: number;
-  presencePenalty?: number;
-  frequencyPenalty?: number;
-  thinking?: {
-    enabled: boolean;
-    budgetTokens?: number;
-  };
-}
-
-type ToolMode = 'xml' | 'native' | 'auto';
-
-interface NormalizedRequest {
-  messages: NormalizedMessage[];
-  system?: string;
-  config: GenerationConfig;
-  tools?: MembraneToolDefinition[];
-  toolMode?: ToolMode;
-  stopSequences?: string[] | { sequences: string[] };
-  maxParticipantsForStop?: number;
-}
-
-type MembraneStopReason =
-  | 'end_turn'
-  | 'max_tokens'
-  | 'stop_sequence'
-  | 'tool_use'
-  | 'refusal'
-  | 'abort';
-
-/**
- * Membrane's ToolCall type
- */
-interface MembraneToolCall {
-  id: string;
-  name: string;
-  input: Record<string, unknown>;
-}
-
-/**
- * Membrane's ToolResult type (content can now be string or content blocks for images)
- */
-interface MembraneToolResult {
-  toolUseId: string;
-  content: string | Array<{ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; data: string; mediaType: string } }>;
-  isError?: boolean;
-}
-
-interface NormalizedResponse {
-  content: MembraneContentBlock[];
-  
-  /**
-   * Raw assistant output text including all XML.
-   * NEW in streaming refactor - use for verbatim prefill.
-   */
-  rawAssistantText: string;
-  
-  /**
-   * Tool calls extracted from response (convenience accessor).
-   * NEW in streaming refactor.
-   */
-  toolCalls: MembraneToolCall[];
-  
-  /**
-   * Tool results executed during this response.
-   * NEW in streaming refactor - empty for complete(), populated by stream().
-   */
-  toolResults: MembraneToolResult[];
-  
-  stopReason: MembraneStopReason;
-  usage: { inputTokens: number; outputTokens: number };
-  details: {
-    stop: { reason: MembraneStopReason; wasTruncated: boolean };
-    usage: {
-      inputTokens: number;
-      outputTokens: number;
-      cacheCreationTokens?: number;
-      cacheReadTokens?: number;
-    };
-    timing: { totalDurationMs: number; attempts: number };
-    model: { requested: string; actual: string; provider: string };
-    cache: { markersInRequest: number; tokensCreated: number; tokensRead: number; hitRatio: number };
-  };
-  raw: { request: unknown; response: unknown };
-}
-
-interface MembraneToolDefinition {
-  name: string;
-  description: string;
-  inputSchema: {
-    type: 'object';
-    properties: Record<string, unknown>;
-    required?: string[];
-  };
-}
-
-type MembraneContentBlock =
-  | { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }
-  | MembraneImageContent
-  | MembraneToolUseContent
-  | MembraneToolResultContent
-  | { type: 'thinking'; thinking: string; signature?: string };
-
-interface MembraneImageContent {
-  type: 'image';
-  source: { type: 'base64'; data: string; mediaType: string } | { type: 'url'; url: string };
-  tokenEstimate?: number;
-}
-
-interface MembraneToolUseContent {
-  type: 'tool_use';
-  id: string;
-  name: string;
-  input: Record<string, unknown>;
-}
-
-interface MembraneToolResultContent {
-  type: 'tool_result';
-  toolUseId: string;
-  content: string | MembraneContentBlock[];
-  isError?: boolean;
-}
-
-// Export types for use by other modules
+// Re-export types for use by other modules (preserving existing API)
 export type {
   NormalizedMessage,
   NormalizedRequest,
@@ -182,16 +52,23 @@ export type {
  * Convert chapterx ParticipantMessage to membrane NormalizedMessage
  * 
  * Key differences handled:
- * - cacheControl moves from top-level to metadata
+ * - cacheBreakpoint passes through directly (used by formatter for cache_control)
  * - timestamp, messageId move to metadata
  * - Image source.media_type → source.mediaType
  */
 export function toMembraneMessage(msg: ParticipantMessage): NormalizedMessage {
-  return {
+  const result: NormalizedMessage = {
     participant: msg.participant,
     content: msg.content.map(toMembraneContentBlock),
     metadata: buildMessageMetadata(msg),
   };
+  
+  // Pass through cacheBreakpoint directly - formatter checks this property
+  if (msg.cacheBreakpoint) {
+    result.cacheBreakpoint = true;
+  }
+  
+  return result;
 }
 
 /**
@@ -203,15 +80,42 @@ export function fromMembraneMessage(msg: NormalizedMessage): ParticipantMessage 
     content: msg.content.map(fromMembraneContentBlock),
     timestamp: msg.metadata?.timestamp,
     messageId: msg.metadata?.sourceId,
-    cacheControl: msg.metadata?.cacheControl,
+    cacheBreakpoint: msg.cacheBreakpoint,
   };
 }
 
 /**
  * Convert array of chapterx messages to membrane format
+ *
+ * Filters out empty assistant messages at the end - these are added by chapterx
+ * context builder for its own prefill mechanism, but membrane handles prefill internally.
  */
 export function toMembraneMessages(messages: ParticipantMessage[]): NormalizedMessage[] {
-  return messages.map(toMembraneMessage);
+  // Filter out trailing empty assistant messages (chapterx prefill placeholder)
+  // These are messages with empty text content used to start bot completion
+  let filteredMessages = messages;
+
+  while (filteredMessages.length > 0) {
+    const lastMsg = filteredMessages[filteredMessages.length - 1];
+    if (!lastMsg) break;
+
+    // Check if it's an empty message (only text blocks with empty/whitespace text)
+    const isEmptyMessage = lastMsg.content.every(block => {
+      if (block.type === 'text') {
+        return !block.text || block.text.trim() === '';
+      }
+      return false; // Non-text blocks are not "empty"
+    });
+
+    if (isEmptyMessage && lastMsg.content.length > 0) {
+      // Remove trailing empty message
+      filteredMessages = filteredMessages.slice(0, -1);
+    } else {
+      break; // Stop when we hit a non-empty message
+    }
+  }
+
+  return filteredMessages.map(toMembraneMessage);
 }
 
 /**
@@ -239,8 +143,8 @@ export function toMembraneContentBlock(block: ContentBlock): MembraneContentBloc
         text: block.text,
       };
       
-    case 'image':
-      return {
+    case 'image': {
+      const imgResult: MembraneContentBlock = {
         type: 'image',
         source: block.source.type === 'base64'
           ? {
@@ -254,6 +158,12 @@ export function toMembraneContentBlock(block: ContentBlock): MembraneContentBloc
             },
         tokenEstimate: (block as any).tokenEstimate,
       };
+      // Preserve sourceUrl for providers that need URL-as-text fallback (Gemini 3.x)
+      if ((block as any).sourceUrl) {
+        (imgResult as any).sourceUrl = (block as any).sourceUrl;
+      }
+      return imgResult;
+    }
       
     case 'tool_use':
       return {
@@ -335,6 +245,19 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
       };
     }
     
+    case 'generated_image': {
+      // Convert membrane generated_image to chapterx image format
+      const genImg = block as any;
+      return {
+        type: 'image',
+        source: {
+          type: 'base64',
+          data: genImg.data,
+          media_type: genImg.mimeType || 'image/png',
+        },
+      };
+    }
+
     case 'thinking':
       // Convert thinking block to text (chapterx doesn't have native thinking type)
       return {
@@ -364,17 +287,36 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
  * - Direct claude-* models → xml (Anthropic prefill mode)
  * - Other models → native (likely going through OpenRouter)
  */
-export function resolveToolModeForModel(modelName: string): ToolMode {
+export function resolveToolModeForModel(
+  modelName: string,
+  mode?: 'chat' | 'prefill' | 'base-model'
+): ToolMode {
+  // Config mode takes precedence when explicitly set
+  if (mode === 'chat') return 'native';
+  if (mode === 'prefill') return 'xml';
+  if (mode === 'base-model') return 'native';
+
+  // Fall back to model-name heuristics when mode is not set
+
+  // Check per-model formatter routes first (e.g., claude-opus-4-6 → native)
+  const formatterOverride = getFormatterForModel(modelName);
+  if (formatterOverride === 'native') {
+    return 'native';
+  }
+  if (formatterOverride === 'completions') {
+    return 'native'; // Completions models don't use XML tools
+  }
+
   // OpenRouter models have a provider prefix
   if (modelName.includes('/')) {
     return 'native';
   }
-  
+
   // Direct Claude models use XML tools for prefill compatibility
   if (modelName.startsWith('claude-')) {
     return 'xml';
   }
-  
+
   // Default to native for unknown models (safer for non-Claude models)
   return 'native';
 }
@@ -392,10 +334,12 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     frequencyPenalty: request.config.frequency_penalty,
   };
   
-  // Handle thinking mode
+  // Enable extended thinking when prefill_thinking is set
+  // Membrane will use the API's thinking feature and return thinking blocks
   if (request.config.prefill_thinking) {
     config.thinking = {
       enabled: true,
+      budgetTokens: 10000,  // Default budget for extended thinking
     };
   }
   
@@ -406,18 +350,42 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     tools: request.tools?.map(toMembraneToolDefinition),
     // Explicitly set tool mode based on model to work around RoutingAdapter issue
     // Membrane's auto-detection checks adapter.name which is 'routing' for RoutingAdapter
-    toolMode: resolveToolModeForModel(request.config.model),
+    toolMode: resolveToolModeForModel(request.config.model, request.config.mode),
     // Control participant-based stop sequences:
     // - If participant_stop_sequences is false (default), disable them (set to 0)
     // - If participant_stop_sequences is true, use membrane default (don't set)
     maxParticipantsForStop: request.config.participant_stop_sequences ? undefined : 0,
+    // Prompt caching control - when false, cache_control markers are not added to requests
+    promptCaching: request.config.prompt_caching,
+    // Pass through cache TTL for Anthropic extended caching (1h vs default 5m)
+    cacheTtl: request.config.cache_ttl,
+    // Context prefix for simulacrum seeding (injected as first assistant message)
+    contextPrefix: request.context_prefix,
+    // Custom prefill user message (replaces '[Start]' synthetic user message)
+    prefillUserMessage: request.prefill_user_message,
   };
-  
+
   // Handle stop sequences
   if (request.stop_sequences && request.stop_sequences.length > 0) {
     normalizedRequest.stopSequences = request.stop_sequences;
   }
-  
+
+  // Pass through provider-specific params (e.g., reasoning config for OpenRouter)
+  if (request.config.provider_params) {
+    normalizedRequest.providerParams = { ...request.config.provider_params };
+  }
+
+  // Handle explicit image generation config override
+  // Flows through providerParams → extra → Gemini generationConfig
+  if (request.config.generate_images !== undefined) {
+    normalizedRequest.providerParams = {
+      ...normalizedRequest.providerParams,
+      generationConfig: {
+        responseModalities: request.config.generate_images ? ['TEXT', 'IMAGE'] : ['TEXT'],
+      },
+    };
+  }
+
   return normalizedRequest;
 }
 
@@ -434,15 +402,14 @@ export function fromMembraneRequest(request: NormalizedRequest, botName: string)
       temperature: request.config.temperature ?? 1.0,
       max_tokens: request.config.maxTokens,
       top_p: request.config.topP ?? 1.0,
-      mode: 'prefill', // Default; actual mode comes from BotConfig
       botName,
       presence_penalty: request.config.presencePenalty,
       frequency_penalty: request.config.frequencyPenalty,
       prefill_thinking: request.config.thinking?.enabled,
     },
     tools: request.tools?.map(fromMembraneToolDefinition),
-    stop_sequences: Array.isArray(request.stopSequences) 
-      ? request.stopSequences 
+    stop_sequences: Array.isArray(request.stopSequences)
+      ? request.stopSequences
       : request.stopSequences?.sequences,
   };
 }
@@ -532,9 +499,12 @@ export function fromMembraneToolDefinition(tool: MembraneToolDefinition): ToolDe
 
 /**
  * Build membrane MessageMetadata from chapterx message fields
+ * 
+ * Note: cacheControl is no longer handled here - cache markers now use
+ * cacheBreakpoint directly on the message (set by applyChapterXCacheMarker).
  */
 function buildMessageMetadata(msg: ParticipantMessage): MessageMetadata | undefined {
-  const hasMetadata = msg.timestamp || msg.messageId || msg.cacheControl;
+  const hasMetadata = msg.timestamp || msg.messageId;
   
   if (!hasMetadata) {
     return undefined;
@@ -543,7 +513,6 @@ function buildMessageMetadata(msg: ParticipantMessage): MessageMetadata | undefi
   return {
     timestamp: msg.timestamp,
     sourceId: msg.messageId,
-    cacheControl: msg.cacheControl,
   };
 }
 

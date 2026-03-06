@@ -41,16 +41,16 @@ describe('Message Conversion', () => {
       expect(result.metadata).toBeUndefined();
     });
     
-    it('should move cacheControl to metadata', () => {
+    it('should pass through cacheBreakpoint', () => {
       const input: ParticipantMessage = {
         participant: 'Bob',
         content: [{ type: 'text', text: 'Test' }],
-        cacheControl: { type: 'ephemeral' },
+        cacheBreakpoint: true,
       };
       
       const result = toMembraneMessage(input);
       
-      expect(result.metadata?.cacheControl).toEqual({ type: 'ephemeral' });
+      expect(result.cacheBreakpoint).toBe(true);
     });
     
     it('should move timestamp and messageId to metadata', () => {
@@ -77,8 +77,8 @@ describe('Message Conversion', () => {
         metadata: {
           timestamp: new Date('2026-01-15'),
           sourceId: 'msg-123',
-          cacheControl: { type: 'ephemeral' },
         },
+        cacheBreakpoint: true,
       };
       
       const result = fromMembraneMessage(input);
@@ -86,7 +86,7 @@ describe('Message Conversion', () => {
       expect(result.participant).toBe('Alice');
       expect(result.timestamp).toEqual(new Date('2026-01-15'));
       expect(result.messageId).toBe('msg-123');
-      expect(result.cacheControl).toEqual({ type: 'ephemeral' });
+      expect(result.cacheBreakpoint).toBe(true);
     });
   });
   
@@ -99,7 +99,7 @@ describe('Message Conversion', () => {
         ],
         timestamp: new Date('2026-01-15'),
         messageId: 'test-id',
-        cacheControl: { type: 'ephemeral' },
+        cacheBreakpoint: true,
       };
       
       const membrane = toMembraneMessage(original);
@@ -109,7 +109,7 @@ describe('Message Conversion', () => {
       expect(result.content).toEqual(original.content);
       expect(result.timestamp).toEqual(original.timestamp);
       expect(result.messageId).toBe(original.messageId);
-      expect(result.cacheControl).toEqual(original.cacheControl);
+      expect(result.cacheBreakpoint).toBe(original.cacheBreakpoint);
     });
   });
 });
@@ -252,7 +252,6 @@ describe('Request Conversion', () => {
         temperature: 0.7,
         max_tokens: 4096,
         top_p: 0.9,
-        mode: 'prefill',
         botName: 'Claude',
         presence_penalty: 0.1,
         frequency_penalty: 0.2,
@@ -281,7 +280,6 @@ describe('Request Conversion', () => {
         temperature: 1.0,
         max_tokens: 8192,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
         prefill_thinking: true,
       },
@@ -300,7 +298,6 @@ describe('Request Conversion', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
     };
@@ -318,7 +315,6 @@ describe('Request Conversion', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
     };
@@ -336,7 +332,6 @@ describe('Request Conversion', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
     };
@@ -618,7 +613,6 @@ describe('Edge Cases: Empty Content', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
     };
@@ -635,7 +629,6 @@ describe('Edge Cases: Empty Content', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
     };
@@ -674,7 +667,6 @@ describe('Edge Cases: Multi-participant Conversations', () => {
         temperature: 1.0,
         max_tokens: 4096,
         top_p: 1.0,
-        mode: 'prefill',
         botName: 'Claude',
       },
       stop_sequences: ['Alice:', 'Bob:', 'Charlie:'],
@@ -685,13 +677,13 @@ describe('Edge Cases: Multi-participant Conversations', () => {
   });
 });
 
-describe('Edge Cases: Cache Control', () => {
-  it('should preserve cache control through conversion', () => {
+describe('Edge Cases: Cache Breakpoint', () => {
+  it('should preserve cacheBreakpoint through conversion', () => {
     const messages: ParticipantMessage[] = [
       {
         participant: 'User',
         content: [{ type: 'text', text: 'Cached message' }],
-        cacheControl: { type: 'ephemeral' },
+        cacheBreakpoint: true,
       },
       {
         participant: 'User',
@@ -702,8 +694,8 @@ describe('Edge Cases: Cache Control', () => {
     const membrane = toMembraneMessages(messages);
     const result = fromMembraneMessages(membrane);
     
-    expect(result[0].cacheControl).toEqual({ type: 'ephemeral' });
-    expect(result[1].cacheControl).toBeUndefined();
+    expect(result[0].cacheBreakpoint).toBe(true);
+    expect(result[1].cacheBreakpoint).toBeUndefined();
   });
 });
 

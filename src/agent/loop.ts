@@ -4,13 +4,13 @@
  */
 
 import { EventQueue } from './event-queue.js'
+import { DeferredQueue, isTransientError } from './deferred-queue.js'
 import { ChannelStateManager } from './state-manager.js'
 import { DiscordConnector } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
-import { LLMMiddleware } from '../llm/middleware.js'
 import { ToolSystem } from '../tools/system.js'
-import { Event, BotConfig, DiscordMessage, ToolCall, ToolResult } from '../types.js'
+import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { sleep } from '../utils/retry.js'
 import { 
@@ -27,7 +27,9 @@ import { PluginContextFactory, ContextInjection } from '../tools/plugins/index.j
 import { setResourceAccessor } from '../tools/plugins/mcp-resources.js'
 import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.js'
 import { MembraneProvider } from '../llm/membrane/index.js'
-// Use any for Membrane type to avoid version mismatch issues between 
+import { resolveToolModeForModel } from '../llm/membrane/adapter.js'
+import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
+// Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
 type Membrane = any
 
@@ -54,6 +56,12 @@ export class AgentLoop {
   // Membrane integration (optional)
   private membraneProvider?: MembraneProvider
 
+  // TTS relay integration (optional)
+  private ttsRelayClient?: TTSRelayClient
+
+  // Deferred activation queue for transient API errors
+  private deferredQueue?: DeferredQueue
+
   constructor(
     private botId: string,
     private queue: EventQueue,
@@ -61,7 +69,6 @@ export class AgentLoop {
     private stateManager: ChannelStateManager,
     private configSystem: ConfigSystem,
     private contextBuilder: ContextBuilder,
-    private llmMiddleware: LLMMiddleware,
     private toolSystem: ToolSystem,
     cacheDir: string = './cache'
   ) {
@@ -78,12 +85,89 @@ export class AgentLoop {
   }
   
   /**
-   * Set membrane instance for LLM calls
-   * When set, can be enabled per-bot with use_membrane: true in config
+   * Set membrane instance for LLM calls (required)
    */
   setMembrane(membrane: Membrane): void {
-    this.membraneProvider = new MembraneProvider(membrane, this.botId)
+    this.membraneProvider = new MembraneProvider(membrane)
     logger.info({ botId: this.botId }, 'Membrane provider set')
+  }
+
+  /**
+   * Set up TTS relay client for streaming text to local TTS clients.
+   * Requires membrane to be enabled for streaming support.
+   */
+  async setTTSRelay(config: {
+    url: string
+    token: string
+    reconnectIntervalMs?: number
+  }): Promise<void> {
+    if (this.ttsRelayClient) {
+      this.ttsRelayClient.disconnect()
+    }
+
+    this.ttsRelayClient = new TTSRelayClient({
+      url: config.url,
+      botId: this.botId,
+      token: config.token,
+      reconnectIntervalMs: config.reconnectIntervalMs,
+    })
+
+    // Set up interruption handler
+    this.ttsRelayClient.onInterruption((event: InterruptionEvent) => {
+      this.handleTTSInterruption(event)
+    })
+
+    await this.ttsRelayClient.connect()
+    logger.info({ botId: this.botId, url: config.url }, 'TTS relay connected')
+  }
+
+  /**
+   * Handle interruption events from TTS clients.
+   * The spokenText is used to identify which message to edit - we find the recent
+   * message in the channel that starts with the spoken text and truncate it.
+   */
+  private async handleTTSInterruption(event: InterruptionEvent): Promise<void> {
+    const spokenText = event.spokenText.trim()
+
+    logger.info(
+      {
+        botId: this.botId,
+        channelId: event.channelId,
+        reason: event.reason,
+        spokenLength: spokenText.length,
+      },
+      'TTS interruption received'
+    )
+
+    // Abort the stream and record the interrupted text
+    if (this.ttsStreamContext && this.ttsStreamContext.channelId === event.channelId) {
+      this.ttsStreamContext.interruptedText = spokenText
+      this.ttsStreamContext.abortController.abort()
+      // Notify relay that activation was aborted
+      if (this.ttsRelayClient?.isConnected()) {
+        this.ttsRelayClient.sendActivationEnd({
+          channelId: this.ttsStreamContext.channelId,
+          userId: this.ttsStreamContext.userId,
+          username: this.ttsStreamContext.username,
+          reason: 'abort',
+        })
+      }
+      logger.info(
+        { channelId: event.channelId, spokenLength: spokenText.length },
+        'Aborted stream - will post interrupted text'
+      )
+    }
+  }
+
+  /**
+   * Disconnect TTS relay client
+   */
+  disconnectTTSRelay(): void {
+    if (this.ttsRelayClient) {
+      this.ttsRelayClient.disconnect()
+      this.ttsRelayClient = undefined
+      logger.info({ botId: this.botId }, 'TTS relay disconnected')
+    }
   }
 
   /**
@@ -91,6 +175,10 @@ export class AgentLoop {
    */
   async run(): Promise<void> {
     this.running = true
+
+    // Initialize deferred queue for handling transient API failures
+    this.deferredQueue = new DeferredQueue()
+    await this.deferredQueue.initialize(this.botId, (event) => this.queue.push(event))
 
     logger.info({ botId: this.botId }, 'Agent loop started')
 
@@ -119,6 +207,7 @@ export class AgentLoop {
    */
   stop(): void {
     this.running = false
+    this.deferredQueue?.stop()
   }
 
   /**
@@ -336,11 +425,18 @@ export class AgentLoop {
   }
 
   private async processBatch(events: Event[]): Promise<void> {
+    const batchStart = Date.now()
     logger.debug({ count: events.length, types: events.map((e) => e.type) }, 'Processing batch')
 
     // Get first event to access channel for config (for random check)
     const firstEvent = events[0]
     if (!firstEvent) return
+
+    // Profile: time from Discord event receipt to batch processing
+    const eventReceivedAt = (firstEvent as any).receivedAt
+    if (eventReceivedAt) {
+      logger.debug({ eventAgeMs: batchStart - eventReceivedAt }, 'Event age (discord.js + queue poll)')
+    }
     
     // Handle delete events - remove tool cache entries for deleted bot messages
     for (const event of events) {
@@ -358,10 +454,12 @@ export class AgentLoop {
     }
 
     // Check if activation is needed
+    const shouldActivateStart = Date.now()
     if (!await this.shouldActivate(events, firstEvent.channelId, firstEvent.guildId)) {
       logger.debug('No activation needed')
       return
     }
+    logger.debug({ durationMs: Date.now() - shouldActivateStart }, 'shouldActivate completed')
 
     const { channelId, guildId } = firstEvent
 
@@ -369,20 +467,46 @@ export class AgentLoop {
     const triggeringEvent = this.findTriggeringMessageEvent(events)
     const triggeringMessageId = triggeringEvent?.data?.id
 
-    // Check for m command and delete it
+    // Check for m command
     const mCommandEvent = events.find((e) => e.type === 'message' && (e.data as any)._isMCommand)
     if (mCommandEvent) {
       const message = mCommandEvent.data as any
+
+      // Before deleting, check if this is a chat-mode bot that can't handle m continue.
+      // Chat-mode bots don't support prefill, so the conversation can't end with an
+      // assistant turn — which is what m continue produces after stripping the empty completion.
+      try {
+        const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
+        const modeCheckConfig = this.configSystem.loadConfig({
+          botName: this.botId,
+          guildId,
+          channelConfigs: pinnedConfigs,
+        })
+        if (modeCheckConfig.mode === 'chat') {
+          logger.info({ channelId, botId: this.botId, mode: 'chat' },
+            'm continue rejected — chat-mode bots do not support continuation')
+          // Delete the m command immediately, then react to whatever is now the latest message
+          await this.connector.deleteMessage(channelId, message.id)
+            .catch((err: any) => logger.debug({ error: err.message }, 'Failed to delete rejected m continue'))
+          await this.connector.reactToLatestMessage(channelId, '🚫')
+          return
+        }
+      } catch (error: any) {
+        // Config load failure — allow activation to proceed (fail-open)
+        logger.warn({ error: error.message }, 'Failed to check mode for m continue — proceeding')
+      }
+
+      // Delete the m command message
       try {
         await this.connector.deleteMessage(channelId, message.id)
-        logger.info({ 
-          messageId: message.id, 
+        logger.info({
+          messageId: message.id,
           channelId,
           author: message.author?.username,
           content: message.content?.substring(0, 50)
         }, 'Deleted m command message')
       } catch (error: any) {
-        logger.error({ 
+        logger.error({
           error: error.message,
           code: error.code,
           messageId: message.id,
@@ -390,6 +514,12 @@ export class AgentLoop {
           author: message.author?.username
         }, '⚠️  FAILED TO DELETE m COMMAND MESSAGE - Check bot permissions (needs MANAGE_MESSAGES)')
       }
+    }
+
+    // Cancel any pending deferred activation - new activity supersedes it
+    if (this.deferredQueue?.hasPendingActivation(channelId)) {
+      this.deferredQueue.cancelActivation(channelId)
+      logger.debug({ channelId }, 'Cancelled pending deferred activation due to new activity')
     }
 
     // Check if this channel is already being processed
@@ -403,10 +533,17 @@ export class AgentLoop {
     
     // Determine activation reason for tracing
     const activationReason = this.determineActivationReason(events)
-    
+
+    // Extract deferred retry state if this is a retry activation
+    const deferredEvent = events.find((e) => (e.data as any)?.type === 'deferred_retry')
+    const deferredRetryState = deferredEvent
+      ? { retryAttempt: (deferredEvent.data as any).retryAttempt ?? 0, createdAt: (deferredEvent.data as any).createdAt }
+      : undefined
+
     // ===== SOMA CREDIT CHECK =====
     // Check if user has sufficient ichor before proceeding with activation
     // Only charge for human-initiated triggers (mention, reply, m_command) - not random
+    const somaStart = Date.now()
     const somaCheckResult = await this.checkSomaCredits(
       events,
       channelId,
@@ -414,23 +551,27 @@ export class AgentLoop {
       activationReason.reason,
       triggeringMessageId
     )
-    
+    logger.debug({ durationMs: Date.now() - somaStart }, 'Soma credit check completed')
+
     if (somaCheckResult.status === 'blocked') {
       // User doesn't have enough ichor - message already sent
       this.activeChannels.delete(channelId)
       return
     }
-    
+
     // Store transaction ID for potential refund if activation fails
     const somaTransactionId = somaCheckResult.transactionId
     // ===== END SOMA CHECK =====
-    
+
+    logger.debug({ durationMs: Date.now() - batchStart }, 'processBatch overhead (event→handleActivation)')
+
     // Wrap activation in both logging and trace context
     const activationPromise = triggeringMessageId
       ? withActivationLogging(channelId, triggeringMessageId, async () => {
-          // Get channel name for trace indexing
-          const channelName = await this.connector.getChannelName(channelId)
-          
+          // Get channel metadata for trace indexing
+          const channelMeta = await this.connector.getChannelMeta(channelId)
+          const channelName = channelMeta.name
+
           // Run with trace context
           const { trace, error: traceError } = await withTrace(
             channelId,
@@ -442,12 +583,13 @@ export class AgentLoop {
               if (this.botUserId) {
                 traceCollector.setBotUserId(this.botUserId)
               }
+              traceCollector.setThreadInfo(channelMeta.isThread, channelMeta.parentChannelId)
               traceCollector.recordActivation({
                 reason: activationReason.reason,
                 triggerEvents: activationReason.events,
               })
               
-              return this.handleActivation(channelId, guildId, triggeringMessageId, traceCollector)
+              return this.handleActivation(channelId, guildId, triggeringMessageId, traceCollector, deferredRetryState)
             },
             channelName
           )
@@ -488,29 +630,49 @@ export class AgentLoop {
             throw traceError
           }
         })
-      : this.handleActivation(channelId, guildId, triggeringMessageId)
+      : this.handleActivation(channelId, guildId, triggeringMessageId, undefined, deferredRetryState)
     
     activationPromise
       .catch((error) => {
-        logger.error({ error, channelId, guildId }, 'Failed to handle activation')
+        // Only log essential error info to avoid massive JSON dumps from MembraneError
+        logger.error({
+          error: {
+            message: error?.message,
+            name: error?.name,
+            code: error?.code,
+            type: error?.type,
+            status: error?.status,
+            stack: error?.stack?.split('\n').slice(0, 5).join('\n'),
+          },
+          channelId,
+          guildId
+        }, 'Failed to handle activation')
       })
       .finally(() => {
         this.activeChannels.delete(channelId)
       })
   }
   
-  private determineActivationReason(events: Event[]): { 
-    reason: 'mention' | 'reply' | 'random' | 'm_command', 
-    events: Array<{ type: string; messageId?: string; authorId?: string; authorName?: string; contentPreview?: string }> 
+  private determineActivationReason(events: Event[]): {
+    reason: 'mention' | 'reply' | 'random' | 'm_command' | 'timer',
+    events: Array<{ type: string; messageId?: string; authorId?: string; authorName?: string; contentPreview?: string }>
   } {
     const triggerEvents: Array<{ type: string; messageId?: string; authorId?: string; authorName?: string; contentPreview?: string }> = []
-    let reason: 'mention' | 'reply' | 'random' | 'm_command' = 'mention'
-    
+    let reason: 'mention' | 'reply' | 'random' | 'm_command' | 'timer' = 'mention'
+
     for (const event of events) {
-      if (event.type === 'message') {
+      if (event.type === 'self_activation') {
+        // Timer-triggered activation
+        reason = 'timer'
+        triggerEvents.push({
+          type: 'timer',
+          messageId: event.data?.originalMessageId,
+          contentPreview: event.data?.contextNote?.slice(0, 100),
+        })
+      } else if (event.type === 'message') {
         const message = event.data as any
         const content = message.content?.trim() || ''
-        
+
         if ((event.data as any)._isMCommand) {
           reason = 'm_command'
         } else if (message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)) {
@@ -520,7 +682,7 @@ export class AgentLoop {
         } else {
           reason = 'random'
         }
-        
+
         triggerEvents.push({
           type: event.type,
           messageId: message.id,
@@ -530,7 +692,7 @@ export class AgentLoop {
         })
       }
     }
-    
+
     return { reason, events: triggerEvents }
   }
 
@@ -548,7 +710,7 @@ export class AgentLoop {
     events: Event[],
     channelId: string,
     guildId: string,
-    triggerReason: 'mention' | 'reply' | 'random' | 'm_command',
+    triggerReason: 'mention' | 'reply' | 'random' | 'm_command' | 'timer',
     triggeringMessageId?: string
   ): Promise<{ status: 'allowed' | 'blocked'; transactionId?: string }> {
     // Load config to check if Soma is enabled
@@ -792,24 +954,53 @@ export class AgentLoop {
   }
 
   private async shouldActivate(events: Event[], channelId: string, guildId: string): Promise<boolean> {
-    // Load config early for API-only mode check
-    let config: any = null
-    try {
-      config = this.configSystem.loadConfig({
-        botName: this.botId,
-        guildId,
-        channelConfigs: [],  // No channel configs needed for this check
-      })
-    } catch {
-      // Config will be loaded again below if needed
+    // Check for self_activation events first (timer-triggered)
+    for (const event of events) {
+      if (event.type === 'self_activation') {
+        logger.info({
+          channelId,
+          timerId: event.data?.timerId,
+          contextNote: event.data?.contextNote?.slice(0, 50),
+        }, 'Activated by timer (self_activation)')
+        return true
+      }
     }
-    
-    // Check if API-only mode is enabled
+
+    // Use cached pin configs if available (populated by previous handleActivation calls),
+    // otherwise fall back to base config (shared + guild + bot YAML, no channel overrides).
+    // NEVER hit the pins API here — this is the hot path (every message batch).
+    // Hitting the API triggers Cloudflare 1015 rate limiting on servers with many bots.
+    let config: any = null
+    const loadConfig = () => {
+      if (!config) {
+        try {
+          // Check memory cache for pin configs (instant, no API call)
+          const cachedPins = this.connector.getCachedPinnedConfigs(channelId)
+          let channelConfigs: string[] = []
+          if (cachedPins !== null) {
+            // Use cached pin configs for accurate activation decisions
+            channelConfigs = cachedPins
+          }
+          config = this.configSystem.loadConfig({
+            botName: this.botId,
+            guildId,
+            channelConfigs,
+          })
+        } catch (error) {
+          logger.warn({ error }, 'Failed to load config for activation check')
+          return false
+        }
+      }
+      return true
+    }
+
+    // Check API-only mode early
+    if (!loadConfig()) return false
     if (config?.api_only) {
       logger.debug('API-only mode enabled - skipping activation')
       return false
     }
-    
+
     // Check each message event for activation triggers
     for (const event of events) {
       if (event.type !== 'message') {
@@ -828,14 +1019,24 @@ export class AgentLoop {
         continue
       }
 
+      // Skip dot messages — hidden/command messages should never trigger activation
+      // Strip leading Discord mentions (<@userId>) and ChapterX reply tags (<reply:@...>)
+      // so ".test @bot" is caught regardless of mention position
+      const content = message.content?.trim()
+      const contentForDotCheck = content
+        ?.replace(/^(<@!?\d+>\s*)+/, '')    // Strip leading Discord mentions
+        ?.replace(/^<reply:@[^>]+>\s*/, '') // Strip ChapterX reply prefix
+      if (contentForDotCheck && /^\.[a-zA-Z]/.test(contentForDotCheck)) {
+        continue
+      }
+
       // 1. Check for m command FIRST (before mention check)
       // This ensures "m continue <@bot>" gets flagged for deletion
       // Only trigger/delete if addressed to THIS bot (mention or reply)
-      const content = message.content?.trim()
       if (content?.startsWith('m ')) {
         const mentionsUs = this.botUserId && message.mentions?.has(this.botUserId)
         const repliesTo = message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)
-        
+
         if (mentionsUs || repliesTo) {
           logger.debug({ messageId: message.id, command: content, mentionsUs, repliesTo }, 'Activated by m command addressed to us')
           // Store m command event for deletion (only if addressed to us)
@@ -851,38 +1052,21 @@ export class AgentLoop {
       if (this.botUserId && message.mentions?.has(this.botUserId)) {
         // Check bot reply chain depth to prevent bot loops
         const chainDepth = await this.connector.getBotReplyChainDepth(channelId, message)
-        
-        // Load config if not already loaded
-        if (!config) {
-          try {
-            const configFetch = await this.connector.fetchContext({ channelId, depth: 10, maxImages: 0 })
-            const inheritedPinnedConfigs = await this.collectPinnedConfigsWithInheritance(
-              channelId,
-              configFetch.pinnedConfigs
-            )
-            config = this.configSystem.loadConfig({
-              botName: this.botId,
-              guildId,
-              channelConfigs: inheritedPinnedConfigs,
-            })
-          } catch (error) {
-            logger.warn({ error }, 'Failed to load config for chain depth check')
-            return false
-          }
-        }
-        
+
+        if (!loadConfig()) return false
+
         if (chainDepth >= config.max_bot_reply_chain_depth) {
-          logger.info({ 
-            messageId: message.id, 
-            chainDepth, 
-            limit: config.max_bot_reply_chain_depth 
+          logger.info({
+            messageId: message.id,
+            chainDepth,
+            limit: config.max_bot_reply_chain_depth
           }, 'Bot reply chain depth limit reached, blocking activation')
-          
+
           // Add reaction to indicate chain depth limit reached
           await this.connector.addReaction(channelId, message.id, config.bot_reply_chain_depth_emote)
           continue  // Check next event instead of returning false (might be random activation)
         }
-        
+
         logger.debug({ messageId: message.id, chainDepth }, 'Activated by mention')
         return true
       }
@@ -899,25 +1083,8 @@ export class AgentLoop {
       }
 
       // 4. Random chance activation
-      if (!config) {
-        // Load config once for this batch
-        try {
-          const configFetch = await this.connector.fetchContext({ channelId, depth: 10, maxImages: 0 })
-          const inheritedPinnedConfigs = await this.collectPinnedConfigsWithInheritance(
-            channelId,
-            configFetch.pinnedConfigs
-          )
-          config = this.configSystem.loadConfig({
-            botName: this.botId,
-            guildId,
-            channelConfigs: inheritedPinnedConfigs,
-          })
-        } catch (error) {
-          logger.warn({ error }, 'Failed to load config for random check')
-          return false
-        }
-      }
-      
+      if (!loadConfig()) return false
+
       if (config.reply_on_random > 0) {
         const chance = Math.random()
         if (chance < 1 / config.reply_on_random) {
@@ -931,10 +1098,11 @@ export class AgentLoop {
   }
 
   private async handleActivation(
-    channelId: string, 
-    guildId: string, 
+    channelId: string,
+    guildId: string,
     triggeringMessageId?: string,
-    trace?: TraceCollector
+    trace?: TraceCollector,
+    deferredRetryState?: { retryAttempt: number; createdAt?: number }
   ): Promise<void> {
     logger.info({ botId: this.botId, channelId, guildId, triggeringMessageId, traceId: trace?.getTraceId() }, 'Bot activated')
 
@@ -953,8 +1121,8 @@ export class AgentLoop {
     const profileStart = Date.now()
 
     startProfile('typing')
-    // Start typing indicator
-    await this.connector.startTyping(channelId)
+    // Start typing indicator (fire-and-forget, don't block on Discord API)
+    this.connector.startTyping(channelId).catch(() => {})
     endProfile('typing')
 
     try {
@@ -1019,8 +1187,16 @@ export class AgentLoop {
       if (promptCachingEnabled) {
         const cacheOldestId = state.cacheOldestMessageId
         const fetchedOldestId = discordContext.messages[0]?.id
-        
-        if (!cacheOldestId && fetchedOldestId) {
+
+        // If .history clear was used, reset cache marker to the new oldest message
+        // This prevents the next activation from extending backwards past the clear boundary
+        if (discordContext.inheritanceInfo?.historyDidClear && fetchedOldestId) {
+          logger.debug({
+            oldCacheMarker: cacheOldestId,
+            newCacheMarker: fetchedOldestId,
+          }, 'Resetting cache marker after .history clear')
+          this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
+        } else if (!cacheOldestId && fetchedOldestId) {
           // First activation - set cache marker to oldest fetched message
           this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
           logger.debug({ channelId, oldestMessageId: fetchedOldestId }, 'Initialized cached starting point for cache stability')
@@ -1096,6 +1272,17 @@ export class AgentLoop {
       
       // Record config in trace (for debugging)
       traceSetConfig(config)
+
+      // Send TTS activation start as early as possible (for thinking animation/sound)
+      // This happens right after config load so Melodeus can show thinking indicator quickly
+      if (config.tts_relay?.enabled && this.ttsRelayClient?.isConnected() && this.botUserId) {
+        const botDiscordUsername = this.connector.getBotUsername() || config.name
+        this.ttsRelayClient.sendActivationStart({
+          channelId,
+          userId: this.botUserId,
+          username: botDiscordUsername,
+        })
+      }
 
       // Initialize MCP servers from config (once per bot)
       if (!this.mcpInitialized && config.mcp_servers && config.mcp_servers.length > 0) {
@@ -1389,24 +1576,51 @@ export class AgentLoop {
         imagesFetched: discordContext.images.length,
       }, '⏱️  PROFILING: Pre-LLM phase timings (ms)')
 
-      // 6. Call LLM (with inline tool execution)
+      // 6. Call LLM (with tool execution)
       startProfile('llmCall')
-      
-      const { 
-        completion, 
-        toolCallIds, 
-        preambleMessageIds, 
+
+      // Route to native or inline tool execution based on config mode (or model name fallback)
+      const hasTools = config.tools_enabled && (contextResult.request.tools?.length ?? 0) > 0
+      const toolMode = resolveToolModeForModel(config.continuation_model, config.mode)
+
+      let executionResult: {
+        completion: any;
+        toolCallIds: string[];
+        preambleMessageIds: string[];
+        fullCompletionText?: string;
+        sentMessageIds: string[];
+        messageContexts: Record<string, MessageContext>;
+      }
+
+      if (toolMode === 'native') {
+        logger.debug({ model: config.continuation_model, toolMode, hasTools }, 'Using native tool execution path')
+        executionResult = await this.executeWithNativeTools(
+          contextResult.request,
+          config,
+          channelId,
+          triggeringMessageId || '',
+          activation?.id,
+          discordContext.messages
+        )
+      } else {
+        executionResult = await this.executeWithInlineTools(
+          contextResult.request,
+          config,
+          channelId,
+          triggeringMessageId || '',
+          activation?.id,
+          discordContext.messages  // For post-hoc participant truncation
+        )
+      }
+
+      const {
+        completion,
+        toolCallIds,
+        preambleMessageIds,
         fullCompletionText,
         sentMessageIds: inlineSentMessageIds,
         messageContexts: inlineMessageContexts
-      } = await this.executeWithInlineTools(
-        contextResult.request, 
-        config, 
-        channelId,
-        triggeringMessageId || '',
-        activation?.id,
-        discordContext.messages  // For post-hoc participant truncation
-      )
+      } = executionResult
       endProfile('llmCall')
 
       // 7. Stop typing
@@ -1422,14 +1636,14 @@ export class AgentLoop {
       const imageBlocks = completion.content.filter((c: any) => c.type === 'image')
       if (imageBlocks.length > 0) {
         logger.info({ imageCount: imageBlocks.length }, 'Completion contains generated images')
-        
+
         // Send each image as a Discord attachment
         const imageSentIds: string[] = []
         for (const imageBlock of imageBlocks) {
           try {
             const imageData = imageBlock.source?.data
             const mediaType = imageBlock.source?.media_type || 'image/png'
-            
+
             if (imageData) {
               const msgIds = await this.connector.sendImageAttachment(
                 channelId,
@@ -1445,30 +1659,37 @@ export class AgentLoop {
             logger.error({ err }, 'Failed to send generated image to Discord')
           }
         }
-        
+
+        // Combine text message IDs (already sent by inline execution) with image IDs
+        const allMessageIds = [...(inlineSentMessageIds ?? []), ...imageSentIds]
+        const responseText = completion.content
+          .filter((c: any) => c.type === 'text')
+          .map((c: any) => c.text)
+          .join('\n')
+
         // Record activation if enabled
         if (activation) {
           this.activationStore.addCompletion(
             activation.id,
-            '[Generated image]',
-            imageSentIds,
+            responseText || '[Generated image]',
+            allMessageIds,
             [],
             []
           )
           await this.activationStore.completeActivation(activation.id)
         }
-        
+
         // Update state and trace for image response
         if (contextResult.cacheMarker) {
           this.stateManager.updateCacheMarker(this.botId, channelId, contextResult.cacheMarker)
         }
-        
+
         trace?.recordOutcome({
           success: true,
-          responseText: '[Generated image]',
-          responseLength: 0,
-          sentMessageIds: imageSentIds,
-          messagesSent: imageSentIds.length,
+          responseText: responseText || '[Generated image]',
+          responseLength: responseText.length,
+          sentMessageIds: allMessageIds,
+          messagesSent: allMessageIds.length,
           maxToolDepth: 1,
           hitMaxToolDepth: false,
           stateUpdates: {
@@ -1478,7 +1699,7 @@ export class AgentLoop {
             newMessageCount: 1,
           }
         })
-        
+
         return  // Done - image response handled
       }
 
@@ -1627,198 +1848,655 @@ export class AgentLoop {
       logger.info({ channelId, tokens: completion.usage, didRoll: contextResult.didRoll }, 'Activation complete')
     } catch (error) {
       await this.connector.stopTyping(channelId)
-      
+
+      // Notify relay of error and clean up TTS context
+      if (this.ttsStreamContext && this.ttsRelayClient?.isConnected()) {
+        this.ttsRelayClient.sendActivationEnd({
+          channelId: this.ttsStreamContext.channelId,
+          userId: this.ttsStreamContext.userId,
+          username: this.ttsStreamContext.username,
+          reason: 'error',
+        })
+      }
+      this.ttsStreamContext = undefined
+
+      // Check for transient API errors and queue for retry
+      if (this.deferredQueue && isTransientError(error)) {
+        const queued = this.deferredQueue.queueActivation({
+          botId: this.botId,
+          channelId,
+          guildId,
+          error: error instanceof Error ? error : new Error(String(error)),
+          originalTriggerId: triggeringMessageId,
+          retryAttempt: deferredRetryState?.retryAttempt ?? 0,
+          originalCreatedAt: deferredRetryState?.createdAt,
+        })
+
+        if (queued) {
+          logger.warn({ channelId, error: error instanceof Error ? error.message : String(error) },
+            'Transient API error - queued for retry')
+
+          // Add hourglass reaction to indicate we're queued
+          if (triggeringMessageId) {
+            try {
+              await this.connector.addReaction(channelId, triggeringMessageId, '⏳')
+            } catch (reactionError) {
+              logger.debug({ reactionError }, 'Failed to add retry reaction')
+            }
+          }
+
+          // Record to trace but don't throw - we're handling it
+          if (trace) {
+            trace.captureLog('warn', 'Queued for deferred retry', {
+              errorType: (error as any)?.type,
+              retryable: true,
+            })
+          }
+
+          return  // Don't throw - we've queued the retry
+        }
+      }
+
       // Record error to trace
       if (trace) {
         trace.recordError('llm_call', error instanceof Error ? error : new Error(String(error)))
       }
-      
+
       throw error
     }
   }
 
   /**
-   * Make an LLM completion request, routing to membrane if enabled
-   * 
-   * This is the main routing point for the membrane integration.
-   * 
-   * Modes:
-   * - use_membrane: false → old middleware only
-   * - use_membrane: true → membrane only
-   * - membrane_shadow_mode: true → run both, log differences, use old result
-   * - membrane_shadow_mode: true + use_membrane: true → run both, use membrane result
+   * Context for TTS streaming - passed to completeLLM when we want to stream to TTS
+   */
+  private ttsStreamContext?: {
+    channelId: string
+    userId: string
+    username: string
+    abortController: AbortController
+    interruptedText?: string  // If set, stream was interrupted - use this as the response
+  }
+
+  /**
+   * Make an LLM completion request using membrane.
+   *
+   * When TTS relay is connected and ttsStreamContext is set, streams chunks
+   * to the relay for real-time text-to-speech.
    */
   private async completeLLM(request: any, config: BotConfig): Promise<any> {
-    // Shadow mode: run both paths and compare
-    if (config.membrane_shadow_mode && this.membraneProvider) {
-      return this.completeLLMWithShadow(request, config)
+    if (!this.membraneProvider) {
+      throw new Error('Membrane not initialized - call setMembrane() before processing requests')
     }
-    
-    // Normal mode: route based on use_membrane flag
-    if (config.use_membrane && this.membraneProvider) {
-      logger.debug({ model: request.config?.model }, 'Using membrane for LLM completion')
-      return this.membraneProvider.completeFromLLMRequest(request)
+
+    // Check if we should stream to TTS
+    const shouldStreamToTTS =
+      config.tts_relay?.enabled &&
+      this.ttsRelayClient?.isConnected() &&
+      this.ttsStreamContext
+
+    // Stream mode: use membrane.stream() with TTS callbacks
+    if (shouldStreamToTTS) {
+      logger.debug({ model: request.config?.model }, 'Using membrane stream for LLM with TTS')
+      return this.completeLLMWithTTSStream(request, config)
     }
-    
-    // Fall back to built-in middleware
-    return this.llmMiddleware.complete(request)
+
+    // Standard completion
+    logger.debug({ model: request.config?.model }, 'Using membrane for LLM completion')
+    return this.membraneProvider.completeFromLLMRequest(request)
   }
-  
+
   /**
-   * Shadow mode: run both old middleware and membrane, log differences
-   * 
-   * Useful for validation - ensures parity between old and new paths
-   * before fully switching to membrane.
+   * Complete LLM request with streaming to TTS relay
    */
-  private async completeLLMWithShadow(request: any, config: BotConfig): Promise<any> {
-    const model = request.config?.model || 'unknown'
-    
-    // Run old middleware
-    const oldStart = Date.now()
-    let oldResult: any
-    let oldError: Error | null = null
+  private async completeLLMWithTTSStream(request: any, _config: BotConfig): Promise<any> {
+    const ctx = this.ttsStreamContext!
+    const relay = this.ttsRelayClient!
+
     try {
-      oldResult = await this.llmMiddleware.complete(request)
-    } catch (err) {
-      oldError = err instanceof Error ? err : new Error(String(err))
+      const result = await this.membraneProvider!.stream(request, {
+        signal: ctx.abortController.signal,
+        onChunk: (text, meta) => {
+          // Log with explicit visibility tracking for debugging thinking detection
+          const blockType = meta?.type ?? 'text'
+          const visible = meta?.visible ?? true
+          logger.info({
+            textPreview: text.substring(0, 80),
+            blockIndex: meta?.blockIndex,
+            blockType,
+            visible,
+            hasThinkingTag: text.includes('<thinking>') || text.includes('</thinking>'),
+          }, `TTS chunk: type=${blockType} visible=${visible}`)
+
+          relay.sendChunk({
+            channelId: ctx.channelId,
+            userId: ctx.userId,
+            username: ctx.username,
+            text,
+            blockIndex: meta?.blockIndex ?? 0,
+            blockType,
+            visible,
+          })
+        },
+        onBlock: (event) => {
+          // Log block events to see if thinking blocks are separate
+          // Note: membrane BlockEvent uses event.index and event.block.type/content
+          const blockIndex = event?.index ?? 0
+          const blockType = event?.block?.type ?? 'text'
+          // content only exists on block_complete events
+          const blockContent = (event?.block as any)?.content ?? ''
+
+          logger.info({
+            eventType: event?.event,
+            blockIndex,
+            blockType,
+            contentPreview: blockContent.substring(0, 80),
+          }, `TTS block: ${event?.event} type=${blockType}`)
+
+          if (event?.event === 'block_start') {
+            relay.sendBlockStart({
+              channelId: ctx.channelId,
+              userId: ctx.userId,
+              username: ctx.username,
+              blockIndex,
+              blockType,
+            })
+          } else if (event?.event === 'block_complete') {
+            relay.sendBlockComplete({
+              channelId: ctx.channelId,
+              userId: ctx.userId,
+              username: ctx.username,
+              blockIndex,
+              blockType,
+              content: blockContent,
+            })
+          }
+        },
+        // Execute tools and record to trace
+        onToolCalls: async (calls, _context) => {
+          const results: Array<{ toolUseId: string; content: string; isError?: boolean }> = []
+
+          for (const call of calls) {
+            const toolStartTime = Date.now()
+            // Convert membrane's call format to ChapterX's ToolCall type
+            const cxCall: ToolCall = {
+              id: call.id,
+              name: call.name,
+              input: call.input as Record<string, any>,
+              messageId: '', // Not available in TTS stream context
+              timestamp: new Date(),
+              originalCompletionText: _context.accumulated || '',
+            }
+            const result = await this.toolSystem.executeTool(cxCall)
+            const toolDurationMs = Date.now() - toolStartTime
+
+            // Format output string
+            const outputStr = typeof result.output === 'string'
+              ? result.output
+              : JSON.stringify(result.output)
+
+            // Build result content
+            let content: string
+            let isError = false
+            if (result.error) {
+              content = `Error executing ${call.name}: ${result.error}`
+              isError = true
+            } else {
+              content = outputStr
+              // Note: image handling for TTS mode could be added here if needed
+            }
+
+            // Record to trace
+            const traceOutput = result.error
+              ? `[ERROR] ${result.error}`
+              : (outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr)
+            traceToolExecution({
+              toolCallId: call.id,
+              toolName: call.name,
+              input: call.input,
+              output: traceOutput,
+              outputTruncated: !result.error && outputStr.length > 1000,
+              fullOutputLength: result.error ? traceOutput.length : outputStr.length,
+              durationMs: toolDurationMs,
+              sentToDiscord: false, // TTS mode doesn't send tool output to Discord
+              error: result.error ? String(result.error) : undefined,
+              imageCount: result.images?.length,
+            })
+
+            logger.debug({
+              toolName: call.name,
+              durationMs: toolDurationMs,
+              hasError: !!result.error,
+              outputLength: outputStr.length,
+            }, 'TTS stream tool executed')
+
+            results.push({
+              toolUseId: call.id,
+              content,
+              isError,
+            })
+          }
+
+          return results
+        },
+      })
+
+      // Log final result to see content block types
+      logger.info({
+        contentBlockCount: result?.content?.length,
+        contentBlockTypes: result?.content?.map((b: any) => b.type),
+        stopReason: result?.stopReason,
+      }, 'TTS stream complete - membrane result summary')
+
+      return result
+    } catch (error: any) {
+      // Check if this was an abort due to TTS interruption
+      if (ctx.interruptedText && (error.name === 'AbortError' || ctx.abortController.signal.aborted)) {
+        logger.info(
+          { channelId: ctx.channelId, textLength: ctx.interruptedText.length },
+          'Stream aborted due to TTS interruption, using interrupted text'
+        )
+        // Return a synthetic completion with just the interrupted text
+        // Format matches what fromMembraneResponse returns
+        return {
+          content: [{ type: 'text', text: ctx.interruptedText }],
+          stopReason: 'interrupted',
+          usage: { inputTokens: 0, outputTokens: 0 },
+          model: 'interrupted',
+        }
+      }
+      throw error
     }
-    const oldDuration = Date.now() - oldStart
-    
-    // Run membrane
-    const newStart = Date.now()
-    let newResult: any
-    let newError: Error | null = null
+  }
+
+  /**
+   * Execute with native tool calls (OpenAI / non-Anthropic models)
+   *
+   * Uses membrane's stream() with onToolCalls callback to handle the tool loop
+   * natively. No XML parsing, no prefill continuation, no stop sequences.
+   * Membrane manages the multi-turn tool loop internally.
+   */
+  private async executeWithNativeTools(
+    llmRequest: any,
+    config: BotConfig,
+    channelId: string,
+    triggeringMessageId: string,
+    _activationId?: string,
+    discordMessages?: DiscordMessage[]
+  ): Promise<{
+    completion: any;
+    toolCallIds: string[];
+    preambleMessageIds: string[];
+    fullCompletionText?: string;
+    sentMessageIds: string[];
+    messageContexts: Record<string, MessageContext>;
+  }> {
+    const allToolCallIds: string[] = []
+    const allSentMessageIds: string[] = []
+    const messageContexts: Record<string, MessageContext> = {}
+    const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
+    let accumulatedPreToolText = ''
+
+    // Set up TTS streaming context if relay is enabled and connected
+    if (config.tts_relay?.enabled && this.ttsRelayClient?.isConnected() && this.botUserId) {
+      this.ttsStreamContext = {
+        channelId,
+        userId: this.botUserId,
+        username: this.connector.getBotUsername() || config.name,
+        abortController: new AbortController(),
+      }
+    }
+
+    const ttsCtx = this.ttsStreamContext
+    const ttsRelay = this.ttsRelayClient
+
     try {
-      newResult = await this.membraneProvider!.completeFromLLMRequest(request)
-    } catch (err) {
-      newError = err instanceof Error ? err : new Error(String(err))
-    }
-    const newDuration = Date.now() - newStart
-    
-    // Compare and log differences
-    this.logShadowComparison({
-      model,
-      oldResult,
-      newResult,
-      oldError,
-      newError,
-      oldDuration,
-      newDuration,
-    })
-    
-    // Return based on use_membrane preference
-    if (config.use_membrane) {
-      if (newError) throw newError
-      return newResult
-    } else {
-      if (oldError) throw oldError
-      return oldResult
+      const result = await this.membraneProvider!.stream(llmRequest, {
+        signal: ttsCtx?.abortController.signal,
+        maxToolDepth: config.max_tool_depth,
+
+        // TTS streaming callbacks
+        ...(ttsCtx && ttsRelay?.isConnected() ? {
+          onChunk: (text: string, meta: any) => {
+            const blockType = meta?.type ?? 'text'
+            const visible = meta?.visible ?? true
+            ttsRelay.sendChunk({
+              channelId: ttsCtx.channelId,
+              userId: ttsCtx.userId,
+              username: ttsCtx.username,
+              text,
+              blockIndex: meta?.blockIndex ?? 0,
+              blockType,
+              visible,
+            })
+          },
+          onBlock: (event: any) => {
+            const blockIndex = event?.index ?? 0
+            const blockType = event?.block?.type ?? 'text'
+            const blockContent = (event?.block as any)?.content ?? ''
+            if (event?.event === 'block_start') {
+              ttsRelay.sendBlockStart({
+                channelId: ttsCtx.channelId,
+                userId: ttsCtx.userId,
+                username: ttsCtx.username,
+                blockIndex,
+                blockType,
+              })
+            } else if (event?.event === 'block_complete') {
+              ttsRelay.sendBlockComplete({
+                channelId: ttsCtx.channelId,
+                userId: ttsCtx.userId,
+                username: ttsCtx.username,
+                blockIndex,
+                blockType,
+                content: blockContent,
+              })
+            }
+          },
+        } : {}),
+
+        // Progressive display: send accumulated text before tools execute
+        onPreToolContent: async (text: string) => {
+          accumulatedPreToolText += text
+          const segments = this.parseIntoSegments(accumulatedPreToolText)
+          if (segments.length > 0) {
+            // Truncate at participant names
+            if (discordMessages) {
+              const fullVisibleText = segments.map(s => s.visible).join('')
+              const truncResult = this.truncateAtParticipant(
+                fullVisibleText,
+                discordMessages,
+                this.connector.getBotUsername() || config.name,
+                llmRequest.stop_sequences
+              )
+              if (truncResult.truncatedAt) {
+                logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncating native pre-tool text at participant')
+                return  // Don't send hallucinated content
+              }
+            }
+
+            const sendResult = await this.sendSegments(
+              channelId,
+              segments,
+              allSentMessageIds.length === 0 ? triggeringMessageId : undefined
+            )
+            allSentMessageIds.push(...sendResult.sentMessageIds)
+            for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
+              messageContexts[msgId] = ctx
+            }
+            // Reset so we don't re-send
+            accumulatedPreToolText = ''
+          }
+        },
+
+        // Execute tools when membrane detects native tool calls
+        onToolCalls: async (calls, context) => {
+          const results: Array<{ toolUseId: string; content: string; isError?: boolean }> = []
+
+          logger.debug({
+            toolCount: calls.length,
+            depth: context.depth,
+          }, 'Executing native tools')
+
+          for (const call of calls) {
+            const toolStartTime = Date.now()
+
+            // Convert membrane call to ChapterX ToolCall
+            const cxCall: ToolCall = {
+              id: call.id,
+              name: call.name,
+              input: call.input as Record<string, any>,
+              messageId: triggeringMessageId,
+              timestamp: new Date(),
+              originalCompletionText: context.accumulated || '',
+            }
+
+            const toolResult = await this.toolSystem.executeTool(cxCall)
+            const toolDurationMs = Date.now() - toolStartTime
+
+            allToolCallIds.push(call.id)
+
+            // Format output
+            const outputStr = typeof toolResult.output === 'string'
+              ? toolResult.output
+              : JSON.stringify(toolResult.output)
+
+            let content: string
+            let isError = false
+            if (toolResult.error) {
+              content = `Error executing ${call.name}: ${toolResult.error}`
+              isError = true
+            } else {
+              content = outputStr
+            }
+
+            // Store for persistence
+            pendingToolPersistence.push({ call: cxCall, result: toolResult })
+
+            // Record to trace
+            const traceOutput = toolResult.error
+              ? `[ERROR] ${toolResult.error}`
+              : (outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr)
+            traceToolExecution({
+              toolCallId: call.id,
+              toolName: call.name,
+              input: call.input,
+              output: traceOutput,
+              outputTruncated: !toolResult.error && outputStr.length > 1000,
+              fullOutputLength: toolResult.error ? traceOutput.length : outputStr.length,
+              durationMs: toolDurationMs,
+              sentToDiscord: config.tool_output_visible,
+              error: toolResult.error ? String(toolResult.error) : undefined,
+              imageCount: toolResult.images?.length,
+            })
+
+            // Send tool output to Discord if visible
+            if (config.tool_output_visible) {
+              const inputStr = JSON.stringify(call.input)
+              const rawOutput = typeof toolResult.output === 'string' ? toolResult.output : JSON.stringify(toolResult.output)
+              const flatOutput = rawOutput.replace(/\n/g, ' ').replace(/\s+/g, ' ')
+              const maxLen = 200
+              const trimmedOutput = flatOutput.length > maxLen
+                ? `${flatOutput.slice(0, maxLen)}... (${rawOutput.length} chars)`
+                : flatOutput
+              const toolMessage = `.${config.name}>[${call.name}]: ${inputStr}\n.${config.name}<[${call.name}]: ${trimmedOutput}`
+              await this.connector.sendWebhook(channelId, toolMessage, config.name)
+
+              // Send MCP images as dotted attachments if present
+              if (toolResult.images && toolResult.images.length > 0) {
+                for (let i = 0; i < toolResult.images.length; i++) {
+                  const img = toolResult.images[i]!
+                  try {
+                    await this.connector.sendImageAttachment(
+                      channelId,
+                      img.data,
+                      img.mimeType,
+                      `.${config.name}<[${call.name}] image ${i + 1}/${toolResult.images.length}`,
+                      undefined
+                    )
+                  } catch (err) {
+                    logger.warn({ err, toolName: call.name, imageIndex: i }, 'Failed to send MCP tool image to Discord')
+                  }
+                }
+              }
+            }
+
+            logger.debug({
+              toolName: call.name,
+              durationMs: toolDurationMs,
+              hasError: !!toolResult.error,
+              outputLength: outputStr.length,
+            }, 'Native tool executed')
+
+            results.push({
+              toolUseId: call.id,
+              content,
+              isError,
+            })
+          }
+
+          return results
+        },
+      })
+
+      // Persist tool uses
+      for (const { call, result } of pendingToolPersistence) {
+        await this.toolSystem.persistToolUse(this.botId, channelId, call, result)
+      }
+
+      // Extract final text and image blocks from completion
+      const completionText = (result?.content || [])
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.text)
+        .join('')
+
+      // Capture generated image blocks (from image generation models like Gemini)
+      const generatedImageBlocks: ContentBlock[] = (result?.content || [])
+        .filter((c: any) => c.type === 'image')
+
+      // Strip thinking blocks and tool XML
+      const { stripped, content: thinkingContent } = this.stripThinkingBlocks(
+        this.toolSystem.stripToolXml(completionText)
+      )
+
+      // Post debug thinking if enabled
+      if (config.debug_thinking && thinkingContent.length > 0) {
+        for (const thinking of thinkingContent) {
+          if (thinking.trim()) {
+            try {
+              if (thinking.length <= 1900) {
+                await this.connector.sendMessage(channelId, `.💭 ${thinking}`)
+              } else {
+                await this.connector.sendMessageWithAttachment(
+                  channelId,
+                  '.💭 thinking trace attached',
+                  { name: 'thinking.md', content: thinking }
+                )
+              }
+            } catch (err) {
+              logger.warn({ err }, 'Failed to send debug thinking message')
+            }
+          }
+        }
+      }
+
+      // Truncate at participant names
+      let displayText = stripped
+      if (discordMessages) {
+        const truncResult = this.truncateAtParticipant(
+          displayText,
+          discordMessages,
+          this.connector.getBotUsername() || config.name,
+          llmRequest.stop_sequences
+        )
+        if (truncResult.truncatedAt) {
+          logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated native output at participant')
+          displayText = truncResult.text
+        }
+      }
+
+      // Replace mentions
+      if (discordMessages) {
+        displayText = await this.replaceMentions(displayText, discordMessages)
+      }
+
+      // Send remaining text to Discord (text not already sent via onPreToolContent)
+      if (displayText.trim()) {
+        const segments = this.parseIntoSegments(displayText)
+        if (segments.length > 0) {
+          const sendResult = await this.sendSegments(
+            channelId,
+            segments,
+            allSentMessageIds.length === 0 ? triggeringMessageId : undefined
+          )
+          allSentMessageIds.push(...sendResult.sentMessageIds)
+          for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
+            messageContexts[msgId] = ctx
+          }
+        }
+      }
+
+      // Clean up TTS streaming context
+      if (this.ttsStreamContext && this.ttsRelayClient?.isConnected()) {
+        this.ttsRelayClient.sendActivationEnd({
+          channelId: this.ttsStreamContext.channelId,
+          userId: this.ttsStreamContext.userId,
+          username: this.ttsStreamContext.username,
+          reason: 'complete',
+        })
+      }
+      this.ttsStreamContext = undefined
+
+      // Build content blocks: text + any generated images from image generation models
+      const nativeContentBlocks: ContentBlock[] = [{ type: 'text', text: displayText }]
+      if (generatedImageBlocks.length > 0) {
+        nativeContentBlocks.push(...generatedImageBlocks)
+      }
+
+      return {
+        completion: {
+          content: nativeContentBlocks,
+          stopReason: (result?.stopReason || 'end_turn') as any,
+          usage: result?.usage || { inputTokens: 0, outputTokens: 0 },
+          model: result?.model || '',
+        },
+        toolCallIds: allToolCallIds,
+        preambleMessageIds: [],
+        fullCompletionText: completionText,
+        sentMessageIds: allSentMessageIds,
+        messageContexts,
+      }
+    } catch (error: any) {
+      // Handle TTS interruption abort
+      if (ttsCtx?.interruptedText && (error.name === 'AbortError' || ttsCtx.abortController.signal.aborted)) {
+        logger.info(
+          { channelId: ttsCtx.channelId, textLength: ttsCtx.interruptedText.length },
+          'Native stream aborted due to TTS interruption, using interrupted text'
+        )
+
+        // Clean up TTS context
+        if (this.ttsStreamContext && this.ttsRelayClient?.isConnected()) {
+          this.ttsRelayClient.sendActivationEnd({
+            channelId: this.ttsStreamContext.channelId,
+            userId: this.ttsStreamContext.userId,
+            username: this.ttsStreamContext.username,
+            reason: 'abort',
+          })
+        }
+        this.ttsStreamContext = undefined
+
+        return {
+          completion: {
+            content: [{ type: 'text', text: ttsCtx.interruptedText }],
+            stopReason: 'interrupted',
+            usage: { inputTokens: 0, outputTokens: 0 },
+            model: 'interrupted',
+          },
+          toolCallIds: allToolCallIds,
+          preambleMessageIds: [],
+          fullCompletionText: ttsCtx.interruptedText,
+          sentMessageIds: allSentMessageIds,
+          messageContexts,
+        }
+      }
+
+      // Clean up TTS on unexpected errors too
+      if (this.ttsStreamContext && this.ttsRelayClient?.isConnected()) {
+        this.ttsRelayClient.sendActivationEnd({
+          channelId: this.ttsStreamContext.channelId,
+          userId: this.ttsStreamContext.userId,
+          username: this.ttsStreamContext.username,
+          reason: 'error',
+        })
+      }
+      this.ttsStreamContext = undefined
+
+      throw error
     }
   }
-  
-  /**
-   * Log comparison between old middleware and membrane results
-   */
-  private logShadowComparison(data: {
-    model: string
-    oldResult: any
-    newResult: any
-    oldError: Error | null
-    newError: Error | null
-    oldDuration: number
-    newDuration: number
-  }): void {
-    const { model, oldResult, newResult, oldError, newError, oldDuration, newDuration } = data
-    const differences: string[] = []
-    
-    // Check for error mismatch
-    if (oldError && !newError) {
-      differences.push(`OLD errored but NEW succeeded: ${oldError.message}`)
-    } else if (!oldError && newError) {
-      differences.push(`NEW errored but OLD succeeded: ${newError.message}`)
-    } else if (oldError && newError) {
-      if (oldError.message !== newError.message) {
-        differences.push(`Different errors: OLD="${oldError.message}", NEW="${newError.message}"`)
-      }
-    }
-    
-    // Compare results if both succeeded
-    if (oldResult && newResult) {
-      // Extract text content
-      const oldText = this.extractTextFromCompletion(oldResult)
-      const newText = this.extractTextFromCompletion(newResult)
-      
-      // Normalize for comparison (trim, collapse whitespace)
-      const oldNorm = oldText.trim().replace(/\s+/g, ' ')
-      const newNorm = newText.trim().replace(/\s+/g, ' ')
-      
-      if (oldNorm !== newNorm) {
-        const similarity = this.calculateSimilarity(oldNorm, newNorm)
-        differences.push(`Text differs (${(similarity * 100).toFixed(1)}% similar)`)
-      }
-      
-      // Compare stop reason
-      if (oldResult.stopReason !== newResult.stopReason) {
-        differences.push(`Stop reason: OLD=${oldResult.stopReason}, NEW=${newResult.stopReason}`)
-      }
-      
-      // Compare token counts
-      const oldTokens = (oldResult.usage?.inputTokens || 0) + (oldResult.usage?.outputTokens || 0)
-      const newTokens = (newResult.usage?.inputTokens || 0) + (newResult.usage?.outputTokens || 0)
-      const tokenDiff = Math.abs(oldTokens - newTokens)
-      if (tokenDiff > 10) {
-        differences.push(`Tokens: OLD=${oldTokens}, NEW=${newTokens} (diff=${tokenDiff})`)
-      }
-    }
-    
-    // Log comparison
-    if (differences.length > 0) {
-      logger.warn({
-        model,
-        differences,
-        oldDuration,
-        newDuration,
-        durationDiff: newDuration - oldDuration,
-      }, 'Membrane shadow mode: differences detected')
-    } else {
-      logger.debug({
-        model,
-        oldDuration,
-        newDuration,
-        durationDiff: newDuration - oldDuration,
-      }, 'Membrane shadow mode: results match')
-    }
-  }
-  
-  /**
-   * Extract text content from completion result
-   */
-  private extractTextFromCompletion(result: any): string {
-    if (!result?.content) return ''
-    return result.content
-      .filter((c: any) => c.type === 'text')
-      .map((c: any) => c.text || '')
-      .join('')
-  }
-  
-  /**
-   * Calculate rough similarity between two strings (0-1)
-   */
-  private calculateSimilarity(a: string, b: string): number {
-    if (a === b) return 1
-    if (!a || !b) return 0
-    
-    // Use character-level Jaccard similarity as quick approximation
-    const setA = new Set(a.split(''))
-    const setB = new Set(b.split(''))
-    const intersection = new Set([...setA].filter(x => setB.has(x)))
-    const union = new Set([...setA, ...setB])
-    return intersection.size / union.size
-  }
-  
+
   /**
    * Execute with inline tool injection (Anthropic style)
-   * 
+   *
    * Instead of making separate LLM calls for each tool use, this method:
    * 1. Detects tool calls in the completion stream
    * 2. Executes the tool immediately
@@ -1858,6 +2536,10 @@ export class AgentLoop {
     // Track MCP tool result images for injection into continuation requests
     // These accumulate across tool iterations so the model can see all images
     let pendingToolImages: Array<{ toolName: string; images: Array<{ data: string; mimeType: string }> }> = []
+
+    // Track generated image blocks from LLM completions (e.g., Gemini image generation)
+    // These are non-text content blocks that need to be preserved through finalization
+    const generatedImageBlocks: ContentBlock[] = []
     
     // Check if thinking was actually prefilled (not in continuation mode)
     const thinkingWasPrefilled = this.wasThinkingPrefilled(llmRequest, config)
@@ -1868,14 +2550,25 @@ export class AgentLoop {
     
     // Keep track of the base request (without accumulated output)
     // Add </function_calls> as stop sequence so we can intercept and execute tools
-    const baseRequest = { 
+    const baseRequest = {
       ...llmRequest,
       stop_sequences: [
         ...(llmRequest.stop_sequences || []),
         AgentLoop.FUNC_CALLS_CLOSE
       ]
     }
-    
+
+    // Set up TTS streaming context if relay is enabled and connected
+    // Note: activation_start is sent earlier in processActivation for faster feedback
+    if (config.tts_relay?.enabled && this.ttsRelayClient?.isConnected() && this.botUserId) {
+      this.ttsStreamContext = {
+        channelId,
+        userId: this.botUserId,
+        username: this.connector.getBotUsername() || config.name,
+        abortController: new AbortController(),
+      }
+    }
+
     while (toolDepth < maxToolDepth) {
       // Build continuation request with accumulated output as prefill
       // Include any MCP tool result images so the model can see them
@@ -1886,11 +2579,12 @@ export class AgentLoop {
         pendingToolImages.length > 0 ? pendingToolImages : undefined
       )
       
-      // Get completion (routes to membrane if config.use_membrane is true)
+      // Get completion via membrane
       let completion = await this.completeLLM(continuationRequest, config)
-      
-      // Handle stop sequence continuation - only if we're inside an unclosed tag
-      if (completion.stopReason === 'stop_sequence' && config.mode === 'prefill') {
+
+      // Handle stop sequence continuation for XML tools format
+      // Only applies when using anthropic-xml formatter (detected by presence of XML tags)
+      if (completion.stopReason === 'stop_sequence') {
         const completionText = completion.content
           .filter((c: any) => c.type === 'text')
           .map((c: any) => c.text)
@@ -1939,21 +2633,23 @@ export class AgentLoop {
         // The check later will return early
       }
       
-      // Prepend thinking tag if it was actually prefilled
-      if (thinkingWasPrefilled && accumulatedOutput === '') {
-        const firstTextBlock = completion.content.find((c: any) => c.type === 'text') as any
-        if (firstTextBlock?.text) {
-          firstTextBlock.text = '<thinking>' + firstTextBlock.text
-        }
-      }
-      
+      // Note: When prefill_thinking is enabled, membrane's extended thinking API
+      // handles thinking blocks, so no manual tag prepending is needed
+
       // Get new completion text
       const newText = completion.content
         .filter((c: any) => c.type === 'text')
         .map((c: any) => c.text)
         .join('')
-      
+
       accumulatedOutput += newText
+
+      // Capture generated image blocks (from image generation models like Gemini)
+      for (const block of completion.content) {
+        if (block.type === 'image') {
+          generatedImageBlocks.push(block)
+        }
+      }
       
       // If we stopped on </function_calls>, append it back (stop sequence consumes the matched text)
       if (completion.stopReason === 'stop_sequence' && 
@@ -1990,6 +2686,7 @@ export class AgentLoop {
             llmRequest,
             discordMessages,
             stopReason: completion.stopReason,
+            generatedImageBlocks,
           })
         }
         // Inside function_calls - the stop sequence was in a parameter, continue
@@ -2024,6 +2721,7 @@ export class AgentLoop {
           llmRequest,
           discordMessages,
           stopReason: completion.stopReason,
+          generatedImageBlocks,
         })
       }
       
@@ -2064,6 +2762,7 @@ export class AgentLoop {
             llmRequest,
             discordMessages,
             stopReason: 'hallucination',
+            generatedImageBlocks: [],  // Discard images too on hallucination
           })
         }
         // Apply truncation to segments if needed
@@ -2254,6 +2953,7 @@ export class AgentLoop {
       llmRequest,
       discordMessages,
       suffix: '[Max tool depth reached]',
+      generatedImageBlocks,
     })
   }
   
@@ -2277,6 +2977,7 @@ export class AgentLoop {
     discordMessages?: DiscordMessage[];
     suffix?: string;  // e.g., '[Max tool depth reached]'
     stopReason?: string;
+    generatedImageBlocks?: ContentBlock[];  // Image blocks from image generation models
   }): Promise<{
     completion: any;
     toolCallIds: string[];
@@ -2291,7 +2992,7 @@ export class AgentLoop {
       pendingToolPersistence, allToolCallIds, allPreambleMessageIds, 
       allSentMessageIds, messageContexts, lastContextEndPos,
       channelId, triggeringMessageId, config, llmRequest, discordMessages,
-      suffix, stopReason
+      suffix, stopReason, generatedImageBlocks
     } = params
     
     // 1. Get remaining output (after what was already sent)
@@ -2408,10 +3109,27 @@ export class AgentLoop {
     
     // 11. Build final completion text for trace
     const fullCompletionText = accumulatedOutput + suffixText
-    
+
+    // Clean up TTS streaming context and notify relay
+    if (this.ttsStreamContext && this.ttsRelayClient?.isConnected()) {
+      this.ttsRelayClient.sendActivationEnd({
+        channelId: this.ttsStreamContext.channelId,
+        userId: this.ttsStreamContext.userId,
+        username: this.ttsStreamContext.username,
+        reason: 'complete',
+      })
+    }
+    this.ttsStreamContext = undefined
+
+    // Build content blocks: text + any generated images from image generation models
+    const contentBlocks: ContentBlock[] = [{ type: 'text', text: displayText + suffixText }]
+    if (generatedImageBlocks && generatedImageBlocks.length > 0) {
+      contentBlocks.push(...generatedImageBlocks)
+    }
+
     return {
       completion: {
-        content: [{ type: 'text', text: displayText + suffixText }],
+        content: contentBlocks,
         stopReason: (stopReason || 'end_turn') as any,
         usage: { inputTokens: 0, outputTokens: 0 },
         model: '',
