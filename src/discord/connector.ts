@@ -928,6 +928,19 @@ export class DiscordConnector {
   }
 
   /**
+   * Resolve :emoji_name: shortcodes to Discord's <:name:id> format using guild emoji cache.
+   * This reverses the conversion done in convertMessage (incoming: <:name:id> → :name:)
+   */
+  private resolveEmojis(content: string, guild: import('discord.js').Guild): string {
+    // Match :word: patterns — Discord custom emoji names are alphanumeric + underscores, 2-32 chars
+    return content.replace(/:(\w{2,32}):/g, (match, name) => {
+      const emoji = guild.emojis.cache.find(e => e.name === name)
+      if (!emoji) return match // not a guild emoji, leave as-is
+      return emoji.animated ? `<a:${emoji.name}:${emoji.id}>` : `<:${emoji.name}:${emoji.id}>`
+    })
+  }
+
+  /**
    * Send a message to a channel (auto-splits if > 1800 chars)
    * Returns array of message IDs
    */
@@ -940,7 +953,12 @@ export class DiscordConnector {
       }
 
       // Resolve <@username> mentions to <@USER_ID> format
-      const resolvedContent = await this.resolveMentions(content, channelId)
+      let resolvedContent = await this.resolveMentions(content, channelId)
+
+      // Resolve :emoji_name: shortcodes to <:name:id> format
+      if (channel.guild) {
+        resolvedContent = this.resolveEmojis(resolvedContent, channel.guild)
+      }
 
       // Split message if too long
       const chunks = this.splitMessage(resolvedContent, 1800)
@@ -949,7 +967,7 @@ export class DiscordConnector {
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i]!
         const options: any = {}
-        
+
         // First chunk replies to the triggering message
         if (i === 0 && replyToMessageId) {
           try {
@@ -996,7 +1014,12 @@ export class DiscordConnector {
       }
 
       // Resolve <@username> mentions to <@USER_ID> format
-      const resolvedContent = await this.resolveMentions(content, channelId)
+      let resolvedContent = await this.resolveMentions(content, channelId)
+
+      // Resolve :emoji_name: shortcodes to <:name:id> format
+      if (channel.guild) {
+        resolvedContent = this.resolveEmojis(resolvedContent, channel.guild)
+      }
 
       const options: any = {
         content: resolvedContent,
@@ -1115,7 +1138,12 @@ export class DiscordConnector {
         return []
       }
 
-      const resolvedCaption = caption ? await this.resolveMentions(caption, channelId) : ''
+      let resolvedCaption = caption ? await this.resolveMentions(caption, channelId) : ''
+
+      // Resolve :emoji_name: shortcodes to <:name:id> format
+      if (resolvedCaption && channel.guild) {
+        resolvedCaption = this.resolveEmojis(resolvedCaption, channel.guild)
+      }
 
       const options: any = {
         content: resolvedCaption,
