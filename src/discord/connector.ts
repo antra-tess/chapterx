@@ -1970,6 +1970,10 @@ export class DiscordConnector {
       const channel = msg.guild?.channels.cache.get(channelId)
       return channel && 'name' in channel ? `#${channel.name}` : `#unknown-channel`
     })
+
+    // Clean up any remaining unresolved user mentions (not in msg.mentions.users)
+    // <@123456789> → @unknown-user (prevents raw snowflake IDs leaking to LLM)
+    content = content.replace(/<@!?(\d+)>/g, '@unknown-user')
     
     // Check if this is an oblique bridge message and extract the real username
     const obliqueUsername = this.extractObliqueUsername(msg.author.username)
