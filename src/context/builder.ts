@@ -1723,12 +1723,16 @@ export class ContextBuilder {
 
     // Add participant names with newline prefix (in priority order - most recent first)
     // Use all collected participants - post-hoc truncation catches everyone anyway
+    // Skip numeric-only participants (unresolved Discord user ID mentions like <@123456>)
     // When prefill_thinking is enabled, exclude the bot's own name — the model may
     // legitimately emit "\nBotName:" after </thinking> to start the visible response.
     // Without this, the stop sequence fires before any visible text is generated,
     // creating phantom (thinking-only) completions.
     for (const participant of recentParticipants) {
       if (config.prefill_thinking && participant === config.name) {
+        continue
+      }
+      if (/^\d+$/.test(participant)) {
         continue
       }
       sequences.push(`\n${participant}:`)
