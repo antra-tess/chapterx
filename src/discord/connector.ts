@@ -1963,6 +1963,13 @@ export class DiscordConnector {
     // Convert custom Discord emojis to readable :name: format
     // <:EmojiName:123456789> and <a:EmojiName:123456789> → :EmojiName:
     content = content.replace(/<a?:(\w+):\d+>/g, ':$1:')
+
+    // Convert channel mentions to readable #channel-name format
+    // <#123456789> → #channel-name (or #unknown-channel if not in cache)
+    content = content.replace(/<#(\d+)>/g, (_match, channelId) => {
+      const channel = msg.guild?.channels.cache.get(channelId)
+      return channel && 'name' in channel ? `#${channel.name}` : `#unknown-channel`
+    })
     
     // Check if this is an oblique bridge message and extract the real username
     const obliqueUsername = this.extractObliqueUsername(msg.author.username)
