@@ -922,11 +922,22 @@ export class ContextBuilder {
               }
               
               const base64Data = imageData.toString('base64')
-              
+
+              // Final safety net: skip if still over the 5MB API limit after resampling
+              // (raw bytes, not base64 — Anthropic's limit is on decoded image size)
+              if (imageData.length > MAX_IMAGE_BASE64_BYTES) {
+                logger.warn({
+                  messageId: msg.id,
+                  url: attachment.url,
+                  rawSizeMB: (imageData.length / 1024 / 1024).toFixed(2),
+                }, 'Image still exceeds 5MB after resampling, skipping')
+                continue
+              }
+
               // Use cached token estimate, or calculate from dimensions
-              const tokenEstimate = cached.tokenEstimate || 
+              const tokenEstimate = cached.tokenEstimate ||
                 Math.ceil((cached.width || 1024) * (cached.height || 1024) / 750)
-              
+
               content.push({
                 type: 'image',
                 source: {
@@ -937,9 +948,9 @@ export class ContextBuilder {
                 tokenEstimate,  // For accurate context size calculation
                 sourceUrl: attachment.url,  // Preserved for providers that use URL-as-text (Gemini 3.x)
               } as any)
-              
-              logger.debug({ 
-                messageId: msg.id, 
+
+              logger.debug({
+                messageId: msg.id,
                 url: attachment.url,
                 sizeMB: (base64Data.length / 1024 / 1024).toFixed(2),
                 tokenEstimate,

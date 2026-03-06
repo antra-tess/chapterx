@@ -2544,10 +2544,24 @@ export class DiscordConnector {
     // 3. Download image (cache miss)
     try {
       const response = await fetch(url)
+
+      if (!response.ok) {
+        logger.warn({ url, status: response.status }, 'Image download failed (non-200 status)')
+        return null
+      }
+
       const buffer = Buffer.from(await response.arrayBuffer())
 
       // Detect actual image format from magic bytes (don't trust Discord's contentType)
-      const actualMediaType = this.detectImageType(buffer) || contentType
+      const detectedType = this.detectImageType(buffer)
+
+      // Reject non-image data (e.g., HTML error pages from expired CDN URLs)
+      if (!detectedType) {
+        logger.warn({ url, bufferSize: buffer.length }, 'Downloaded data has no valid image magic bytes, skipping')
+        return null
+      }
+
+      const actualMediaType = detectedType
       
       const hash = createHash('sha256').update(buffer).digest('hex')
       const ext = actualMediaType.split('/')[1] || 'jpg'
