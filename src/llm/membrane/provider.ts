@@ -18,6 +18,7 @@ import {
 } from './adapter.js';
 import { getFormatterForModel } from './factory.js';
 import { NativeFormatter, AnthropicXmlFormatter, CompletionsFormatter } from '@animalabs/membrane';
+import type { CompleteOptions, StreamOptions as MembraneStreamOptions } from '@animalabs/membrane';
 
 // ============================================================================
 // Mode → Formatter Mapping
@@ -45,12 +46,12 @@ function formatterFromMode(mode?: string): 'native' | 'anthropic-xml' | 'complet
 interface Membrane {
   complete(
     request: NormalizedRequest,
-    options?: { signal?: AbortSignal; timeoutMs?: number; onRequest?: (rawRequest: unknown) => void; onResponse?: (rawResponse: unknown) => void }
+    options?: CompleteOptions
   ): Promise<NormalizedResponse>;
-  
+
   stream(
     request: NormalizedRequest,
-    options?: StreamOptions
+    options?: MembraneStreamOptions
   ): Promise<NormalizedResponse>;
 }
 
@@ -100,7 +101,6 @@ export class MembraneProvider {
 
       logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter for model');
 
-      // Cast options: formatter override support added in membrane 0.5.39
       const response = await this.membrane.complete(normalizedRequest as any, {
         formatter,
         onRequest: (rawRequest: unknown) => {
@@ -109,7 +109,7 @@ export class MembraneProvider {
         onResponse: (rawResponse: unknown) => {
           responseRef = this.logRawResponseToFile(rawResponse);
         },
-      } as any);
+      });
       const completion = fromMembraneResponse(response as any);
       
       // Record to trace
