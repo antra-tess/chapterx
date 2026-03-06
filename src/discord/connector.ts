@@ -2289,6 +2289,10 @@ export class DiscordConnector {
     for (const [userId, user] of msg.mentions.users.entries()) {
       content = content.replace(new RegExp(`<@!?${userId}>`, 'g'), `<@${user.username}>`)
     }
+
+    // Convert custom Discord emojis to readable :name: format
+    // <:EmojiName:123456789> and <a:EmojiName:123456789> → :EmojiName:
+    content = content.replace(/<a?:(\w+):\d+>/g, ':$1:')
     
     // Check if this is an oblique bridge message and extract the real username
     const obliqueUsername = this.extractObliqueUsername(msg.author.username)
