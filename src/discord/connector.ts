@@ -829,6 +829,13 @@ export class DiscordConnector {
         break
       }
 
+      // IMPORTANT: Processing order explanation
+      // - Discord.js fetch returns messages NEWEST-first (largest snowflake ID first)
+      // - We reverse() to process OLDEST-first within each batch
+      // - This means when we encounter a .history command:
+      //   - batchResults contains messages we've ALREADY processed = OLDER than .history
+      //   - Remaining messages in the loop = NEWER than .history (these we want to keep)
+      // - Batches themselves are fetched newest-first (using `before:` parameter)
       const batchMessages = Array.from(fetched.values()).reverse()
       logger.debug({ batchSize: batchMessages.length }, 'Processing batch messages')
 
@@ -912,6 +919,8 @@ export class DiscordConnector {
               logger.debug({
                 resultsCount: results.length,
                 batchResultsCount: batchResults.length,
+                batchResultsIds: batchResults.map((m: any) => m.id).slice(0, 5),
+                resultsIds: results.map((m: any) => m.id).slice(0, 5),
                 hadPendingNewerMessages: !!(this as any)[pendingKey],
               }, 'Empty .history command - discarding older, collecting newer')
               if (historyState) historyState.didClear = true  // Signal to skip parent fetch for threads
@@ -1015,22 +1024,32 @@ export class DiscordConnector {
 
       // After processing all messages in batch
       if (foundHistory) {
-        // Append messages AFTER .history in current batch
+        // batchResults now contains messages AFTER .history (collected via continue)
+        logger.debug({
+          batchResultsToAppend: batchResults.length,
+          batchResultsIds: batchResults.map((m: any) => m.id),
+          currentResultsCount: results.length,
+          currentResultsIds: results.map((m: any) => m.id).slice(0, 10),
+        }, 'Post-batch: about to append batchResults (messages after .history)')
+
         results.push(...batchResults)
-        
-        // Append previously collected newer messages (batches processed before finding .history)
+
+        // Append previously collected newer messages (from batches processed before finding .history)
         const newerMessages = (this as any)[pendingKey] || []
         delete (this as any)[pendingKey]
-        
+
         if (newerMessages.length > 0) {
+          logger.debug({
+            newerMessagesToAppend: newerMessages.length,
+            newerMessageIds: newerMessages.map((m: any) => m.id),
+          }, 'Post-batch: appending newerMessages from pendingKey')
           results.push(...newerMessages)
         }
-        
-        logger.debug({ 
-          batchAfterHistory: batchResults.length,
-          newerMessagesAppended: newerMessages.length,
-          totalNow: results.length,
-        }, 'Combined: historical + after-.history + newer batches')
+
+        logger.debug({
+          finalResultsCount: results.length,
+          finalResultsIds: results.map((m: any) => m.id),
+        }, 'Post-batch: final results after .history processing')
         break  // Stop fetching older batches
       } else {
         // Regular batch - prepend (older messages go before)
