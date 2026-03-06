@@ -341,8 +341,6 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
       enabled: true,
       budgetTokens: 10000,  // Default budget for extended thinking
     };
-    // Log that thinking is enabled for debugging
-    console.log('[adapter] Thinking enabled:', { model: request.config.model, thinking: config.thinking });
   }
   
   const normalizedRequest: NormalizedRequest = {

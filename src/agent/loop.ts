@@ -533,7 +533,13 @@ export class AgentLoop {
     
     // Determine activation reason for tracing
     const activationReason = this.determineActivationReason(events)
-    
+
+    // Extract deferred retry state if this is a retry activation
+    const deferredEvent = events.find((e) => (e.data as any)?.type === 'deferred_retry')
+    const deferredRetryState = deferredEvent
+      ? { retryAttempt: (deferredEvent.data as any).retryAttempt ?? 0, createdAt: (deferredEvent.data as any).createdAt }
+      : undefined
+
     // ===== SOMA CREDIT CHECK =====
     // Check if user has sufficient ichor before proceeding with activation
     // Only charge for human-initiated triggers (mention, reply, m_command) - not random
@@ -583,7 +589,7 @@ export class AgentLoop {
                 triggerEvents: activationReason.events,
               })
               
-              return this.handleActivation(channelId, guildId, triggeringMessageId, traceCollector)
+              return this.handleActivation(channelId, guildId, triggeringMessageId, traceCollector, deferredRetryState)
             },
             channelName
           )
@@ -624,7 +630,7 @@ export class AgentLoop {
             throw traceError
           }
         })
-      : this.handleActivation(channelId, guildId, triggeringMessageId)
+      : this.handleActivation(channelId, guildId, triggeringMessageId, undefined, deferredRetryState)
     
     activationPromise
       .catch((error) => {
@@ -1092,10 +1098,11 @@ export class AgentLoop {
   }
 
   private async handleActivation(
-    channelId: string, 
-    guildId: string, 
+    channelId: string,
+    guildId: string,
     triggeringMessageId?: string,
-    trace?: TraceCollector
+    trace?: TraceCollector,
+    deferredRetryState?: { retryAttempt: number; createdAt?: number }
   ): Promise<void> {
     logger.info({ botId: this.botId, channelId, guildId, triggeringMessageId, traceId: trace?.getTraceId() }, 'Bot activated')
 
@@ -1861,6 +1868,8 @@ export class AgentLoop {
           guildId,
           error: error instanceof Error ? error : new Error(String(error)),
           originalTriggerId: triggeringMessageId,
+          retryAttempt: deferredRetryState?.retryAttempt ?? 0,
+          originalCreatedAt: deferredRetryState?.createdAt,
         })
 
         if (queued) {

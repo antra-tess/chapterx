@@ -55,14 +55,6 @@ export {
 
 export type { MembraneFactoryConfig, OpenAICompatibleConfig, OpenAICompletionsConfig, FormatterType, VendorConfigInput } from './factory.js';
 
-// Hooks - tracing integration
-export {
-  createTracingHooks,
-  createTracingHooksWithContext,
-} from './hooks.js';
-
-export type { SharedHookContext as TracingHookContext } from './hooks.js';
-
 // Provider - wraps membrane for LLM completions
 export { MembraneProvider } from './provider.js';
 

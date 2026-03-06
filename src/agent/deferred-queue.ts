@@ -196,8 +196,9 @@ export class DeferredQueue {
     error: Error
     originalTriggerId?: string
     retryAttempt?: number
+    originalCreatedAt?: number
   }): boolean {
-    const { botId, channelId, guildId, error, originalTriggerId, retryAttempt = 0 } = params
+    const { botId, channelId, guildId, error, originalTriggerId, retryAttempt = 0, originalCreatedAt } = params
 
     // Check if already queued
     if (this.queue.has(channelId)) {
@@ -255,7 +256,7 @@ export class DeferredQueue {
       errorType: errorInfo.errorType!,
       errorMessage: errorInfo.message,
       scheduledAt: now + delayMs,
-      createdAt: retryAttempt === 0 ? now : this.queue.get(channelId)?.createdAt ?? now,
+      createdAt: retryAttempt === 0 ? now : (originalCreatedAt ?? now),
       retryAfterMs: errorInfo.retryAfterMs,
     }
 

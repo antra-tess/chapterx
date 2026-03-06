@@ -23,7 +23,7 @@ import {
   CompletionsFormatter,
 } from '@animalabs/membrane';
 import type { ProviderAdapter, MembraneConfig, PrefillFormatter } from '@animalabs/membrane';
-import { createTracingHooks } from './hooks.js';
+// Note: createTracingHooks was removed — tracing is now handled by MembraneProvider directly
 import { logger } from '../../utils/logger.js';
 
 // ============================================================================
@@ -837,13 +837,12 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
   const formatter = createFormatter(config);
 
   // Build membrane config
-  // Note: Cast hooks to any because our local type definitions may not exactly match
-  // membrane's updated types. The implementation is correct, just type mismatch.
+  // Note: Tracing is handled by MembraneProvider (provider.ts), not hooks.
+  // Hooks were a transitional mechanism and caused double-tracing on the complete() path.
   const membraneConfig: MembraneConfig = {
     assistantParticipant: config.assistantName,
     maxParticipantsForStop: config.maxParticipantsForStop,
     formatter,
-    hooks: createTracingHooks() as any,
     debug: config.debug,
     retry: config.retries != null ? { maxRetries: config.retries } : undefined,
   };
