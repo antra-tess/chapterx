@@ -100,7 +100,7 @@ export class MembraneProvider {
 
       logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter for model');
 
-      // Cast to any because our local types may not exactly match membrane's updated types
+      // Cast options: formatter override support added in membrane 0.5.39
       const response = await this.membrane.complete(normalizedRequest as any, {
         formatter,
         onRequest: (rawRequest: unknown) => {
@@ -109,7 +109,7 @@ export class MembraneProvider {
         onResponse: (rawResponse: unknown) => {
           responseRef = this.logRawResponseToFile(rawResponse);
         },
-      });
+      } as any);
       const completion = fromMembraneResponse(response as any);
       
       // Record to trace

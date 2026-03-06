@@ -580,7 +580,7 @@ export class DiscordConnector {
             const batch = await this.cachedFetchMessages(extensionChannel, { limit: 100, before: currentBefore })
             if (batch.size === 0) break
 
-            const batchMessages = Array.from(batch.values()).sort((a, b) => a.id.localeCompare(b.id))
+            const batchMessages = (Array.from(batch.values()) as Message[]).sort((a, b) => a.id.localeCompare(b.id))
             messages = [...batchMessages, ...messages]
             extended += batchMessages.length
 
@@ -1130,14 +1130,14 @@ export class DiscordConnector {
         if (fetched.size === 0) break
 
         // Discord returns messages newest-first, so reverse for chronological order
-        const batchMessages = Array.from(fetched.values()).reverse()
-        
+        const batchMessages = Array.from(fetched.values()).reverse() as Message[]
+
         // Add to beginning (older messages go before newer ones)
         allMessages.unshift(...batchMessages)
 
         // Check if we found the first message
         if (firstMessageId) {
-          if (batchMessages.some(m => m.id === firstMessageId)) {
+          if (batchMessages.some((m: Message) => m.id === firstMessageId)) {
             foundFirst = true
             break
           }
@@ -2023,11 +2023,11 @@ export class DiscordConnector {
     // Cache miss or beyond cache boundary - fetch from API
     this.cacheStats.misses++
     this.cacheStats.apiCalls++
-    const fetched = await channel.messages.fetch(options)
+    const fetched = await channel.messages.fetch(options) as unknown as Collection<string, Message>
 
     if (!this.messageCachePopulated.has(channelId)) {
       // First population — store as initial cache
-      const msgs = Array.from(fetched.values()).reverse() as Message[]  // chronological order
+      const msgs = Array.from(fetched.values()).reverse()  // chronological order
       this.messageCache.set(channelId, msgs)
       const index = new Map<string, number>()
       msgs.forEach((m, i) => index.set(m.id, i))
@@ -2036,7 +2036,7 @@ export class DiscordConnector {
       logger.debug({ channelId, count: msgs.length }, 'Message cache populated from API')
     } else if (before && cache) {
       // Extend cache backwards with older messages from API
-      const msgs = Array.from(fetched.values()).reverse() as Message[]
+      const msgs = Array.from(fetched.values()).reverse()
       const existingIndex = this.messageCacheIndex.get(channelId) ?? new Map<string, number>()
       const newMsgs = msgs.filter(m => !existingIndex.has(m.id))
       if (newMsgs.length > 0) {

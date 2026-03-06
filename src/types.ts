@@ -471,6 +471,7 @@ export interface Event {
   guildId: string
   data: any
   timestamp: Date
+  receivedAt?: number
 }
 
 export type EventType = 
