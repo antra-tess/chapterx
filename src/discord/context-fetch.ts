@@ -178,10 +178,9 @@ export async function fetchChannelMessages(
         break
       }
 
-      // Check for .history command
-      // Match ".history" followed by end-of-string, whitespace, or newline
+      // Check for .history command — must start with ".history" followed by whitespace or end-of-string
       // to avoid false positives like ".historybook" or ".history-lesson"
-      if (!ignoreHistory && msg.content && /^\.history(?:\s|$)/m.test(msg.content)) {
+      if (!ignoreHistory && msg.content?.startsWith('.history') && /^\.history(?:\s|$)/.test(msg.content)) {
         const historyResult = await processHistoryCommand(
           msg,
           channel,

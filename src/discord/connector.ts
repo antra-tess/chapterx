@@ -386,10 +386,15 @@ export class DiscordConnector {
   private buildFetchDeps(): FetchDeps {
     return {
       fetchBatch: async (ch: TextChannel, opts: { before?: string; limit: number }): Promise<Message[]> => {
-        const fetched = await this.cachedFetchMessages(ch, opts) as any
-        if (!fetched || fetched.size === 0) return []
-        // Normalize to Message[] — fetchChannelMessages handles sorting
-        return Array.from(fetched.values()) as Message[]
+        try {
+          const fetched = await this.cachedFetchMessages(ch, opts)
+          if (!fetched || (fetched as any).size === 0) return []
+          // Normalize to Message[] — fetchChannelMessages handles sorting
+          return Array.from((fetched as any).values()) as Message[]
+        } catch (error) {
+          logger.warn({ error, channelId: ch.id, opts }, 'fetchBatch failed — returning empty batch')
+          return []
+        }
       },
       fetchSingle: async (ch: TextChannel, id: string): Promise<Message | null> => {
         try {
@@ -620,6 +625,8 @@ export class DiscordConnector {
 
         // Trim overshoot: if anchor is found but not at index 0, trim older messages
         // for cache stability. Only when NO .history was used (overshoot from batch fetching).
+        // NOTE: historyWasUsed is false for bare `.history` clears (originChannelId is null),
+        // but that's safe because historyDidClear already short-circuits this entire Stage 3 block above.
         const historyWasUsed = !!historyOriginChannelId
         if (firstIndex > 0 && historyWasUsed) {
           // .history brought in older context — expand anchor (expected behavior)
