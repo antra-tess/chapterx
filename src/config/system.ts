@@ -340,6 +340,9 @@ export class ConfigSystem {
       // Bot mode (chat vs prefill)
       mode: config.mode,  // 'chat' or 'prefill' (default: undefined = prefill)
 
+      // Streaming control
+      streaming: config.streaming,
+
       // TTS relay
       tts_relay: config.tts_relay,
     }

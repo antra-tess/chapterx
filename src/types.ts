@@ -140,6 +140,7 @@ export interface ModelConfig {
   generate_images?: boolean  // If true, set responseModalities for image generation (overrides auto-detect from model name)
   provider_params?: Record<string, unknown>  // Arbitrary params passed through to the LLM provider (e.g., reasoning config)
   mode?: 'chat' | 'prefill' | 'base-model'  // Bot mode — controls formatter and execution path routing
+  streaming?: boolean  // When false, force non-streaming LLM calls (default: true)
 }
 
 /**
@@ -234,6 +235,12 @@ export interface BotConfig {
   // Provider-specific params (passed through to LLM provider as-is)
   // e.g., { reasoning: { effort: "none" } } for OpenRouter/grok
   provider_params?: Record<string, unknown>
+
+  // Streaming control
+  // When false, forces non-streaming LLM calls even when TTS relay is active.
+  // Useful for working around provider streaming bugs (e.g., OpenAI SSE issues).
+  // Default: true (streaming enabled when TTS relay is active)
+  streaming?: boolean
 
   // TTS relay integration
   // Connects to a WebSocket relay server to stream visible text chunks

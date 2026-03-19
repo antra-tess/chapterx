@@ -365,6 +365,8 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     contextPrefix: request.context_prefix,
     // Custom prefill user message (replaces '[Start]' synthetic user message)
     prefillUserMessage: request.prefill_user_message,
+    // Streaming control - when false, membrane.stream() falls back to complete()
+    streaming: request.config.streaming,
   };
 
   // Handle stop sequences

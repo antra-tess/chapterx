@@ -1768,6 +1768,7 @@ export class ContextBuilder {
       generate_images: config.generate_images,
       provider_params: config.provider_params,
       mode: config.mode,
+      streaming: config.streaming,
     }
   }
 }
