@@ -18,7 +18,7 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse } from 'http'
-import { readFileSync, existsSync, readdirSync, statSync } from 'fs'
+import { readFileSync, existsSync, readdirSync, statSync, openSync, readSync, closeSync } from 'fs'
 import { join, basename } from 'path'
 import { gzipSync } from 'zlib'
 import { ActivationTrace, TraceIndex } from '../src/trace/types.js'
@@ -82,19 +82,48 @@ function getIndexCache(): IndexEntry[] {
     const stat = statSync(indexFile)
     indexMtimes.set(indexFile, stat.mtimeMs)
 
-    const entries = readFileSync(indexFile, 'utf-8')
-      .split('\n')
-      .filter(Boolean)
-      .map(line => {
-        try {
-          const entry = JSON.parse(line) as IndexEntry
-          entry.logsDir = logsDir  // Track which logs dir this came from
-          return entry
-        } catch {
-          return null
+    // Stream-read line by line to avoid V8 string size limit (~512MB)
+    // on large index files. readFileSync would fail with
+    // "Cannot create a string longer than 0x1fffffe8 characters"
+    const entries: IndexEntry[] = []
+    const fd = openSync(indexFile, 'r')
+    try {
+      const CHUNK_SIZE = 4 * 1024 * 1024 // 4MB chunks
+      const buf = Buffer.alloc(CHUNK_SIZE)
+      let leftover = ''
+      let bytesRead: number
+
+      while ((bytesRead = readSync(fd, buf, 0, CHUNK_SIZE, null)) > 0) {
+        const chunk = leftover + buf.toString('utf-8', 0, bytesRead)
+        const lines = chunk.split('\n')
+        // Last element may be incomplete — save for next iteration
+        leftover = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line) continue
+          try {
+            const entry = JSON.parse(line) as IndexEntry
+            entry.logsDir = logsDir
+            entries.push(entry)
+          } catch {
+            // Skip malformed lines
+          }
         }
-      })
-      .filter(Boolean) as IndexEntry[]
+      }
+
+      // Process any remaining leftover
+      if (leftover) {
+        try {
+          const entry = JSON.parse(leftover) as IndexEntry
+          entry.logsDir = logsDir
+          entries.push(entry)
+        } catch {
+          // Skip malformed trailing line
+        }
+      }
+    } finally {
+      closeSync(fd)
+    }
 
     // Update channel name cache
     for (const entry of entries) {
@@ -1317,9 +1346,14 @@ const HTML = `<!DOCTYPE html>
       if (failedOnly) url += '&failed=true';
 
       const res = await apiFetch(url);
+      if (!res.ok) {
+        const err = await res.text().catch(() => res.statusText);
+        document.getElementById('recentList').innerHTML = '<div class="empty-state">Error loading traces: ' + res.status + ' ' + (err || '') + '</div>';
+        return;
+      }
       const data = await res.json();
-      const traces = data.traces;
-      totalTraces = data.total;
+      const traces = data.traces || [];
+      totalTraces = data.total || 0;
 
       const html = traces.map(t => \`
         <div class="result-card" onclick="loadTrace('\${t.traceId}')">
