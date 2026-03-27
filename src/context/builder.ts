@@ -19,7 +19,6 @@ import {
 } from '../types.js'
 import { Activation, Completion, MessageContext } from '../activation/index.js'
 import { logger } from '../utils/logger.js'
-import sharp from 'sharp'
 import {
   shouldRoll,
   calculateCharacters,
@@ -30,8 +29,7 @@ import {
   applyChapterXCacheMarker,
 } from './rolling.js'
 
-// Anthropic's per-image base64 limit is 5MB
-const MAX_IMAGE_BASE64_BYTES = 5 * 1024 * 1024
+import { prepareImage, resampleImage, MAX_IMAGE_BASE64_BYTES } from './image-processing.js'
 import { 
   ContextBuildInfo, 
   ContextMessageInfo,
@@ -892,24 +890,30 @@ export class ContextBuilder {
             if (cached) {
               let imageData = cached.data
               let mediaType = cached.mediaType
+              let imgWidth = cached.width || 1024
+              let imgHeight = cached.height || 1024
 
-              // Normalize image through sharp to strip problematic metadata/encoding
-              // that can cause "Could not process image" errors from providers
+              // Prepare image: strip problematic metadata + enforce max dimension limit.
+              // This prevents "Could not process image" and "dimensions exceed max" API errors.
               try {
-                const normalized = await this.normalizeImage(imageData, mediaType)
-                imageData = normalized.data
-                mediaType = normalized.mediaType
+                const prepared = await prepareImage(imageData, mediaType)
+                imageData = prepared.data
+                mediaType = prepared.mediaType
+                imgWidth = prepared.width
+                imgHeight = prepared.height
               } catch (error) {
-                logger.warn({ error, messageId: msg.id }, 'Failed to normalize image, using original')
+                logger.warn({ error, messageId: msg.id }, 'Failed to prepare image, using original')
               }
 
               const originalBase64Size = imageData.length * 4 / 3  // Approximate base64 size
 
               if (originalBase64Size > MAX_IMAGE_BASE64_BYTES) {
                 try {
-                  const resampled = await this.resampleImage(imageData, MAX_IMAGE_BASE64_BYTES)
+                  const resampled = await resampleImage(imageData, MAX_IMAGE_BASE64_BYTES)
                   imageData = resampled.data
                   mediaType = resampled.mediaType
+                  imgWidth = resampled.width
+                  imgHeight = resampled.height
                   logger.info({
                     messageId: msg.id,
                     originalMB: (originalBase64Size / 1024 / 1024).toFixed(2),
@@ -920,11 +924,10 @@ export class ContextBuilder {
                   continue
                 }
               }
-              
+
               const base64Data = imageData.toString('base64')
 
               // Final safety net: skip if still over the 5MB API limit after resampling
-              // (raw bytes, not base64 — Anthropic's limit is on decoded image size)
               if (imageData.length > MAX_IMAGE_BASE64_BYTES) {
                 logger.warn({
                   messageId: msg.id,
@@ -934,9 +937,9 @@ export class ContextBuilder {
                 continue
               }
 
-              // Use cached token estimate, or calculate from dimensions
-              const tokenEstimate = cached.tokenEstimate ||
-                Math.ceil((cached.width || 1024) * (cached.height || 1024) / 750)
+              // Recalculate token estimate from actual processed dimensions
+              // (connector's cached estimate uses pre-processing dimensions)
+              const tokenEstimate = Math.ceil((imgWidth * imgHeight) / 750)
 
               content.push({
                 type: 'image',
@@ -953,6 +956,7 @@ export class ContextBuilder {
                 messageId: msg.id,
                 url: attachment.url,
                 sizeMB: (base64Data.length / 1024 / 1024).toFixed(2),
+                dimensions: `${imgWidth}x${imgHeight}`,
                 tokenEstimate,
               }, 'Added image to content')
             }
@@ -1115,94 +1119,6 @@ export class ContextBuilder {
       removed: toRemove,
       kept: maxMcpImages,
     }, 'Limited MCP images in context (kept latest)')
-  }
-
-  /**
-   * Normalize an image by re-encoding through sharp to strip problematic
-   * metadata (EXIF, ICC profiles, XMP) that can cause provider-side
-   * "Could not process image" errors. Preserves dimensions and quality.
-   */
-  private async normalizeImage(
-    data: Buffer,
-    mediaType: string
-  ): Promise<{ data: Buffer; mediaType: string }> {
-    const image = sharp(data)
-    const metadata = await image.metadata()
-
-    if (metadata.hasAlpha || mediaType === 'image/png') {
-      const output = await sharp(data).png({ compressionLevel: 6 }).toBuffer()
-      return { data: output, mediaType: 'image/png' }
-    }
-
-    const output = await sharp(data).jpeg({ quality: 95, mozjpeg: true }).toBuffer()
-    return { data: output, mediaType: 'image/jpeg' }
-  }
-
-  /**
-   * Resample an image to fit within the target base64 size limit.
-   * Uses progressive quality reduction and resizing.
-   */
-  private async resampleImage(
-    data: Buffer,
-    maxBase64Bytes: number
-  ): Promise<{ data: Buffer; mediaType: string }> {
-    // Target raw bytes (base64 adds ~33% overhead)
-    const targetBytes = Math.floor(maxBase64Bytes * 0.75)
-    
-    let image = sharp(data)
-    const metadata = await image.metadata()
-    
-    // Start with original dimensions
-    let width = metadata.width || 1920
-    let height = metadata.height || 1080
-    let quality = 85
-    
-    // Convert to JPEG for better compression (unless it's a PNG with transparency)
-    const hasAlpha = metadata.hasAlpha
-    const outputFormat = hasAlpha ? 'png' : 'jpeg'
-    
-    // Iteratively reduce size until under limit
-    for (let attempt = 0; attempt < 5; attempt++) {
-      image = sharp(data).resize(width, height, { fit: 'inside', withoutEnlargement: true })
-      
-      let output: Buffer
-      if (outputFormat === 'jpeg') {
-        output = await image.jpeg({ quality, mozjpeg: true }).toBuffer()
-      } else {
-        output = await image.png({ compressionLevel: 9 }).toBuffer()
-      }
-      
-      // Check if under limit
-      if (output.length <= targetBytes) {
-        return { 
-          data: output, 
-          mediaType: outputFormat === 'jpeg' ? 'image/jpeg' : 'image/png' 
-        }
-      }
-      
-      // Reduce quality or dimensions for next attempt
-      if (quality > 50) {
-        quality -= 15
-      } else {
-        // Reduce dimensions by 20%
-        width = Math.floor(width * 0.8)
-        height = Math.floor(height * 0.8)
-        quality = 75  // Reset quality when reducing size
-      }
-    }
-    
-    // Final attempt: aggressive resize
-    const finalImage = sharp(data)
-      .resize(Math.floor(width * 0.5), Math.floor(height * 0.5), { fit: 'inside' })
-    
-    const finalOutput = outputFormat === 'jpeg' 
-      ? await finalImage.jpeg({ quality: 60 }).toBuffer()
-      : await finalImage.png({ compressionLevel: 9 }).toBuffer()
-    
-    return { 
-      data: finalOutput, 
-      mediaType: outputFormat === 'jpeg' ? 'image/jpeg' : 'image/png' 
-    }
   }
 
   private formatToolUseWithResults(

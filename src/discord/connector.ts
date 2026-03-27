@@ -2562,26 +2562,22 @@ export class DiscordConnector {
           const ext = cachedFilename.split('.')[1] || 'jpg'
           const mediaType = `image/${ext}`
           
-          // Get image dimensions for token estimation
-          let width = 1024, height = 1024
+          // Get actual image dimensions (stored as-is; builder handles resize)
+          let width: number | undefined
+          let height: number | undefined
           try {
             const metadata = await sharp(buffer).metadata()
-            width = metadata.width || 1024
-            height = metadata.height || 1024
+            width = metadata.width
+            height = metadata.height
           } catch (e) {
-            // Use defaults
+            logger.warn({ url, filename: cachedFilename }, 'Could not read image dimensions from disk cache')
           }
-          
-          // Anthropic resizes to max 1568x1568
-          const maxDim = 1568
-          if (width > maxDim || height > maxDim) {
-            const scale = maxDim / Math.max(width, height)
-            width = Math.floor(width * scale)
-            height = Math.floor(height * scale)
-          }
-          
-          const tokenEstimate = Math.ceil((width * height) / 750)
-          
+
+          // Token estimate: Anthropic internally resizes to max 1568x1568
+          const estW = Math.min(width || 1024, 1568)
+          const estH = Math.min(height || 1024, 1568)
+          const tokenEstimate = Math.ceil((estW * estH) / 750)
+
           const cached: CachedImage = {
             url,
             data: buffer,
@@ -2638,26 +2634,21 @@ export class DiscordConnector {
       // Update URL map (will be persisted by caller after batch)
       this.urlToFilename.set(url, filename)
 
-      // Get image dimensions for token estimation
-      let width = 1024, height = 1024  // Default fallback
+      // Get actual image dimensions (stored as-is; builder handles resize)
+      let width: number | undefined
+      let height: number | undefined
       try {
         const metadata = await sharp(buffer).metadata()
-        width = metadata.width || 1024
-        height = metadata.height || 1024
+        width = metadata.width
+        height = metadata.height
       } catch (e) {
-        logger.debug({ url }, 'Could not get image dimensions, using defaults')
+        logger.warn({ url }, 'Could not get image dimensions for downloaded image')
       }
-      
-      // Anthropic resizes to max 1568x1568 (maintaining aspect ratio)
-      const maxDim = 1568
-      if (width > maxDim || height > maxDim) {
-        const scale = maxDim / Math.max(width, height)
-        width = Math.floor(width * scale)
-        height = Math.floor(height * scale)
-      }
-      
-      // Anthropic token formula: (width * height) / 750
-      const tokenEstimate = Math.ceil((width * height) / 750)
+
+      // Token estimate: Anthropic internally resizes to max 1568x1568
+      const estW = Math.min(width || 1024, 1568)
+      const estH = Math.min(height || 1024, 1568)
+      const tokenEstimate = Math.ceil((estW * estH) / 750)
 
       const cached: CachedImage = {
         url,
