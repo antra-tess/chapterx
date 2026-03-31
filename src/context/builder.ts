@@ -858,6 +858,16 @@ export class ContextBuilder {
       }, 'Image selection complete')
     }
 
+    // Build username → display name map for mention rewriting (when use_display_names enabled)
+    const usernameToDisplayName = new Map<string, string>()
+    if (config.use_display_names) {
+      for (const msg of messages) {
+        if (msg.author.username !== msg.author.displayName) {
+          usernameToDisplayName.set(msg.author.username, msg.author.displayName)
+        }
+      }
+    }
+
     // Now process messages in order, only including pre-selected images
     for (const msg of messages) {
       const content: ContentBlock[] = []
@@ -998,9 +1008,10 @@ export class ContextBuilder {
       }
 
       // For bot's own messages, use config.name for consistent LLM context
-      // For other participants, use their Discord display name
-      const isBotMessage = botDiscordUsername && msg.author.displayName === botDiscordUsername
-      const participant = isBotMessage ? config.name : msg.author.displayName
+      // For other participants, use username (default) or display name (if use_display_names enabled)
+      const isBotMessage = botDiscordUsername && msg.author.username === botDiscordUsername
+      const participantName = config.use_display_names ? msg.author.displayName : msg.author.username
+      const participant = isBotMessage ? config.name : participantName
       
       // Normalize mentions and replies to this bot to use config.name
       // Discord mentions: <@username>, replies: <reply:@username>
@@ -1018,13 +1029,15 @@ export class ContextBuilder {
         }
       }
 
+      // When use_display_names is enabled, rewrite mentions to use display names
+      // without angle brackets — natural format the model will mirror in output
+      if (config.use_display_names) {
+        rewriteMentionsForDisplayNames(content, usernameToDisplayName, config.name)
+      }
+
       // Strip reply tags from context if configured
       if (!config.include_reply_tags) {
-        for (const block of content) {
-          if (block.type === 'text') {
-            block.text = block.text.replace(/^<reply:@[^>]+>\s*/, '')
-          }
-        }
+        stripReplyTags(content)
       }
 
       participantMessages.push({
@@ -1687,6 +1700,51 @@ export class ContextBuilder {
       provider_params: config.provider_params,
       mode: config.mode,
       streaming: config.streaming,
+    }
+  }
+}
+
+// ============================================================================
+// Exported helpers (extracted for testability)
+// ============================================================================
+
+/**
+ * Rewrite <@username> and <reply:@username> mentions to use display names
+ * without angle brackets, so the LLM sees a natural format it will mirror.
+ */
+export function rewriteMentionsForDisplayNames(
+  content: ContentBlock[],
+  usernameToDisplayName: Map<string, string>,
+  botName: string
+): void {
+  for (const block of content) {
+    if (block.type === 'text') {
+      // Rewrite other users' mentions: <@username> → @DisplayName
+      for (const [username, displayName] of usernameToDisplayName) {
+        const escaped = username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        block.text = block.text
+          .replace(new RegExp(`<@${escaped}>`, 'g'), `@${displayName}`)
+          .replace(new RegExp(`<reply:@${escaped}>`, 'g'), `(replying to @${displayName})`)
+      }
+      // Also strip brackets from bot mentions: <@BotName> → @BotName
+      const escapedBotName = botName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      block.text = block.text
+        .replace(new RegExp(`<@${escapedBotName}>`, 'g'), `@${botName}`)
+        .replace(new RegExp(`<reply:@${escapedBotName}>`, 'g'), `(replying to @${botName})`)
+    }
+  }
+}
+
+/**
+ * Strip reply tags from content blocks.
+ * Handles both formats: <reply:@name> (default) and (replying to @name) (display names mode).
+ */
+export function stripReplyTags(content: ContentBlock[]): void {
+  for (const block of content) {
+    if (block.type === 'text') {
+      block.text = block.text
+        .replace(/^<reply:@[^>]+>\s*/, '')
+        .replace(/^\(replying to @[^)]+\)\s*/, '')
     }
   }
 }

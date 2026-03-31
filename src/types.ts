@@ -227,6 +227,11 @@ export interface BotConfig {
   // Soma integration (credit system)
   soma?: SomaConfig
 
+  // Participant display
+  // When true, uses Discord display names (globalName/nickname) instead of usernames
+  // for participant labels in the LLM context. Default: false (use usernames, matching Chapter2)
+  use_display_names?: boolean
+
   // Participant stop sequences
   // When true, auto-generates stop sequences from participant names to prevent
   // the model from "speaking as" other users. Default: false (allows frags/quotes)

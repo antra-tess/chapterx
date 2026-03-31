@@ -2338,6 +2338,13 @@ export class DiscordConnector {
     const effectiveUsername = obliqueUsername || msg.author.username
     // Oblique messages are from webhooks (technically bots) but should be treated as human messages
     const effectiveBot = obliqueUsername ? false : msg.author.bot
+
+    // Resolve display name: server nickname > global display name > username
+    // For oblique messages, the extracted username IS the display name
+    const effectiveDisplayName = obliqueUsername
+      || msg.member?.nickname
+      || msg.author.globalName
+      || msg.author.username
     
     // If this is a reply, prepend <reply:@username>
     // For oblique messages, treat as non-bot (they should get reply prefixes)
@@ -2362,7 +2369,7 @@ export class DiscordConnector {
       author: {
         id: msg.author.id,
         username: effectiveUsername,
-        displayName: effectiveUsername,
+        displayName: effectiveDisplayName,
         bot: effectiveBot,
       },
       content,

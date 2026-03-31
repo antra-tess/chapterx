@@ -334,6 +334,9 @@ export class ConfigSystem {
         token: config.soma.token,  // Optional: uses SOMA_TOKEN env var if not set
       } : undefined,
 
+      // Use display names instead of usernames for participant labels - default false
+      use_display_names: config.use_display_names ?? false,
+
       // Participant stop sequences - default false (allows frags/quotes)
       participant_stop_sequences: config.participant_stop_sequences ?? false,
 
