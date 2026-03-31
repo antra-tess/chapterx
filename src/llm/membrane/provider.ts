@@ -251,6 +251,54 @@ export class MembraneProvider {
       // Log membrane response to file
       const membraneResponseRef = this.logResponseToFile(response);
 
+      // Handle aborted responses (timeout, user cancel, etc.)
+      // AbortedResponse has partialContent, not content — fromMembraneResponse would crash
+      if ('aborted' in response && (response as any).aborted === true) {
+        const aborted = response as any;
+        logger.warn({ reason: aborted.reason, hasPartialContent: !!aborted.partialContent }, 'Stream was aborted');
+        const completion: LLMCompletion = {
+          content: (aborted.partialContent ?? []).map((b: any) => b),
+          stopReason: 'end_turn',
+          usage: {
+            inputTokens: aborted.partialUsage?.inputTokens ?? 0,
+            outputTokens: aborted.partialUsage?.outputTokens ?? 0,
+            cacheCreationTokens: 0,
+            cacheReadTokens: 0,
+          },
+          model: request.config.model,
+          raw: null,
+        };
+
+        // Record to trace
+        if (trace && callId) {
+          trace.completeLLMCall(
+            callId,
+            {
+              messageCount: request.messages.length,
+              systemPromptLength: request.system_prompt?.length || 0,
+              hasTools: (request.tools?.length || 0) > 0,
+              toolCount: request.tools?.length || 0,
+            },
+            {
+              stopReason: 'end_turn',
+              contentBlocks: completion.content.length,
+              textLength: 0,
+              toolUseCount: 0,
+            },
+            completion.usage,
+            request.config.model,
+            {
+              requestBodyRefs: llmRequestRefs.length > 0 ? llmRequestRefs : undefined,
+              responseBodyRefs: llmResponseRefs.length > 0 ? llmResponseRefs : undefined,
+              membraneRequestRef,
+              membraneResponseRef,
+            },
+          );
+        }
+
+        return completion;
+      }
+
       const completion = fromMembraneResponse(response as any);
 
       // Record to trace

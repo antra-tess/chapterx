@@ -427,7 +427,7 @@ export function fromMembraneRequest(request: NormalizedRequest, botName: string)
  */
 export function fromMembraneResponse(response: NormalizedResponse): LLMCompletion {
   return {
-    content: response.content.map(fromMembraneContentBlock),
+    content: (response.content ?? []).map(fromMembraneContentBlock),
     stopReason: mapStopReason(response.stopReason),
     usage: {
       inputTokens: response.usage.inputTokens,
