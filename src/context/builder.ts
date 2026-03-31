@@ -806,10 +806,12 @@ export class ContextBuilder {
       }
 
       // TIER 2: Images in rolling window (always enabled when include_images is true)
-      // Select up to maxEphemeralImages AFTER the cache marker
-      // These don't affect caching since they're in the ephemeral portion
+      // Select up to maxEphemeralImages at or after the cache marker
+      // The cache marker message itself is included: in short conversations where all
+      // messages are at/before the marker, excluding it would silently drop ALL images.
+      // Cache stability impact is minimal — short conversations have small prefixes.
       // Select newest first (iterate backwards from end) so oldest ephemeral images drop first
-      const ephemeralStartIndex = cacheMarkerIndex >= 0 ? cacheMarkerIndex + 1 : 0
+      const ephemeralStartIndex = cacheMarkerIndex >= 0 ? cacheMarkerIndex : 0
       for (let i = messages.length - 1; i >= ephemeralStartIndex && ephemeralImageCount < maxEphemeralImages; i--) {
         const msg = messages[i]!
 
