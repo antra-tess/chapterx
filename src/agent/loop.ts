@@ -2206,7 +2206,8 @@ export class AgentLoop {
                 fullVisibleText,
                 discordMessages,
                 this.connector.getBotUsername() || config.name,
-                llmRequest.stop_sequences
+                llmRequest.stop_sequences,
+                config.use_display_names
               )
               if (truncResult.truncatedAt) {
                 logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncating native pre-tool text at participant')
@@ -2386,7 +2387,8 @@ export class AgentLoop {
           displayText,
           discordMessages,
           this.connector.getBotUsername() || config.name,
-          llmRequest.stop_sequences
+          llmRequest.stop_sequences,
+          config.use_display_names
         )
         if (truncResult.truncatedAt) {
           logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated native output at participant')
@@ -2740,10 +2742,11 @@ export class AgentLoop {
       if (segments.length > 0 && discordMessages && toolDepth === 0) {
         const fullVisibleText = segments.map(s => s.visible).join('')
         const truncResult = this.truncateAtParticipant(
-          fullVisibleText, 
-          discordMessages, 
-          this.connector.getBotUsername() || config.name, 
-          llmRequest.stop_sequences
+          fullVisibleText,
+          discordMessages,
+          this.connector.getBotUsername() || config.name,
+          llmRequest.stop_sequences,
+          config.use_display_names
         )
         if (truncResult.truncatedAt?.startsWith('start_hallucination:')) {
           // Response started with another participant - complete hallucination
@@ -3002,10 +3005,11 @@ export class AgentLoop {
     let truncatedRemaining = remainingOutput
     if (discordMessages && remainingOutput) {
       const truncResult = this.truncateAtParticipant(
-        remainingOutput, 
-        discordMessages, 
-        this.connector.getBotUsername() || config.name, 
-        llmRequest.stop_sequences
+        remainingOutput,
+        discordMessages,
+        this.connector.getBotUsername() || config.name,
+        llmRequest.stop_sequences,
+        config.use_display_names
       )
       if (truncResult.truncatedAt) {
         logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated inline output at participant')
@@ -3445,16 +3449,19 @@ export class AgentLoop {
    * Also checks for any additional stop sequences provided.
    */
   private truncateAtParticipant(
-    text: string, 
-    messages: DiscordMessage[], 
+    text: string,
+    messages: DiscordMessage[],
     botName: string,
-    additionalStopSequences?: string[]
+    additionalStopSequences?: string[],
+    useDisplayNames?: boolean
   ): { text: string; truncatedAt: string | null } {
     // Collect ALL unique participant names from the conversation
+    // When use_display_names is enabled, use display names to match what the LLM sees in context
     const participants = new Set<string>()
     for (const msg of messages) {
-      if (msg.author?.username && msg.author.username !== botName) {
-        participants.add(msg.author.username)
+      const name = useDisplayNames ? msg.author?.displayName : msg.author?.username
+      if (name && name !== botName) {
+        participants.add(name)
       }
     }
 
