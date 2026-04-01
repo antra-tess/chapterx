@@ -7,7 +7,7 @@
  *
  * Key features:
  * - One queued activation per channel (prevents buildup)
- * - Exponential backoff (30s → 1m → 2m → 4m → 5m cap), continues for ~24h
+ * - Exponential backoff (30s → 1m → 2m → 4m → 5m cap), max 5 retries
  * - 1 hour cooldown period after exhaustion
  * - Fires self_activation events to main EventQueue
  */
@@ -35,7 +35,7 @@ export interface DeferredActivation {
 }
 
 export interface DeferredQueueConfig {
-  /** Maximum retry attempts per activation (default: 300, ~24h at 5min cap) */
+  /** Maximum retry attempts per activation (default: 5) */
   maxRetries?: number
   /** Base delay between retries in ms (default: 30000 = 30s) */
   baseDelayMs?: number
@@ -160,7 +160,7 @@ export class DeferredQueue {
   private checkIntervalMs: number
 
   constructor(config: DeferredQueueConfig = {}) {
-    this.maxRetries = config.maxRetries ?? 300         // ~24h at 5min cap
+    this.maxRetries = config.maxRetries ?? 5
     this.baseDelayMs = config.baseDelayMs ?? 30_000
     this.maxDelayMs = config.maxDelayMs ?? 300_000     // 5 min cap
     this.cooldownMs = config.cooldownMs ?? 3_600_000   // 1 hour
