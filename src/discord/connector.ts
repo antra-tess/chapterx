@@ -982,10 +982,14 @@ export class DiscordConnector {
   async fetchMemberRoles(userId: string, guildId: string): Promise<string[] | null> {
     try {
       const guild = this.client.guilds.cache.get(guildId)
-      if (!guild) return null
+      if (!guild) {
+        logger.debug({ userId, guildId }, 'fetchMemberRoles: guild not in cache')
+        return null
+      }
       const member = await guild.members.fetch(userId)
       return Array.from(member.roles.cache.values()).map(r => r.name)
-    } catch {
+    } catch (error) {
+      logger.debug({ error, userId, guildId }, 'fetchMemberRoles: failed to fetch member')
       return null
     }
   }

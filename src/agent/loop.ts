@@ -1299,7 +1299,10 @@ export class AgentLoop {
         }
 
         const parsed = result.data
-        if (!matchesBot(parsed.target)) return
+        if (!matchesBot(parsed.target)) {
+          logger.debug({ target: parsed.target, botName: config.name, botId: this.botId }, 'Steer target mismatch — skipping')
+          return
+        }
 
         const catalog = loadCatalog(config.continuation_model)
         if (!catalog) {
@@ -1334,7 +1337,12 @@ export class AgentLoop {
         for (const { content, authorId } of pinnedSteerMessages) {
           if (config.steer_roles && config.steer_roles.length > 0) {
             const roles = await this.connector.fetchMemberRoles(authorId, guildId) ?? undefined
-            if (!roles || !config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
+            if (!roles) {
+              logger.debug({ authorId, guildId }, 'Steer role check: could not fetch member roles — skipping pinned .steer')
+              continue
+            }
+            if (!config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
+              logger.debug({ authorId, roles, required: config.steer_roles }, 'Steer role check failed — skipping pinned .steer')
               continue
             }
           }
@@ -1351,7 +1359,12 @@ export class AgentLoop {
           if (!roles) {
             roles = await this.connector.fetchMemberRoles(msg.author.id, msg.guildId) ?? undefined
           }
-          if (!roles || !config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
+          if (!roles) {
+            logger.debug({ authorId: msg.author.id, guildId: msg.guildId }, 'Steer role check: could not fetch member roles — skipping context .steer')
+            continue
+          }
+          if (!config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
+            logger.debug({ authorId: msg.author.id, roles, required: config.steer_roles }, 'Steer role check failed — skipping context .steer')
             continue
           }
         }
@@ -1371,6 +1384,8 @@ export class AgentLoop {
           interventions: activeSteering.interventions.length,
           probes: activeSteering.readout_probes,
         }, 'Injected steering into provider_params')
+      } else {
+        logger.debug({ channelId, hasStore: !!activeSteering }, 'No active steering for this channel')
       }
 
       // Record config in trace (for debugging)
@@ -1730,14 +1745,25 @@ export class AgentLoop {
       if (activeSteering && config.steer_readout === true) {
         try {
           const credentials = resolveVendorForModel(config.continuation_model, this.vendorConfigs)
+          if (!credentials) {
+            logger.debug({ model: config.continuation_model }, 'Readout skipped: no vendor credentials resolved')
+          }
           let readoutResponse: Record<string, unknown> = {}
 
           if (credentials) {
             const completionId = (completion.raw as Record<string, unknown>)?.id as string | undefined
               || (completion as Record<string, unknown>).id as string | undefined
 
+            if (!completionId) {
+              logger.debug('Readout skipped: no completion ID in LLM response')
+            }
+
             if (completionId) {
+              logger.debug({ completionId }, 'Fetching steering readout from proxy')
               const proxyData = await fetchProxyReadout(completionId, credentials)
+              if (!proxyData) {
+                logger.debug({ completionId }, 'Readout: proxy returned no data (404 or timeout)')
+              }
               if (proxyData) {
                 readoutResponse.intervention_applied = proxyData.intervention_applied
                 readoutResponse.probe_status = proxyData.probe_status
