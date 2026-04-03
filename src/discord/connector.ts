@@ -2059,6 +2059,24 @@ export class DiscordConnector {
         this.updateMessageInCache(newMsg.channelId, newMsg as Message)
       }
 
+      // If a pinned .steer or .config message was edited, mark cache dirty
+      // so the next activation refetches from the API.
+      // channelPinsUpdate only fires on pin/unpin, not content edits.
+      if (newMsg.pinned && newMsg.channelId) {
+        const oldContent = oldMsg.content ?? ''
+        const newContent = newMsg.content ?? ''
+        if (oldContent !== newContent) {
+          if (newContent.startsWith('.steer') || oldContent.startsWith('.steer')) {
+            this.pinnedSteerDirty.add(newMsg.channelId)
+            logger.info({ channelId: newMsg.channelId, messageId: newMsg.id }, 'Pinned .steer message edited — marked steer cache dirty')
+          }
+          if (newContent.startsWith('.config') || oldContent.startsWith('.config')) {
+            this.pinnedConfigDirty.add(newMsg.channelId)
+            logger.info({ channelId: newMsg.channelId, messageId: newMsg.id }, 'Pinned .config message edited — marked config cache dirty')
+          }
+        }
+      }
+
       this.queue.push({
         type: 'edit',
         channelId: newMsg.channelId,
