@@ -29,7 +29,7 @@ import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.
 import { MembraneProvider } from '../llm/membrane/index.js'
 import { resolveToolModeForModel } from '../llm/membrane/adapter.js'
 import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
-import { SteeringStore, parseSteerMessage, isSteerMessage, loadCatalog, resolveDirective, toProviderParams, formatReadout, listAvailableLabels, resolveVendorForModel, fetchProbeReadout } from '../steering/index.js'
+import { SteeringStore, parseSteerMessage, isSteerMessage, loadCatalog, resolveDirective, toProviderParams, formatReadout, listAvailableLabels, resolveVendorForModel, fetchProbeReadout, fetchProxyReadout } from '../steering/index.js'
 import type { ChannelSteering } from '../steering/index.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
@@ -1723,29 +1723,37 @@ export class AgentLoop {
       endProfile('llmCall')
 
       // 6.5. Send steering readout if active
-      if (activeSteering && activeSteering.readout_probes.length > 0) {
+      if (activeSteering) {
         try {
-          // Try to get full probe readout via /v1/encode (auto-reprobe is disabled in vLLM)
-          let readoutResponse = completion.raw
-          const rawResp = completion.raw as Record<string, unknown> | undefined
-          const responseTokenIds = rawResp?.response_token_ids as number[] | undefined
+          const credentials = resolveVendorForModel(config.continuation_model, this.vendorConfigs)
+          let readoutResponse: Record<string, unknown> = {}
 
-          if (responseTokenIds && responseTokenIds.length > 0) {
-            const credentials = resolveVendorForModel(config.continuation_model, this.vendorConfigs)
-            if (credentials) {
-              const encodeResult = await fetchProbeReadout(
-                responseTokenIds,
-                activeSteering.readout_probes,
-                config.continuation_model,
-                credentials,
-              )
-              if (encodeResult) {
-                // Merge encode results into the response for formatting
-                readoutResponse = {
-                  ...rawResp,
-                  token_probes: encodeResult.token_probes,
-                  probe_names: encodeResult.probe_names,
-                  probe_status: 'complete',
+          if (credentials) {
+            // Step 1: Get response_token_ids from proxy readout store
+            // The proxy captures these from the final SSE chunk during streaming
+            const completionId = (completion.raw as Record<string, unknown>)?.id as string | undefined
+              || (completion as Record<string, unknown>).id as string | undefined
+
+            if (completionId) {
+              const proxyData = await fetchProxyReadout(completionId, credentials)
+              if (proxyData) {
+                readoutResponse.intervention_applied = proxyData.intervention_applied
+                readoutResponse.probe_status = proxyData.probe_status
+                readoutResponse.response_token_ids = proxyData.response_token_ids
+
+                // Step 2: If we got token IDs, call /v1/encode for full projections
+                if (proxyData.response_token_ids && proxyData.response_token_ids.length > 0 && activeSteering.readout_probes.length > 0) {
+                  const encodeResult = await fetchProbeReadout(
+                    proxyData.response_token_ids,
+                    activeSteering.readout_probes,
+                    config.continuation_model,
+                    credentials,
+                  )
+                  if (encodeResult) {
+                    readoutResponse.token_probes = encodeResult.token_probes
+                    readoutResponse.probe_names = encodeResult.probe_names
+                    readoutResponse.probe_status = 'complete'
+                  }
                 }
               }
             }

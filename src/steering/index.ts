@@ -3,8 +3,8 @@ export { initCatalogDir, loadCatalog, resolveDirective, resolveLabel, listAvaila
 export { parseSteerMessage, isSteerMessage } from './parser.js'
 export type { SteerParseResult } from './parser.js'
 export { formatReadout, extractReadout } from './readout.js'
-export { resolveVendorForModel, fetchProbeReadout } from './encode.js'
-export type { EncodeResult } from './encode.js'
+export { resolveVendorForModel, fetchProbeReadout, fetchProxyReadout } from './encode.js'
+export type { EncodeResult, ProxyReadout, VendorCredentials } from './encode.js'
 export { toProviderParams } from './types.js'
 export type {
   ProbeCatalog,

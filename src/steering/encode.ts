@@ -1,12 +1,12 @@
 /**
- * Post-generation probe readout via /v1/encode.
+ * Post-generation probe readout via proxy readout endpoint + /v1/encode.
  *
- * vLLM's probe server disables auto-reprobe during generation (CUDA graph instability).
- * To get full probe projections, we POST the response token_ids back to /v1/encode
- * after generation completes.
+ * Flow:
+ *   1. Proxy captures response_token_ids from the final SSE chunk during streaming
+ *   2. After generation, ChapterX calls GET /v1/readout/{completion_id} to retrieve them
+ *   3. Then POSTs /v1/encode with those token_ids to get full probe projections
  *
- * The encode endpoint lives on the same base URL as the chat completions endpoint
- * (i.e., the Railway proxy, which passes through to vLLM's probe server).
+ * The proxy stores readout data for ~5 minutes keyed by completion ID.
  */
 
 import { logger } from '../utils/logger.js'
@@ -16,7 +16,7 @@ import type { VendorConfig } from '../types.js'
 // Vendor credential resolution
 // ---------------------------------------------------------------------------
 
-interface VendorCredentials {
+export interface VendorCredentials {
   baseUrl: string
   apiKey: string
 }
@@ -33,7 +33,6 @@ export function resolveVendorForModel(
     if (!vendor.provides) continue
 
     const matches = vendor.provides.some(pattern => {
-      // Convert glob pattern to regex: * → .*
       const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$', 'i')
       return regex.test(modelName)
     })
@@ -62,7 +61,67 @@ export function resolveVendorForModel(
 }
 
 // ---------------------------------------------------------------------------
-// Encode call
+// Readout data from proxy
+// ---------------------------------------------------------------------------
+
+export interface ProxyReadout {
+  completion_id: string
+  model: string
+  response_token_ids: number[] | null
+  prompt_token_ids: number[] | null
+  intervention_applied: Array<{
+    type: string
+    probe: string
+    probe_index: number
+    strength: number
+    renorm?: boolean
+  }> | null
+  probe_status: string | null
+}
+
+/**
+ * Fetch readout data (response_token_ids, intervention_applied) from the proxy.
+ * The proxy captures these from the final SSE chunk during streaming.
+ */
+export async function fetchProxyReadout(
+  completionId: string,
+  credentials: VendorCredentials,
+  timeoutMs: number = 10000,
+): Promise<ProxyReadout | null> {
+  const url = `${credentials.baseUrl}/v1/readout/${encodeURIComponent(completionId)}`
+
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${credentials.apiKey}` },
+      signal: controller.signal,
+    })
+
+    clearTimeout(timeout)
+
+    if (!response.ok) {
+      if (response.status !== 404) {
+        logger.warn({ status: response.status, completionId }, 'Proxy readout endpoint returned error')
+      }
+      return null
+    }
+
+    return await response.json() as ProxyReadout
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      logger.debug({ completionId }, 'Proxy readout request timed out')
+    } else {
+      logger.warn({ error, completionId }, 'Failed to fetch proxy readout')
+    }
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Encode call (full probe projections from token IDs)
 // ---------------------------------------------------------------------------
 
 export interface EncodeResult {
@@ -73,12 +132,6 @@ export interface EncodeResult {
 /**
  * Call /v1/encode on the probe server to get full probe projections
  * for a set of token IDs.
- *
- * @param tokenIds - Response token IDs from the generation
- * @param probes - Probe set names to capture (null = all, [] = skip)
- * @param model - Model name (passed through for routing)
- * @param credentials - Base URL and API key for the endpoint
- * @param timeoutMs - Request timeout in milliseconds (default: 30s)
  */
 export async function fetchProbeReadout(
   tokenIds: number[],
@@ -93,11 +146,7 @@ export async function fetchProbeReadout(
   }
 
   const url = `${credentials.baseUrl}/v1/encode`
-  const body = {
-    model,
-    token_ids: tokenIds,
-    probes,
-  }
+  const body = { model, token_ids: tokenIds, probes }
 
   try {
     const controller = new AbortController()
@@ -116,11 +165,7 @@ export async function fetchProbeReadout(
     clearTimeout(timeout)
 
     if (!response.ok) {
-      logger.warn({
-        status: response.status,
-        statusText: response.statusText,
-        url,
-      }, 'Encode endpoint returned non-OK status')
+      logger.warn({ status: response.status, url }, 'Encode endpoint returned non-OK status')
       return null
     }
 
