@@ -89,7 +89,7 @@ export class ContextBuilder {
 
     // 2. Filter dot messages
     const beforeFilter = messages.length
-    messages = this.filterDotMessages(messages)
+    messages = this.filterDotMessages(messages, config.steer_visible !== false)
     const filteredCount = beforeFilter - messages.length
     
     // Debug: log last few message IDs after filtering
@@ -556,14 +556,14 @@ export class ContextBuilder {
     return merged
   }
 
-  private filterDotMessages(messages: DiscordMessage[]): DiscordMessage[] {
+  private filterDotMessages(messages: DiscordMessage[], steerVisible: boolean = true): DiscordMessage[] {
     return messages.filter((msg) => {
       // Filter dot commands (after stripping reply prefix)
       // Dot commands are a period followed by a letter: .config, .history, .m, etc.
       // Must NOT match ellipsis (... or ..) which users type as normal conversation
       // Replies look like "<reply:@username> .test" so we need to strip the prefix
       const contentWithoutReply = msg.content.trim().replace(/^<reply:@[^>]+>\s*/, '')
-      if (/^\.[a-zA-Z]/.test(contentWithoutReply) && !/^\.steer\b/.test(contentWithoutReply)) {
+      if (/^\.[a-zA-Z]/.test(contentWithoutReply) && !(steerVisible && /^\.steer\b/.test(contentWithoutReply))) {
         return false
       }
       // Filter messages with dotted_line_face reaction (🫥)
