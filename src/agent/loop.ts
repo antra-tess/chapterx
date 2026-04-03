@@ -1279,7 +1279,12 @@ export class AgentLoop {
 
         // Role check: if steer_roles is configured, author must have one
         if (config.steer_roles && config.steer_roles.length > 0) {
-          if (!msg.authorRoles || !config.steer_roles.some(r => msg.authorRoles!.includes(r))) {
+          // msg.member is often null for historically fetched messages — fetch roles explicitly
+          let roles = msg.authorRoles
+          if (!roles) {
+            roles = await this.connector.fetchMemberRoles(msg.author.id, msg.guildId) ?? undefined
+          }
+          if (!roles || !config.steer_roles.some(r => roles!.includes(r))) {
             continue
           }
         }

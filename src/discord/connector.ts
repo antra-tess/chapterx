@@ -948,6 +948,21 @@ export class DiscordConnector {
   }
 
   /**
+   * Fetch a guild member's role names by user ID and guild ID.
+   * Used when msg.member is null (historical message fetches don't populate member data).
+   */
+  async fetchMemberRoles(userId: string, guildId: string): Promise<string[] | null> {
+    try {
+      const guild = this.client.guilds.cache.get(guildId)
+      if (!guild) return null
+      const member = await guild.members.fetch(userId)
+      return Array.from(member.roles.cache.values()).map(r => r.name)
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * Send a message to a channel (auto-splits if > 1800 chars)
    * Returns array of message IDs
    */
