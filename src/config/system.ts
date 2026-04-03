@@ -141,7 +141,9 @@ export class ConfigSystem {
       const config = YAML.parse(yamlString) || {}
 
       // Match target against botId (e.g. "haiku45") or display name (e.g. "Haiku"), case-insensitive
-      const target = config.target?.toLowerCase()
+      // Strip Discord mention syntax: <@username> → username, <@!id> → id
+      const rawTarget = config.target ? String(config.target).replace(/^<@!?([^>]+)>$/, '$1') : undefined
+      const target = rawTarget?.toLowerCase()
       const matchesBotId = target === botName.toLowerCase()
       const matchesDisplayName = botDisplayName && target === botDisplayName.toLowerCase()
       const targetMatches = !config.target || matchesBotId || matchesDisplayName
