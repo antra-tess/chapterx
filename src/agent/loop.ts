@@ -1402,6 +1402,25 @@ export class AgentLoop {
         authorizedSteers.push(steer)
       }
 
+      // Also scan context messages for .steer (catches unpinned steers when pin API is rate-limited)
+      for (const msg of discordContext.messages) {
+        if (!isSteerMessage(msg.content)) continue
+        if (config.steer_roles && config.steer_roles.length > 0) {
+          let roles = msg.authorRoles
+          if (!roles) {
+            roles = await this.connector.fetchMemberRoles(msg.author.id, msg.guildId) ?? undefined
+          }
+          if (!roles) {
+            logger.debug({ authorId: msg.author.id }, 'Steer role check: could not fetch member roles — skipping context .steer')
+            continue
+          }
+          if (!config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
+            continue
+          }
+        }
+        authorizedSteers.push({ content: msg.content, authorId: msg.author.id })
+      }
+
       // Resolve all authorized steer messages into a single ChannelSteering (merged)
       const activeSteering = this.resolveSteerMessages(authorizedSteers, config)
 
