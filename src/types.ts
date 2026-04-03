@@ -168,6 +168,7 @@ export interface BotConfig {
   rolling_threshold: number  // Messages before truncation
   recent_participant_count: number  // Number of recent participants for stop sequences
   authorized_roles: string[]  // Roles authorized to use .history commands
+  steer_roles?: string[]  // Roles authorized to use .steer commands (if empty/undefined, .steer is unrestricted)
   prompt_caching?: boolean  // Enable Anthropic prompt caching (default: true)
   cache_ttl?: '5m' | '1h'  // Anthropic cache TTL - '5m' (default) or '1h' (extended)
   
@@ -419,6 +420,7 @@ export interface DiscordMessage {
     emoji: string
     count: number
   }>
+  authorRoles?: string[]  // Guild role names (populated from member.roles)
   mentions: string[]  // User IDs
   referencedMessage?: string  // Reply to message ID
 }

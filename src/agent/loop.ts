@@ -10,7 +10,7 @@ import { DiscordConnector } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { ToolSystem } from '../tools/system.js'
-import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult } from '../types.js'
+import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult, VendorConfig } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { sleep } from '../utils/retry.js'
 import { 
@@ -29,6 +29,8 @@ import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.
 import { MembraneProvider } from '../llm/membrane/index.js'
 import { resolveToolModeForModel } from '../llm/membrane/adapter.js'
 import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
+import { SteeringStore, parseSteerMessage, isSteerMessage, loadCatalog, resolveDirective, toProviderParams, formatReadout, listAvailableLabels, resolveVendorForModel, fetchProbeReadout } from '../steering/index.js'
+import type { ChannelSteering } from '../steering/index.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
 type Membrane = any
@@ -59,6 +61,10 @@ export class AgentLoop {
   // TTS relay integration (optional)
   private ttsRelayClient?: TTSRelayClient
 
+  // Steering store (per-channel per-bot representation engineering config)
+  private steeringStore: SteeringStore
+  private vendorConfigs: Record<string, VendorConfig> = {}
+
   // Deferred activation queue for transient API errors
   private deferredQueue?: DeferredQueue
 
@@ -73,6 +79,7 @@ export class AgentLoop {
     cacheDir: string = './cache'
   ) {
     this.activationStore = new ActivationStore(cacheDir)
+    this.steeringStore = new SteeringStore(cacheDir + '/steering')
     this.cacheDir = cacheDir
   }
 
@@ -84,6 +91,13 @@ export class AgentLoop {
     logger.info({ botUserId: userId }, 'Bot user ID set')
   }
   
+  /**
+   * Set vendor configs for direct API calls (e.g., /v1/encode for probe readouts)
+   */
+  setVendorConfigs(vendors: Record<string, VendorConfig>): void {
+    this.vendorConfigs = vendors
+  }
+
   /**
    * Set membrane instance for LLM calls (required)
    */
@@ -1258,7 +1272,72 @@ export class AgentLoop {
         channelConfigs: inheritedPinnedConfigs,
       })
       endProfile('configLoad')
-      
+
+      // 4.5. Scan for .steer messages targeting this bot and update steering state
+      for (const msg of discordContext.messages) {
+        if (!isSteerMessage(msg.content)) continue
+
+        // Role check: if steer_roles is configured, author must have one
+        if (config.steer_roles && config.steer_roles.length > 0) {
+          if (!msg.authorRoles || !config.steer_roles.some(r => msg.authorRoles!.includes(r))) {
+            continue
+          }
+        }
+
+        const result = parseSteerMessage(msg.content)
+        if (!result.ok) continue
+
+        // Check if this .steer targets this bot
+        if ('clear' in result) {
+          if (result.target.toLowerCase() === config.name.toLowerCase()) {
+            this.steeringStore.clear(this.botId, channelId)
+            logger.info({ channelId, clearedBy: msg.author.id }, 'Steering cleared via .steer clear')
+          }
+          continue
+        }
+
+        const parsed = result.data
+        if (parsed.target.toLowerCase() !== config.name.toLowerCase()) continue
+
+        // Resolve directives against probe catalog for this model
+        const catalog = loadCatalog(config.continuation_model)
+        if (!catalog) {
+          logger.warn({ model: config.continuation_model }, 'No probe catalog for model — .steer ignored')
+          continue
+        }
+
+        const { interventions, errors } = resolveDirective(catalog, parsed.directives)
+        if (errors.length > 0) {
+          logger.warn({ errors, available: listAvailableLabels(catalog).length }, 'Some .steer labels could not be resolved')
+        }
+
+        if (interventions.length > 0) {
+          const steering: ChannelSteering = {
+            interventions,
+            readout_probes: parsed.readout_probes,
+            updated_at: new Date().toISOString(),
+            set_by: msg.author.id,
+            model: config.continuation_model,
+          }
+          this.steeringStore.set(this.botId, channelId, steering)
+        }
+      }
+
+      // Merge active steering into provider_params
+      const activeSteering = this.steeringStore.get(this.botId, channelId)
+      if (activeSteering && activeSteering.interventions.length > 0) {
+        const steeringParams = toProviderParams(activeSteering)
+        config.provider_params = {
+          ...config.provider_params,
+          ...steeringParams,
+        }
+        logger.info({
+          channelId,
+          interventions: activeSteering.interventions.length,
+          probes: activeSteering.readout_probes,
+        }, 'Injected steering into provider_params')
+      }
+
       // Record config in trace (for debugging)
       traceSetConfig(config)
 
@@ -1611,6 +1690,52 @@ export class AgentLoop {
         messageContexts: inlineMessageContexts
       } = executionResult
       endProfile('llmCall')
+
+      // 6.5. Send steering readout if active
+      if (activeSteering && activeSteering.readout_probes.length > 0) {
+        try {
+          // Try to get full probe readout via /v1/encode (auto-reprobe is disabled in vLLM)
+          let readoutResponse = completion.raw
+          const rawResp = completion.raw as Record<string, unknown> | undefined
+          const responseTokenIds = rawResp?.response_token_ids as number[] | undefined
+
+          if (responseTokenIds && responseTokenIds.length > 0) {
+            const credentials = resolveVendorForModel(config.continuation_model, this.vendorConfigs)
+            if (credentials) {
+              const encodeResult = await fetchProbeReadout(
+                responseTokenIds,
+                activeSteering.readout_probes,
+                config.continuation_model,
+                credentials,
+              )
+              if (encodeResult) {
+                // Merge encode results into the response for formatting
+                readoutResponse = {
+                  ...rawResp,
+                  token_probes: encodeResult.token_probes,
+                  probe_names: encodeResult.probe_names,
+                  probe_status: 'complete',
+                }
+              }
+            }
+          }
+
+          const readout = formatReadout(readoutResponse, activeSteering)
+          if (readout) {
+            if (readout.length <= 1900) {
+              await this.connector.sendMessage(channelId, `.🔬 ${readout}`)
+            } else {
+              await this.connector.sendMessageWithAttachment(
+                channelId,
+                '.🔬 probe readout',
+                { name: 'readout.md', content: readout }
+              )
+            }
+          }
+        } catch (err) {
+          logger.warn({ err }, 'Failed to send steering readout')
+        }
+      }
 
       // 7. Stop typing
       await this.connector.stopTyping(channelId)

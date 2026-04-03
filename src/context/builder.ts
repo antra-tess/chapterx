@@ -563,7 +563,7 @@ export class ContextBuilder {
       // Must NOT match ellipsis (... or ..) which users type as normal conversation
       // Replies look like "<reply:@username> .test" so we need to strip the prefix
       const contentWithoutReply = msg.content.trim().replace(/^<reply:@[^>]+>\s*/, '')
-      if (/^\.[a-zA-Z]/.test(contentWithoutReply)) {
+      if (/^\.[a-zA-Z]/.test(contentWithoutReply) && !/^\.steer\b/.test(contentWithoutReply)) {
         return false
       }
       // Filter messages with dotted_line_face reaction (🫥)

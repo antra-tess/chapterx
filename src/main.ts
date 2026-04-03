@@ -141,6 +141,12 @@ async function main() {
     // Set bot's Discord user ID for mention detection
     agentLoop.setBotUserId(botUserId)
 
+    // Initialize steering: probe catalog directory + vendor configs for /v1/encode calls
+    const { initCatalogDir } = await import('./steering/index.js')
+    initCatalogDir(configPath + '/probes')
+    agentLoop.setVendorConfigs(vendorConfigs)
+    logger.info({ catalogDir: configPath + '/probes' }, 'Steering probe catalog initialized')
+
     // Load bot config early to get the display name for membrane
     const botConfigOnly = configSystem.loadBotConfigOnly(botName)
     const membraneAssistantName = botConfigOnly.name || botName

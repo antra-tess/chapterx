@@ -2064,6 +2064,7 @@ export class DiscordConnector {
         emoji: reaction.emoji.name || reaction.emoji.toString(),
         count: reaction.count,
       })),
+      authorRoles: msg.member ? Array.from(msg.member.roles.cache.values()).map(r => r.name) : undefined,
       mentions: Array.from(msg.mentions.users.keys()),
       referencedMessage: msg.reference?.messageId,
     }
