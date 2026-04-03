@@ -1316,9 +1316,12 @@ export class AgentLoop {
         }
 
         if (interventions.length > 0) {
+          // Derive readout probes from resolved interventions (accurate set names)
+          // rather than the parser's naive first-underscore-segment guess
+          const resolvedProbes = [...new Set(interventions.map(i => i.probe))]
           const steering: ChannelSteering = {
             interventions,
-            readout_probes: parsed.readout_probes,
+            readout_probes: resolvedProbes.length > 0 ? resolvedProbes : parsed.readout_probes,
             updated_at: new Date().toISOString(),
             set_by: authorId,
             model: config.continuation_model,
