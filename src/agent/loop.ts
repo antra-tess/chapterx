@@ -29,7 +29,7 @@ import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.
 import { MembraneProvider } from '../llm/membrane/index.js'
 import { resolveToolModeForModel } from '../llm/membrane/adapter.js'
 import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
-import { parseSteerMessage, loadCatalog, resolveDirective, toProviderParams, formatReadout, listAvailableLabels, resolveVendorForModel, fetchProbeReadout, fetchProxyReadout } from '../steering/index.js'
+import { parseSteerMessage, isSteerMessage, loadCatalog, resolveDirective, toProviderParams, formatReadout, listAvailableLabels, resolveVendorForModel, fetchProbeReadout, fetchProxyReadout } from '../steering/index.js'
 import type { ChannelSteering } from '../steering/index.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
