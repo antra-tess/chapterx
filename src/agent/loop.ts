@@ -1326,16 +1326,20 @@ export class AgentLoop {
       }
 
       // Scan pinned .steer messages (always, like .config)
-      const pinnedSteerMessages = await this.connector.fetchPinnedSteerMessages(channelId)
-      for (const { content, authorId } of pinnedSteerMessages) {
-        // Role check for pinned messages
-        if (config.steer_roles && config.steer_roles.length > 0) {
-          const roles = await this.connector.fetchMemberRoles(authorId, guildId) ?? undefined
-          if (!roles || !config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
-            continue
+      // Scan pinned .steer — walk parent chain (thread → parent) like .config inheritance
+      const parentChain = await this.buildParentChannelChain(channelId)
+      const steerChannels = [...parentChain, channelId]  // parents first, current last (latest wins)
+      for (const chId of steerChannels) {
+        const pinnedSteerMessages = await this.connector.fetchPinnedSteerMessages(chId)
+        for (const { content, authorId } of pinnedSteerMessages) {
+          if (config.steer_roles && config.steer_roles.length > 0) {
+            const roles = await this.connector.fetchMemberRoles(authorId, guildId) ?? undefined
+            if (!roles || !config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
+              continue
+            }
           }
+          await processSteer(content, authorId)
         }
-        await processSteer(content, authorId)
       }
 
       // Also scan context messages (catches unpinned .steer or recent ones)
