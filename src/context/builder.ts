@@ -89,7 +89,7 @@ export class ContextBuilder {
 
     // 2. Filter dot messages
     const beforeFilter = messages.length
-    messages = this.filterDotMessages(messages, config.steer_visible !== false)
+    messages = this.filterDotMessages(messages, config.steer_visible === true)
     const filteredCount = beforeFilter - messages.length
     
     // Debug: log last few message IDs after filtering
