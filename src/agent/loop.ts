@@ -1284,7 +1284,7 @@ export class AgentLoop {
           if (!roles) {
             roles = await this.connector.fetchMemberRoles(msg.author.id, msg.guildId) ?? undefined
           }
-          if (!roles || !config.steer_roles.some(r => roles!.includes(r))) {
+          if (!roles || !config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
             continue
           }
         }
