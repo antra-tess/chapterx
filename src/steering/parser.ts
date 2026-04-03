@@ -1,21 +1,27 @@
 /**
  * Parse `.steer` messages from Discord.
  *
- * Format:
- *   .steer BotName
- *   ---
- *   emotion_cheerful: 3.0
- *   emotion_calm: 2.0
- *   deflection_afraid_hiding_as_calm: -1.5
+ * Supported formats:
  *
- * Optional readout section (after a second ---):
- *   .steer BotName
- *   ---
- *   emotion_cheerful: 3.0
- *   ---
- *   readout: emotion, deflection
+ *   Multi-line (YAML body):
+ *     .steer BotName
+ *     ---
+ *     emotion_cheerful: 3.0
+ *     emotion_calm: 2.0
  *
- * Special: `.steer BotName clear` removes all steering for that bot in the channel.
+ *   Single-line (one label):
+ *     .steer BotName label strength
+ *     .steer BotName broadcast_f12454 -65
+ *
+ *   Optional readout section (after a second ---):
+ *     .steer BotName
+ *     ---
+ *     emotion_cheerful: 3.0
+ *     ---
+ *     readout: emotion, deflection
+ *
+ *   Clear:
+ *     .steer BotName clear
  */
 
 import { parse as parseYAML } from 'yaml'
@@ -30,10 +36,18 @@ export type SteerParseResult =
   | { ok: false; error: string }
 
 /**
+ * Strip Discord mention syntax from a target string.
+ *   <@username> → username
+ *   <@!id> → id
+ */
+function stripMention(raw: string): string {
+  return raw.replace(/^<@!?([^>]+)>$/, '$1')
+}
+
+/**
  * Parse a .steer message content string.
  *
- * Follows the same pattern as extractConfigs() in connector.ts:
- * first line has the target, `---` separator, then YAML body.
+ * Supports both multi-line (with --- separator) and single-line formats.
  */
 export function parseSteerMessage(content: string): SteerParseResult {
   const trimmed = content.trim()
@@ -44,22 +58,58 @@ export function parseSteerMessage(content: string): SteerParseResult {
   const lines = trimmed.split('\n')
   const firstLine = lines[0]!.trim()
 
-  // Extract target bot name from first line
-  // Strip Discord mention syntax: <@username> → username, <@!id> → id
-  const rawTarget = firstLine.slice('.steer'.length).trim()
-  const target = rawTarget.replace(/^<@!?([^>]+)>$/, '$1')
-  if (!target) {
+  // Extract everything after .steer on the first line
+  const afterSteer = firstLine.slice('.steer'.length).trim()
+  if (!afterSteer) {
     return { ok: false, error: 'Missing target bot name. Format: `.steer BotName`' }
   }
 
-  // Check for clear command: `.steer BotName clear`
-  const targetParts = target.split(/\s+/)
-  if (targetParts.length > 1 && targetParts[targetParts.length - 1]!.toLowerCase() === 'clear') {
-    return { ok: true, clear: true, target: targetParts.slice(0, -1).join(' ') }
+  // Split first line into space-separated parts, handling mentions
+  const parts = afterSteer.split(/\s+/)
+  const target = stripMention(parts[0]!)
+
+  // --- Clear command ---
+  // .steer BotName clear
+  if (parts.length === 2 && parts[1]!.toLowerCase() === 'clear') {
+    return { ok: true, clear: true, target }
   }
 
-  // Must have --- separator
+  // --- Single-line format ---
+  // .steer BotName label strength
+  // .steer BotName broadcast_f12454 -65
+  if (parts.length >= 3 && lines.length === 1) {
+    const label = parts[1]!
+    const strength = parseFloat(parts[2]!)
+    if (isNaN(strength)) {
+      return { ok: false, error: `Invalid strength value: "${parts[2]}". Must be a number.` }
+    }
+    const directives: SteeringDirective = { [label]: strength }
+
+    // Auto-derive readout probes from the label
+    const readout_probes: string[] = []
+    const labelParts = label.split('_')
+    if (labelParts.length >= 2) {
+      readout_probes.push(labelParts[0]!)
+    }
+
+    return {
+      ok: true,
+      data: { target, directives, readout_probes },
+    }
+  }
+
+  // --- Multi-line format ---
+  // .steer BotName
+  // ---
+  // key: value pairs
   if (lines.length < 3 || lines[1]!.trim() !== '---') {
+    // Single line but not enough parts for single-line format
+    if (lines.length === 1) {
+      return {
+        ok: false,
+        error: 'Format: `.steer BotName label strength` or multi-line with --- separator',
+      }
+    }
     return {
       ok: false,
       error: 'Missing YAML separator. Format:\n```\n.steer BotName\n---\nemotion_cheerful: 3.0\n```',
@@ -124,11 +174,9 @@ export function parseSteerMessage(content: string): SteerParseResult {
   if (readout_probes.length === 0) {
     const probeSets = new Set<string>()
     for (const key of Object.keys(directives)) {
-      // Extract set name (everything before the last label part)
-      // This is a heuristic — catalog.resolveLabel does the real resolution
-      const parts = key.split('_')
-      if (parts.length >= 2) {
-        probeSets.add(parts[0]!)
+      const keyParts = key.split('_')
+      if (keyParts.length >= 2) {
+        probeSets.add(keyParts[0]!)
       }
     }
     readout_probes = Array.from(probeSets)
@@ -136,11 +184,7 @@ export function parseSteerMessage(content: string): SteerParseResult {
 
   return {
     ok: true,
-    data: {
-      target: targetParts[0] || target,
-      directives,
-      readout_probes,
-    },
+    data: { target, directives, readout_probes },
   }
 }
 

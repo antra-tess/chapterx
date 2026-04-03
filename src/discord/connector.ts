@@ -350,6 +350,34 @@ export class DiscordConnector {
   }
 
   /**
+   * Fetch pinned .steer messages from a channel.
+   * Returns array of { content, authorId } for each pinned .steer message.
+   */
+  async fetchPinnedSteerMessages(channelId: string): Promise<Array<{ content: string; authorId: string }>> {
+    try {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+      if (!channel || !channel.isTextBased()) return []
+
+      const { messages: pinnedMessages, failed } = await this.fetchPinnedWithTimeout(channel, 10000)
+      if (failed) return []
+
+      const steerMessages: Array<{ content: string; authorId: string }> = []
+      for (const msg of pinnedMessages.values()) {
+        if (msg.content.startsWith('.steer') && !msg.author.bot) {
+          steerMessages.push({ content: msg.content, authorId: msg.author.id })
+        }
+      }
+
+      // Sort oldest-first so latest pin wins (overwrites earlier ones)
+      // pins are already in pin-order (oldest first)
+      return steerMessages
+    } catch (error) {
+      logger.warn({ error, channelId }, 'Failed to fetch pinned .steer messages')
+      return []
+    }
+  }
+
+  /**
    * Load pinned configs for a single channel from disk cache.
    * Returns empty array if no disk cache exists.
    */

@@ -104,7 +104,7 @@ export function resolveLabel(
 ): { probe: string; probe_index: number; label: string } | null {
   const parts = key.split('_')
 
-  // Try progressively longer set name prefixes
+  // 1. Try progressively longer set name prefixes (e.g., "sae_hubs_broadcast_f12454")
   for (let i = 1; i < parts.length; i++) {
     const setName = parts.slice(0, i).join('_')
     const labelName = parts.slice(i).join('_')
@@ -121,6 +121,24 @@ export function resolveLabel(
     }
   }
 
+  // 2. Short label fallback — search all sets for a unique match on the raw key
+  //    e.g., "broadcast_f12454" found in sae_hubs without the prefix
+  const matches: Array<{ probe: string; probe_index: number }> = []
+  for (const [setName, entry] of Object.entries(catalog)) {
+    if (key in entry.labels) {
+      matches.push({ probe: setName, probe_index: entry.labels[key]! })
+    }
+  }
+
+  if (matches.length === 1) {
+    return {
+      probe: matches[0]!.probe,
+      probe_index: matches[0]!.probe_index,
+      label: key,
+    }
+  }
+
+  // Ambiguous or not found
   return null
 }
 

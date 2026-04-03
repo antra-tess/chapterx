@@ -1273,54 +1273,38 @@ export class AgentLoop {
       })
       endProfile('configLoad')
 
-      // 4.5. Scan for .steer messages targeting this bot and update steering state
-      for (const msg of discordContext.messages) {
-        if (!isSteerMessage(msg.content)) continue
-        logger.info({ content: msg.content.slice(0, 80), author: msg.author.username }, 'Found .steer message in context')
+      // 4.5. Load steering from pinned .steer messages + context messages
+      const botDiscordUsername = this.connector.getBotUsername()
+      const matchesBot = (t: string) => {
+        const tl = t.toLowerCase()
+        return tl === config.name.toLowerCase()
+          || tl === this.botId.toLowerCase()
+          || (botDiscordUsername && tl === botDiscordUsername.toLowerCase())
+      }
 
-        // Role check: if steer_roles is configured, author must have one
-        if (config.steer_roles && config.steer_roles.length > 0) {
-          // msg.member is often null for historically fetched messages — fetch roles explicitly
-          let roles = msg.authorRoles
-          if (!roles) {
-            roles = await this.connector.fetchMemberRoles(msg.author.id, msg.guildId) ?? undefined
-          }
-          logger.info({ roles, steer_roles: config.steer_roles, authorRoles: msg.authorRoles }, 'Steer role check')
-          if (!roles || !config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
-            logger.info({ author: msg.author.username }, 'Steer REJECTED — role mismatch')
-            continue
-          }
-        }
-
-        const result = parseSteerMessage(msg.content)
-        logger.info({ ok: result.ok, result: JSON.stringify(result).slice(0, 300) }, 'Steer parse result')
-        if (!result.ok) continue
-
-        // Check if this .steer targets this bot (match against config name, bot ID, or Discord username)
-        const botDiscordUsername = this.connector.getBotUsername()
-        const matchesBot = (t: string) => {
-          const tl = t.toLowerCase()
-          return tl === config.name.toLowerCase()
-            || tl === this.botId.toLowerCase()
-            || (botDiscordUsername && tl === botDiscordUsername.toLowerCase())
+      // Helper: process a .steer message (from pins or context)
+      const processSteer = async (content: string, authorId: string) => {
+        const result = parseSteerMessage(content)
+        if (!result.ok) {
+          logger.debug({ error: result.error, content: content.slice(0, 80) }, 'Steer parse failed')
+          return
         }
 
         if ('clear' in result) {
           if (matchesBot(result.target)) {
             this.steeringStore.clear(this.botId, channelId)
-            logger.info({ channelId, clearedBy: msg.author.id }, 'Steering cleared via .steer clear')
+            logger.info({ channelId, clearedBy: authorId }, 'Steering cleared via .steer clear')
           }
-          continue
+          return
         }
 
         const parsed = result.data
-        if (!matchesBot(parsed.target)) continue
+        if (!matchesBot(parsed.target)) return
 
-        // Resolve directives against probe catalog for this model
         const catalog = loadCatalog(config.continuation_model)
         if (!catalog) {
           logger.warn({ model: config.continuation_model }, 'No probe catalog for model — .steer ignored')
-          continue
+          return
         }
 
         const { interventions, errors } = resolveDirective(catalog, parsed.directives)
@@ -1333,11 +1317,41 @@ export class AgentLoop {
             interventions,
             readout_probes: parsed.readout_probes,
             updated_at: new Date().toISOString(),
-            set_by: msg.author.id,
+            set_by: authorId,
             model: config.continuation_model,
           }
           this.steeringStore.set(this.botId, channelId, steering)
+          logger.info({ channelId, interventions: interventions.length, source: 'steer' }, 'Steering config applied')
         }
+      }
+
+      // Scan pinned .steer messages (always, like .config)
+      const pinnedSteerMessages = await this.connector.fetchPinnedSteerMessages(channelId)
+      for (const { content, authorId } of pinnedSteerMessages) {
+        // Role check for pinned messages
+        if (config.steer_roles && config.steer_roles.length > 0) {
+          const roles = await this.connector.fetchMemberRoles(authorId, guildId) ?? undefined
+          if (!roles || !config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
+            continue
+          }
+        }
+        await processSteer(content, authorId)
+      }
+
+      // Also scan context messages (catches unpinned .steer or recent ones)
+      for (const msg of discordContext.messages) {
+        if (!isSteerMessage(msg.content)) continue
+
+        if (config.steer_roles && config.steer_roles.length > 0) {
+          let roles = msg.authorRoles
+          if (!roles) {
+            roles = await this.connector.fetchMemberRoles(msg.author.id, msg.guildId) ?? undefined
+          }
+          if (!roles || !config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
+            continue
+          }
+        }
+        await processSteer(msg.content, msg.author.id)
       }
 
       // Merge active steering into provider_params
