@@ -1764,7 +1764,7 @@ export class AgentLoop {
           if (readout) {
             await this.connector.sendMessageWithAttachment(
               channelId,
-              '.🔬',
+              '.steer-readout',
               { name: 'steering-readout.txt', content: readout }
             )
           }
