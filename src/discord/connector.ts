@@ -420,7 +420,7 @@ export class DiscordConnector {
         // Store in memory + disk (also clears dirty flag)
         this.cachePinnedConfigs(channelId, configs)
         this.savePinCacheToDisk(channelId, configs)
-        logger.debug({ channelId, configCount: configs.length }, 'Pinned config cache miss - fetched from API')
+        logger.info({ channelId, configCount: configs.length }, 'Pinned config cache refetched from API')
 
         return configs
       }
@@ -460,7 +460,7 @@ export class DiscordConnector {
         // Store in memory + disk (also clears dirty flag)
         this.cachePinnedSteers(channelId, entries)
         this.saveSteerCacheToDisk(channelId, entries)
-        logger.debug({ channelId, steerCount: entries.length }, 'Pinned steer cache miss - fetched from API')
+        logger.info({ channelId, steerCount: entries.length }, 'Pinned steer cache refetched from API')
 
         return entries
       }
@@ -1985,6 +1985,7 @@ export class DiscordConnector {
    */
   getCachedPinnedConfigs(channelId: string): string[] | null {
     if (this.pinnedConfigDirty.has(channelId)) {
+      logger.info({ channelId }, 'Pinned config cache dirty — forcing refetch')
       return null  // Force refetch, but keep dirty flag until API succeeds
     }
     return this.pinnedConfigCache.get(channelId) || null
@@ -2004,6 +2005,7 @@ export class DiscordConnector {
    */
   getCachedPinnedSteers(channelId: string): Array<{ content: string; authorId: string }> | null {
     if (this.pinnedSteerDirty.has(channelId)) {
+      logger.info({ channelId }, 'Pinned steer cache dirty — forcing refetch')
       return null  // Force refetch, but keep dirty flag until API succeeds
     }
     return this.pinnedSteerCache.get(channelId) || null
