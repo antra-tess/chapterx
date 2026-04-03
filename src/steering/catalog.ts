@@ -36,9 +36,14 @@ export function initCatalogDir(dir: string): void {
  * Returns null if no catalog exists for the model.
  */
 export function loadCatalog(modelName: string): ProbeCatalog | null {
-  // Normalize: strip namespace prefix (e.g., "steered:"), path-like prefixes,
-  // lowercase, replace slashes with dashes
-  const key = modelName.replace(/^[^:]+:/, '').toLowerCase().replace(/[/\\]/g, '-')
+  // Normalize model name to catalog filename:
+  //   "steered:/models/Trinity-Large-TrueBase"
+  //   → strip namespace prefix ("steered:") → "/models/Trinity-Large-TrueBase"
+  //   → extract basename → "Trinity-Large-TrueBase"
+  //   → lowercase → "trinity-large-truebase"
+  const stripped = modelName.replace(/^[^:]+:/, '')  // strip "steered:" etc.
+  const baseName = stripped.split('/').filter(Boolean).pop() || stripped  // extract basename
+  const key = baseName.toLowerCase()
 
   const cached = catalogCache.get(key)
   if (cached) return cached
