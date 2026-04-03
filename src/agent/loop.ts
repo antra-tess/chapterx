@@ -1353,25 +1353,31 @@ export class AgentLoop {
         }
       }
 
-      // Also scan context messages (catches unpinned .steer or recent ones)
-      for (const msg of discordContext.messages) {
-        if (!isSteerMessage(msg.content)) continue
+      // Also scan context messages — but only if no pinned .steer was found for this bot.
+      // Pins are authoritative; context messages are a fallback for unpinned steers.
+      const hasPinnedSteer = this.steeringStore.get(this.botId, channelId) !== null
+      if (!hasPinnedSteer) {
+        for (const msg of discordContext.messages) {
+          if (!isSteerMessage(msg.content)) continue
 
-        if (config.steer_roles && config.steer_roles.length > 0) {
-          let roles = msg.authorRoles
-          if (!roles) {
-            roles = await this.connector.fetchMemberRoles(msg.author.id, msg.guildId) ?? undefined
+          if (config.steer_roles && config.steer_roles.length > 0) {
+            let roles = msg.authorRoles
+            if (!roles) {
+              roles = await this.connector.fetchMemberRoles(msg.author.id, msg.guildId) ?? undefined
+            }
+            if (!roles) {
+              logger.debug({ authorId: msg.author.id, guildId: msg.guildId }, 'Steer role check: could not fetch member roles — skipping context .steer')
+              continue
+            }
+            if (!config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
+              logger.debug({ authorId: msg.author.id, roles, required: config.steer_roles }, 'Steer role check failed — skipping context .steer')
+              continue
+            }
           }
-          if (!roles) {
-            logger.debug({ authorId: msg.author.id, guildId: msg.guildId }, 'Steer role check: could not fetch member roles — skipping context .steer')
-            continue
-          }
-          if (!config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
-            logger.debug({ authorId: msg.author.id, roles, required: config.steer_roles }, 'Steer role check failed — skipping context .steer')
-            continue
-          }
+          await processSteer(msg.content, msg.author.id)
         }
-        await processSteer(msg.content, msg.author.id)
+      } else {
+        logger.debug({ channelId }, 'Skipping context .steer scan — pinned steer already loaded')
       }
 
       // Merge active steering into provider_params
