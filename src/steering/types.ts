@@ -121,6 +121,7 @@ export function toProviderParams(steering: ChannelSteering): Record<string, unkn
       probe: i.probe,
       probe_index: i.probe_index,
       strength: i.strength,
+      renorm: true,
     }))
   }
 
