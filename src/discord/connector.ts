@@ -27,6 +27,7 @@ export interface ConnectorOptions {
   token: string
   cacheDir: string
   pinCacheDir?: string  // Directory for persisting pinned config cache to disk
+  steerCacheDir?: string  // Directory for persisting pinned steer cache to disk
   maxBackoffMs: number
 }
 
@@ -62,6 +63,8 @@ export class DiscordConnector {
   private messageCachePopulated = new Set<string>()  // channels that had initial API fetch
   private pinnedConfigCache = new Map<string, string[]>()  // channelId → pinned config strings
   private pinnedConfigDirty = new Set<string>()  // channels whose pins changed since last fetch
+  private pinnedSteerCache = new Map<string, Array<{ content: string; authorId: string }>>()  // channelId → pinned steer messages
+  private pinnedSteerDirty = new Set<string>()  // channels whose steer pins changed since last fetch
 
   // Cache observability and maintenance
   private cacheStats = { hits: 0, misses: 0, apiCalls: 0, evictions: 0 }
@@ -98,6 +101,14 @@ export class DiscordConnector {
         mkdirSync(options.pinCacheDir, { recursive: true })
       }
       this.loadPinCacheFromDisk()
+    }
+
+    // Initialize disk-based steer cache directory
+    if (options.steerCacheDir) {
+      if (!existsSync(options.steerCacheDir)) {
+        mkdirSync(options.steerCacheDir, { recursive: true })
+      }
+      this.loadSteerCacheFromDisk()
     }
   }
 
@@ -143,6 +154,79 @@ export class DiscordConnector {
     } catch (error) {
       logger.warn({ error, channelId }, 'Failed to write pin cache to disk')
     }
+  }
+
+  /**
+   * Load all persisted steer caches from disk into memory on startup.
+   */
+  private loadSteerCacheFromDisk(): void {
+    const dir = this.options.steerCacheDir
+    if (!dir || !existsSync(dir)) return
+
+    try {
+      const files = readdirSync(dir).filter(f => f.endsWith('.json'))
+      let loaded = 0
+      for (const file of files) {
+        try {
+          const channelId = file.replace('.json', '')
+          const data = JSON.parse(readFileSync(join(dir, file), 'utf-8'))
+          if (Array.isArray(data)) {
+            this.pinnedSteerCache.set(channelId, data)
+            loaded++
+          }
+        } catch {
+          // Skip corrupted files
+        }
+      }
+      if (loaded > 0) {
+        logger.info({ loaded, dir }, 'Loaded pinned steer cache from disk')
+      }
+    } catch (error) {
+      logger.warn({ error, dir }, 'Failed to read steer cache directory')
+    }
+  }
+
+  /**
+   * Persist pinned steers for a channel to disk.
+   */
+  private saveSteerCacheToDisk(channelId: string, entries: Array<{ content: string; authorId: string }>): void {
+    const dir = this.options.steerCacheDir
+    if (!dir) return
+
+    try {
+      writeFileSync(join(dir, `${channelId}.json`), JSON.stringify(entries), 'utf-8')
+    } catch (error) {
+      logger.warn({ error, channelId }, 'Failed to write steer cache to disk')
+    }
+  }
+
+  /**
+   * Load pinned steers for a single channel from disk cache.
+   * Returns empty array if no disk cache exists.
+   */
+  private loadSteerCacheForChannel(channelId: string): Array<{ content: string; authorId: string }> {
+    const memCached = this.pinnedSteerCache.get(channelId)
+    if (memCached) {
+      logger.info({ channelId, steerCount: memCached.length }, 'Using disk-cached pinned steers (API unavailable)')
+      return memCached
+    }
+
+    const dir = this.options.steerCacheDir
+    if (!dir) return []
+    const filePath = join(dir, `${channelId}.json`)
+    if (!existsSync(filePath)) return []
+
+    try {
+      const data = JSON.parse(readFileSync(filePath, 'utf-8'))
+      if (Array.isArray(data)) {
+        this.pinnedSteerCache.set(channelId, data)
+        logger.info({ channelId, steerCount: data.length }, 'Loaded pinned steers from disk fallback')
+        return data
+      }
+    } catch {
+      // Corrupted file
+    }
+    return []
   }
   
   /**
@@ -350,30 +434,42 @@ export class DiscordConnector {
   }
 
   /**
-   * Fetch pinned .steer messages from a channel.
+   * Fetch pinned .steer messages from a channel (cached, mirrors fetchPinnedConfigs).
    * Returns array of { content, authorId } for each pinned .steer message.
+   * Falls back to disk cache if API call fails (e.g. Cloudflare 429).
    */
   async fetchPinnedSteerMessages(channelId: string): Promise<Array<{ content: string; authorId: string }>> {
+    // Check push-based memory cache first
+    const cached = this.getCachedPinnedSteers(channelId)
+    if (cached !== null) {
+      logger.debug({ channelId }, 'Pinned steer cache hit')
+      return cached
+    }
+
     try {
       const channel = await this.client.channels.fetch(channelId) as TextChannel
-      if (!channel || !channel.isTextBased()) return []
-
+      if (!channel || !channel.isTextBased()) {
+        return []
+      }
       const { messages: pinnedMessages, failed } = await this.fetchPinnedWithTimeout(channel, 10000)
-      if (failed) return []
 
-      const steerMessages: Array<{ content: string; authorId: string }> = []
-      for (const msg of pinnedMessages.values()) {
-        if (msg.content.startsWith('.steer') && !msg.author.bot) {
-          steerMessages.push({ content: msg.content, authorId: msg.author.id })
-        }
+      if (!failed) {
+        const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
+        const entries = this.extractSteers(sortedPinned)
+
+        // Store in memory + disk (also clears dirty flag)
+        this.cachePinnedSteers(channelId, entries)
+        this.saveSteerCacheToDisk(channelId, entries)
+        logger.debug({ channelId, steerCount: entries.length }, 'Pinned steer cache miss - fetched from API')
+
+        return entries
       }
 
-      // Sort oldest-first so latest pin wins (overwrites earlier ones)
-      // pins are already in pin-order (oldest first)
-      return steerMessages
+      // Fetch failed (timeout/429) — fall back to disk cache
+      return this.loadSteerCacheForChannel(channelId)
     } catch (error) {
       logger.warn({ error, channelId }, 'Failed to fetch pinned .steer messages')
-      return []
+      return this.loadSteerCacheForChannel(channelId)
     }
   }
 
@@ -1902,6 +1998,25 @@ export class DiscordConnector {
     this.pinnedConfigDirty.delete(channelId)
   }
 
+  /**
+   * Get cached pinned steers, or null if cache is empty/dirty.
+   * Does NOT clear the dirty flag — that only happens on successful API fetch.
+   */
+  getCachedPinnedSteers(channelId: string): Array<{ content: string; authorId: string }> | null {
+    if (this.pinnedSteerDirty.has(channelId)) {
+      return null  // Force refetch, but keep dirty flag until API succeeds
+    }
+    return this.pinnedSteerCache.get(channelId) || null
+  }
+
+  /**
+   * Store pinned steers in cache after API fetch.
+   */
+  cachePinnedSteers(channelId: string, entries: Array<{ content: string; authorId: string }>): void {
+    this.pinnedSteerCache.set(channelId, entries)
+    this.pinnedSteerDirty.delete(channelId)
+  }
+
   private setupEventHandlers(): void {
     this.client.on('ready', () => {
       logger.info({ user: this.client.user?.tag }, 'Discord client ready')
@@ -1998,17 +2113,27 @@ export class DiscordConnector {
           const { messages: pinnedMessages, failed } = await this.fetchPinnedWithTimeout(ch, 10000)
           if (!failed) {
             const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
+
+            // Refresh config cache
             const configs = this.extractConfigs(sortedPinned)
             this.cachePinnedConfigs(channelId, configs)
             this.savePinCacheToDisk(channelId, configs)
-            logger.info({ channelId, configCount: configs.length }, 'Pinned configs refreshed via gateway event')
+
+            // Refresh steer cache from the same pin fetch
+            const steerEntries = this.extractSteers(sortedPinned)
+            this.cachePinnedSteers(channelId, steerEntries)
+            this.saveSteerCacheToDisk(channelId, steerEntries)
+
+            logger.info({ channelId, configCount: configs.length, steerCount: steerEntries.length }, 'Pinned configs/steers refreshed via gateway event')
           } else {
             // API failed (e.g., Cloudflare 429) — mark dirty so handleActivation retries
             this.pinnedConfigDirty.add(channelId)
+            this.pinnedSteerDirty.add(channelId)
             logger.warn({ channelId }, 'Pins gateway refresh failed — marked dirty for retry')
           }
         } catch (error) {
           this.pinnedConfigDirty.add(channelId)
+          this.pinnedSteerDirty.add(channelId)
           logger.warn({ error, channelId }, 'Pins gateway refresh error — marked dirty for retry')
         }
       }, jitterMs)
@@ -2243,6 +2368,22 @@ export class DiscordConnector {
     }
 
     return configs
+  }
+
+  /**
+   * Extract .steer messages from sorted pinned messages.
+   * Returns raw message content + author ID for role checking at activation time.
+   */
+  private extractSteers(messages: Message[]): Array<{ content: string; authorId: string }> {
+    const steers: Array<{ content: string; authorId: string }> = []
+
+    for (const msg of messages) {
+      if (msg.content.startsWith('.steer') && !msg.author.bot) {
+        steers.push({ content: msg.content, authorId: msg.author.id })
+      }
+    }
+
+    return steers
   }
 
   /**

@@ -1,4 +1,3 @@
-export { SteeringStore } from './store.js'
 export { initCatalogDir, loadCatalog, resolveDirective, resolveLabel, listAvailableLabels, listProbeSets, listCatalogModels } from './catalog.js'
 export { parseSteerMessage, isSteerMessage } from './parser.js'
 export type { SteerParseResult } from './parser.js'

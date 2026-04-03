@@ -104,6 +104,7 @@ async function main() {
       token: discordToken,
       cacheDir: cachePath + '/images',
       pinCacheDir: cachePath + '/pins',
+      steerCacheDir: cachePath + '/steer-pins',
       maxBackoffMs: 32000,
     })
 

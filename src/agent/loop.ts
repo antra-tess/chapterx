@@ -29,7 +29,7 @@ import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.
 import { MembraneProvider } from '../llm/membrane/index.js'
 import { resolveToolModeForModel } from '../llm/membrane/adapter.js'
 import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
-import { SteeringStore, parseSteerMessage, isSteerMessage, loadCatalog, resolveDirective, toProviderParams, formatReadout, listAvailableLabels, resolveVendorForModel, fetchProbeReadout, fetchProxyReadout } from '../steering/index.js'
+import { parseSteerMessage, loadCatalog, resolveDirective, toProviderParams, formatReadout, listAvailableLabels, resolveVendorForModel, fetchProbeReadout, fetchProxyReadout } from '../steering/index.js'
 import type { ChannelSteering } from '../steering/index.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
@@ -61,8 +61,6 @@ export class AgentLoop {
   // TTS relay integration (optional)
   private ttsRelayClient?: TTSRelayClient
 
-  // Steering store (per-channel per-bot representation engineering config)
-  private steeringStore: SteeringStore
   private vendorConfigs: Record<string, VendorConfig> = {}
 
   // Deferred activation queue for transient API errors
@@ -79,7 +77,6 @@ export class AgentLoop {
     cacheDir: string = './cache'
   ) {
     this.activationStore = new ActivationStore(cacheDir)
-    this.steeringStore = new SteeringStore(cacheDir + '/steering')
     this.cacheDir = cacheDir
   }
 
@@ -908,6 +905,114 @@ export class AgentLoop {
     return mergedConfigs
   }
 
+  private async collectPinnedSteersWithInheritance(
+    channelId: string,
+    baseSteers: Array<{ content: string; authorId: string }>
+  ): Promise<Array<{ content: string; authorId: string }>> {
+    const mergedSteers: Array<{ content: string; authorId: string }> = []
+    const parentChain = await this.buildParentChannelChain(channelId)
+    const seen = new Set<string>([channelId])
+
+    for (const ancestorId of parentChain) {
+      if (seen.has(ancestorId)) {
+        continue
+      }
+      seen.add(ancestorId)
+      const ancestorSteers = await this.connector.fetchPinnedSteerMessages(ancestorId)
+      if (ancestorSteers.length > 0) {
+        mergedSteers.push(...ancestorSteers)
+      }
+    }
+
+    mergedSteers.push(...baseSteers)
+    return mergedSteers
+  }
+
+  /**
+   * Resolve steer messages into a ChannelSteering object (stateless, like config loading).
+   * Merges directives across all messages: later messages override same-key directives.
+   * `.steer clear` resets accumulated directives from earlier pins.
+   */
+  private resolveSteerMessages(
+    steerMessages: Array<{ content: string; authorId: string }>,
+    config: BotConfig,
+  ): ChannelSteering | null {
+    const botDiscordUsername = this.connector.getBotUsername()
+    const matchesBot = (t: string) => {
+      const tl = t.toLowerCase()
+      return tl === config.name.toLowerCase()
+        || tl === this.botId.toLowerCase()
+        || (botDiscordUsername != null && tl === botDiscordUsername.toLowerCase())
+    }
+
+    // Accumulate directives across all matching steer messages (merge, not replace)
+    let mergedDirectives: Record<string, number> = {}
+    let mergedReadoutProbes: string[] = []
+    let lastSetBy = ''
+
+    for (const { content, authorId } of steerMessages) {
+      const result = parseSteerMessage(content)
+      if (!result.ok) {
+        logger.debug({ error: result.error, content: content.slice(0, 80) }, 'Steer parse failed')
+        continue
+      }
+
+      // .steer clear — reset accumulated directives
+      if ('clear' in result) {
+        if (matchesBot(result.target)) {
+          mergedDirectives = {}
+          mergedReadoutProbes = []
+          logger.info({ clearedBy: authorId }, 'Steering cleared via pinned .steer clear')
+        }
+        continue
+      }
+
+      const parsed = result.data
+      if (!matchesBot(parsed.target)) {
+        continue
+      }
+
+      // Merge directives (later wins for same key)
+      for (const [key, value] of Object.entries(parsed.directives)) {
+        mergedDirectives[key] = value
+      }
+
+      mergedReadoutProbes.push(...parsed.readout_probes)
+      lastSetBy = authorId
+    }
+
+    if (Object.keys(mergedDirectives).length === 0) {
+      return null
+    }
+
+    // Resolve merged directives against the probe catalog
+    const catalog = loadCatalog(config.continuation_model)
+    if (!catalog) {
+      logger.warn({ model: config.continuation_model }, 'No probe catalog for model — .steer ignored')
+      return null
+    }
+
+    const { interventions, errors } = resolveDirective(catalog, mergedDirectives)
+    if (errors.length > 0) {
+      logger.warn({ errors, available: listAvailableLabels(catalog).length }, 'Some .steer labels could not be resolved')
+    }
+
+    if (interventions.length === 0) {
+      return null
+    }
+
+    // Derive readout probes from resolved interventions (accurate set names)
+    const resolvedProbes = [...new Set(interventions.map(i => i.probe))]
+
+    return {
+      interventions,
+      readout_probes: resolvedProbes.length > 0 ? resolvedProbes : [...new Set(mergedReadoutProbes)],
+      updated_at: new Date().toISOString(),
+      set_by: lastSetBy,
+      model: config.continuation_model,
+    }
+  }
+
   private async buildParentChannelChain(channelId: string, maxDepth: number = 10): Promise<string[]> {
     const chain: string[] = []
     const visited = new Set<string>([channelId])
@@ -1273,115 +1378,33 @@ export class AgentLoop {
       })
       endProfile('configLoad')
 
-      // 4.5. Load steering from pinned .steer messages + context messages
-      const botDiscordUsername = this.connector.getBotUsername()
-      const matchesBot = (t: string) => {
-        const tl = t.toLowerCase()
-        return tl === config.name.toLowerCase()
-          || tl === this.botId.toLowerCase()
-          || (botDiscordUsername && tl === botDiscordUsername.toLowerCase())
+      // 4.5. Load steering from pinned .steer messages (stateless, like .config)
+      startProfile('steerLoad')
+
+      // Fetch pinned steers for current channel (cached) + inherit from parent chain
+      const pinnedSteers = await this.connector.fetchPinnedSteerMessages(channelId)
+      const inheritedSteers = await this.collectPinnedSteersWithInheritance(channelId, pinnedSteers)
+
+      // Filter by steer_roles (async role lookups)
+      const authorizedSteers: Array<{ content: string; authorId: string }> = []
+      for (const steer of inheritedSteers) {
+        if (config.steer_roles && config.steer_roles.length > 0) {
+          const roles = await this.connector.fetchMemberRoles(steer.authorId, guildId) ?? undefined
+          if (!roles) {
+            logger.debug({ authorId: steer.authorId, guildId }, 'Steer role check: could not fetch member roles — skipping')
+            continue
+          }
+          if (!config.steer_roles.some(r => roles.some(role => role.toLowerCase() === r.toLowerCase()))) {
+            logger.debug({ authorId: steer.authorId, roles, required: config.steer_roles }, 'Steer role check failed — skipping')
+            continue
+          }
+        }
+        authorizedSteers.push(steer)
       }
 
-      // Helper: process a .steer message (from pins or context)
-      const processSteer = async (content: string, authorId: string) => {
-        const result = parseSteerMessage(content)
-        if (!result.ok) {
-          logger.debug({ error: result.error, content: content.slice(0, 80) }, 'Steer parse failed')
-          return
-        }
+      // Resolve all authorized steer messages into a single ChannelSteering (merged)
+      const activeSteering = this.resolveSteerMessages(authorizedSteers, config)
 
-        if ('clear' in result) {
-          if (matchesBot(result.target)) {
-            this.steeringStore.clear(this.botId, channelId)
-            logger.info({ channelId, clearedBy: authorId }, 'Steering cleared via .steer clear')
-          }
-          return
-        }
-
-        const parsed = result.data
-        if (!matchesBot(parsed.target)) {
-          logger.debug({ target: parsed.target, botName: config.name, botId: this.botId }, 'Steer target mismatch — skipping')
-          return
-        }
-
-        const catalog = loadCatalog(config.continuation_model)
-        if (!catalog) {
-          logger.warn({ model: config.continuation_model }, 'No probe catalog for model — .steer ignored')
-          return
-        }
-
-        const { interventions, errors } = resolveDirective(catalog, parsed.directives)
-        if (errors.length > 0) {
-          logger.warn({ errors, available: listAvailableLabels(catalog).length }, 'Some .steer labels could not be resolved')
-        }
-
-        if (interventions.length > 0) {
-          // Derive readout probes from resolved interventions (accurate set names)
-          // rather than the parser's naive first-underscore-segment guess
-          const resolvedProbes = [...new Set(interventions.map(i => i.probe))]
-          const steering: ChannelSteering = {
-            interventions,
-            readout_probes: resolvedProbes.length > 0 ? resolvedProbes : parsed.readout_probes,
-            updated_at: new Date().toISOString(),
-            set_by: authorId,
-            model: config.continuation_model,
-          }
-          this.steeringStore.set(this.botId, channelId, steering)
-          logger.info({ channelId, interventions: interventions.length, source: 'steer' }, 'Steering config applied')
-        }
-      }
-
-      // Scan pinned .steer messages (always, like .config)
-      // Scan pinned .steer — walk parent chain (thread → parent) like .config inheritance
-      const parentChain = await this.buildParentChannelChain(channelId)
-      const steerChannels = [...parentChain, channelId]  // parents first, current last (latest wins)
-      for (const chId of steerChannels) {
-        const pinnedSteerMessages = await this.connector.fetchPinnedSteerMessages(chId)
-        for (const { content, authorId } of pinnedSteerMessages) {
-          if (config.steer_roles && config.steer_roles.length > 0) {
-            const roles = await this.connector.fetchMemberRoles(authorId, guildId) ?? undefined
-            if (!roles) {
-              logger.debug({ authorId, guildId }, 'Steer role check: could not fetch member roles — skipping pinned .steer')
-              continue
-            }
-            if (!config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
-              logger.debug({ authorId, roles, required: config.steer_roles }, 'Steer role check failed — skipping pinned .steer')
-              continue
-            }
-          }
-          await processSteer(content, authorId)
-        }
-      }
-
-      // Also scan context messages — but only if no pinned .steer was found for this bot.
-      // Pins are authoritative; context messages are a fallback for unpinned steers.
-      const hasPinnedSteer = this.steeringStore.get(this.botId, channelId) !== null
-      if (!hasPinnedSteer) {
-        for (const msg of discordContext.messages) {
-          if (!isSteerMessage(msg.content)) continue
-
-          if (config.steer_roles && config.steer_roles.length > 0) {
-            let roles = msg.authorRoles
-            if (!roles) {
-              roles = await this.connector.fetchMemberRoles(msg.author.id, msg.guildId) ?? undefined
-            }
-            if (!roles) {
-              logger.debug({ authorId: msg.author.id, guildId: msg.guildId }, 'Steer role check: could not fetch member roles — skipping context .steer')
-              continue
-            }
-            if (!config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
-              logger.debug({ authorId: msg.author.id, roles, required: config.steer_roles }, 'Steer role check failed — skipping context .steer')
-              continue
-            }
-          }
-          await processSteer(msg.content, msg.author.id)
-        }
-      } else {
-        logger.debug({ channelId }, 'Skipping context .steer scan — pinned steer already loaded')
-      }
-
-      // Merge active steering into provider_params
-      const activeSteering = this.steeringStore.get(this.botId, channelId)
       if (activeSteering && activeSteering.interventions.length > 0) {
         const steeringParams = toProviderParams(activeSteering)
         config.provider_params = {
@@ -1394,8 +1417,10 @@ export class AgentLoop {
           probes: activeSteering.readout_probes,
         }, 'Injected steering into provider_params')
       } else {
-        logger.debug({ channelId, hasStore: !!activeSteering }, 'No active steering for this channel')
+        logger.debug({ channelId }, 'No active steering for this channel')
       }
+
+      endProfile('steerLoad')
 
       // Record config in trace (for debugging)
       traceSetConfig(config)

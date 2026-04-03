@@ -1,5 +1,10 @@
 /**
- * Steering state store — per-channel per-bot steering config.
+ * @deprecated — No longer used. Steering is now stateless (derived from pinned
+ * .steer messages each activation, like .config). The pin cache lives in
+ * connector.ts (pinnedSteerCache). This file is kept temporarily for reference
+ * and can be deleted after verifying the new system works.
+ *
+ * Previously: Steering state store — per-channel per-bot steering config.
  *
  * Follows the pin cache pattern from connector.ts:
  *   - In-memory Map for fast access (hot path in shouldActivate/handleActivation)
