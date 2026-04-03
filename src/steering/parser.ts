@@ -45,7 +45,9 @@ export function parseSteerMessage(content: string): SteerParseResult {
   const firstLine = lines[0]!.trim()
 
   // Extract target bot name from first line
-  const target = firstLine.slice('.steer'.length).trim()
+  // Strip Discord mention syntax: <@username> → username, <@!id> → id
+  const rawTarget = firstLine.slice('.steer'.length).trim()
+  const target = rawTarget.replace(/^<@!?([^>]+)>$/, '$1')
   if (!target) {
     return { ok: false, error: 'Missing target bot name. Format: `.steer BotName`' }
   }

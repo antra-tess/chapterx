@@ -1276,6 +1276,7 @@ export class AgentLoop {
       // 4.5. Scan for .steer messages targeting this bot and update steering state
       for (const msg of discordContext.messages) {
         if (!isSteerMessage(msg.content)) continue
+        logger.info({ content: msg.content.slice(0, 80), author: msg.author.username }, 'Found .steer message in context')
 
         // Role check: if steer_roles is configured, author must have one
         if (config.steer_roles && config.steer_roles.length > 0) {
@@ -1284,17 +1285,28 @@ export class AgentLoop {
           if (!roles) {
             roles = await this.connector.fetchMemberRoles(msg.author.id, msg.guildId) ?? undefined
           }
+          logger.info({ roles, steer_roles: config.steer_roles, authorRoles: msg.authorRoles }, 'Steer role check')
           if (!roles || !config.steer_roles.some(r => roles!.some(role => role.toLowerCase() === r.toLowerCase()))) {
+            logger.info({ author: msg.author.username }, 'Steer REJECTED — role mismatch')
             continue
           }
         }
 
         const result = parseSteerMessage(msg.content)
+        logger.info({ ok: result.ok, result: JSON.stringify(result).slice(0, 300) }, 'Steer parse result')
         if (!result.ok) continue
 
-        // Check if this .steer targets this bot
+        // Check if this .steer targets this bot (match against config name, bot ID, or Discord username)
+        const botDiscordUsername = this.connector.getBotUsername()
+        const matchesBot = (t: string) => {
+          const tl = t.toLowerCase()
+          return tl === config.name.toLowerCase()
+            || tl === this.botId.toLowerCase()
+            || (botDiscordUsername && tl === botDiscordUsername.toLowerCase())
+        }
+
         if ('clear' in result) {
-          if (result.target.toLowerCase() === config.name.toLowerCase()) {
+          if (matchesBot(result.target)) {
             this.steeringStore.clear(this.botId, channelId)
             logger.info({ channelId, clearedBy: msg.author.id }, 'Steering cleared via .steer clear')
           }
@@ -1302,7 +1314,7 @@ export class AgentLoop {
         }
 
         const parsed = result.data
-        if (parsed.target.toLowerCase() !== config.name.toLowerCase()) continue
+        if (!matchesBot(parsed.target)) continue
 
         // Resolve directives against probe catalog for this model
         const catalog = loadCatalog(config.continuation_model)
