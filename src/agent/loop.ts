@@ -1726,15 +1726,13 @@ export class AgentLoop {
       } = executionResult
       endProfile('llmCall')
 
-      // 6.5. Send steering readout if active
-      if (activeSteering) {
+      // 6.5. Send steering readout if active and opted in
+      if (activeSteering && config.steer_readout === true) {
         try {
           const credentials = resolveVendorForModel(config.continuation_model, this.vendorConfigs)
           let readoutResponse: Record<string, unknown> = {}
 
           if (credentials) {
-            // Step 1: Get response_token_ids from proxy readout store
-            // The proxy captures these from the final SSE chunk during streaming
             const completionId = (completion.raw as Record<string, unknown>)?.id as string | undefined
               || (completion as Record<string, unknown>).id as string | undefined
 
@@ -1745,7 +1743,6 @@ export class AgentLoop {
                 readoutResponse.probe_status = proxyData.probe_status
                 readoutResponse.response_token_ids = proxyData.response_token_ids
 
-                // Step 2: If we got token IDs, call /v1/encode for full projections
                 if (proxyData.response_token_ids && proxyData.response_token_ids.length > 0 && activeSteering.readout_probes.length > 0) {
                   const encodeResult = await fetchProbeReadout(
                     proxyData.response_token_ids,
@@ -1765,15 +1762,11 @@ export class AgentLoop {
 
           const readout = formatReadout(readoutResponse, activeSteering)
           if (readout) {
-            if (readout.length <= 1900) {
-              await this.connector.sendMessage(channelId, `.🔬 ${readout}`)
-            } else {
-              await this.connector.sendMessageWithAttachment(
-                channelId,
-                '.🔬 probe readout',
-                { name: 'readout.md', content: readout }
-              )
-            }
+            await this.connector.sendMessageWithAttachment(
+              channelId,
+              '.🔬 probe readout',
+              { name: 'readout.md', content: readout }
+            )
           }
         } catch (err) {
           logger.warn({ err }, 'Failed to send steering readout')

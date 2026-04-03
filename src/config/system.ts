@@ -280,6 +280,7 @@ export class ConfigSystem {
       authorized_roles: config.authorized_roles || [],
       steer_roles: config.steer_roles,
       steer_visible: config.steer_visible === true,  // Default: false (opt-in)
+      steer_readout: config.steer_readout === true,  // Default: false (opt-in)
       prompt_caching: config.prompt_caching !== false,  // Default: true
       cache_ttl: config.cache_ttl,  // Optional: '5m' (default) or '1h' (extended Anthropic caching)
 

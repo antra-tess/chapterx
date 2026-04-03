@@ -170,6 +170,7 @@ export interface BotConfig {
   authorized_roles: string[]  // Roles authorized to use .history commands
   steer_roles?: string[]  // Roles authorized to use .steer commands (if empty/undefined, .steer is unrestricted)
   steer_visible?: boolean  // If true, .steer messages are visible in bot context (default: false)
+  steer_readout?: boolean  // If true, send probe readout as file attachment after steered generation (default: false)
   prompt_caching?: boolean  // Enable Anthropic prompt caching (default: true)
   cache_ttl?: '5m' | '1h'  // Anthropic cache TTL - '5m' (default) or '1h' (extended)
   
