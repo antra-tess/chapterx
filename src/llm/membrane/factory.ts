@@ -174,9 +174,15 @@ export interface MembraneFactoryConfig {
 
   /**
    * AWS Bedrock configuration for Claude models via AWS
-   * Uses AWS credentials for authentication
+   * Uses AWS credentials for authentication (legacy single-provider)
    */
   bedrock?: BedrockConfig;
+
+  /**
+   * Multiple AWS Bedrock providers (e.g., different regions)
+   * Each can have its own region and model patterns
+   */
+  bedrockProviders?: BedrockConfig[];
 
   /**
    * Google Gemini configuration
@@ -326,12 +332,16 @@ function getAdapterForModel(
     }
   }
 
-  // Bedrock models (anthropic.* prefix or bedrock:* prefix)
-  if (modelName.startsWith('anthropic.') || modelName.startsWith('bedrock:')) {
-    const bedrockAdapter = adapters.get('bedrock');
-    if (bedrockAdapter) {
-      logger.debug({ modelName, adapterKey: 'bedrock' }, 'Routed model to Bedrock (anthropic.*/bedrock:* pattern)');
-      return bedrockAdapter;
+  // Bedrock models (anthropic.* prefix, cross-region prefixes, or bedrock:* prefix)
+  if (modelName.startsWith('anthropic.') || modelName.startsWith('bedrock:') ||
+      modelName.startsWith('us.anthropic.') || modelName.startsWith('eu.anthropic.') ||
+      modelName.startsWith('apac.anthropic.')) {
+    // Try all bedrock adapters, prefer the first one found
+    for (const [key, adapter] of adapters) {
+      if (key.startsWith('bedrock')) {
+        logger.debug({ modelName, adapterKey: key }, 'Routed model to Bedrock (anthropic/cross-region pattern)');
+        return adapter;
+      }
     }
   }
 
@@ -633,43 +643,46 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
     }
   }
 
-  // Create Bedrock adapter if valid AWS credentials are available
-  // Check for real credentials (not placeholders) from config or environment
-  const bedrockAccessKey = config.bedrock?.accessKeyId ?? process.env.AWS_ACCESS_KEY_ID;
-  const bedrockSecretKey = config.bedrock?.secretAccessKey ?? process.env.AWS_SECRET_ACCESS_KEY;
-  const hasValidBedrockCreds = bedrockAccessKey && 
-    bedrockSecretKey && 
-    !bedrockAccessKey.includes('YOUR_') &&
-    !bedrockSecretKey.includes('YOUR_');
-  
-  if (hasValidBedrockCreds) {
-    try {
-      const bedrockAdapter = new BedrockAdapter({
-        accessKeyId: bedrockAccessKey,
-        secretAccessKey: bedrockSecretKey,
-        region: config.bedrock?.region,
-        sessionToken: config.bedrock?.sessionToken,
-      });
-      adapters.set('bedrock', bedrockAdapter);
-      
-      // Register routing patterns if provided
-      if (config.bedrock?.provides && config.bedrock.provides.length > 0) {
-        patternRoutes.push({
-          adapterKey: 'bedrock',
-          patterns: config.bedrock.provides,
+  // Create Bedrock adapter(s) if valid AWS credentials are available
+  // Support multiple bedrock providers (e.g., different regions)
+  const allBedrockConfigs = config.bedrockProviders ?? (config.bedrock ? [config.bedrock] : []);
+  for (let i = 0; i < allBedrockConfigs.length; i++) {
+    const bc = allBedrockConfigs[i]!;
+    const accessKey = bc.accessKeyId ?? process.env.AWS_ACCESS_KEY_ID;
+    const secretKey = bc.secretAccessKey ?? process.env.AWS_SECRET_ACCESS_KEY;
+    const hasValidCreds = accessKey && secretKey &&
+      !accessKey.includes('YOUR_') && !secretKey.includes('YOUR_');
+
+    if (hasValidCreds) {
+      try {
+        const adapterKey = i === 0 ? 'bedrock' : `bedrock-${i}`;
+        const bedrockAdapter = new BedrockAdapter({
+          accessKeyId: accessKey,
+          secretAccessKey: secretKey,
+          region: bc.region,
+          sessionToken: bc.sessionToken,
         });
+        adapters.set(adapterKey, bedrockAdapter);
+
+        if (bc.provides && bc.provides.length > 0) {
+          patternRoutes.push({
+            adapterKey,
+            patterns: bc.provides,
+          });
+        }
+
+        logger.info({
+          adapterKey,
+          region: bc.region ?? process.env.AWS_REGION ?? 'us-west-2',
+          patterns: bc.provides ?? [],
+        }, 'Membrane: Bedrock adapter initialized');
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.error({ error: errorMessage, region: bc.region }, 'Failed to create Bedrock adapter');
       }
-      
-      logger.info({ 
-        region: config.bedrock?.region ?? process.env.AWS_REGION ?? 'us-west-2',
-        patterns: config.bedrock?.provides ?? [],
-      }, 'Membrane: Bedrock adapter initialized');
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.error({ error: errorMessage }, 'Failed to create Bedrock adapter');
+    } else {
+      logger.debug({ index: i }, 'Membrane: No valid Bedrock credentials for provider, adapter not created');
     }
-  } else {
-    logger.debug('Membrane: No valid Bedrock credentials provided (or placeholders detected), adapter not created');
   }
 
   // Create Gemini adapter if API key is available
@@ -932,7 +945,7 @@ export function createMembraneFromVendorConfigs(
   const anthropicProviders: AnthropicProviderConfig[] = [];
   const openaiProviders: OpenAIProviderConfig[] = [];
   let openrouterApiKey: string | undefined;
-  let bedrockConfig: BedrockConfig | undefined;
+  const bedrockProviders: BedrockConfig[] = [];
   let geminiConfig: GeminiConfig | undefined;
   const openaiCompatibleProviders: OpenAICompatibleConfig[] = [];
   const openaiCompletionsProviders: OpenAICompletionsConfig[] = [];
@@ -993,23 +1006,21 @@ export function createMembraneFromVendorConfigs(
 
     } else if (vendorName.startsWith('bedrock')) {
       // Bedrock adapter - uses AWS Bedrock for Claude models
-      // Support multiple naming conventions for AWS credentials
-      if (!bedrockConfig) {
-        bedrockConfig = {
-          accessKeyId: config?.aws_access_key_id ?? config?.aws_access_key,
-          secretAccessKey: config?.aws_secret_access_key ?? config?.aws_secret_key,
-          region: config?.aws_region ?? config?.region,
-          sessionToken: config?.aws_session_token ?? config?.session_token,
-          provides: vendorConfig.provides,
-        };
-      }
+      // Support multiple bedrock vendors (e.g., different regions)
+      bedrockProviders.push({
+        accessKeyId: config?.aws_access_key_id ?? config?.aws_access_key,
+        secretAccessKey: config?.aws_secret_access_key ?? config?.aws_secret_key,
+        region: config?.aws_region ?? config?.region,
+        sessionToken: config?.aws_session_token ?? config?.session_token,
+        provides: vendorConfig.provides,
+      });
 
       // Auto-detect anthropic-xml formatter for Bedrock vendors (same as Anthropic)
       if (!detectedFormatter) {
         detectedFormatter = 'anthropic-xml';
       }
 
-      logger.debug({ vendorName, region: bedrockConfig.region, provides: vendorConfig.provides }, 'Found Bedrock vendor (uses AWS API)');
+      logger.debug({ vendorName, region: config?.aws_region ?? config?.region, provides: vendorConfig.provides }, 'Found Bedrock vendor (uses AWS API)');
 
     } else if (vendorName.startsWith('gemini')) {
       // Gemini adapter - uses native Google AI API
@@ -1153,7 +1164,8 @@ export function createMembraneFromVendorConfigs(
     openaiApiKey: openaiProviders.length === 1 ? openaiProviders[0]!.apiKey : undefined,
     openaiBaseUrl: openaiProviders.length === 1 ? openaiProviders[0]!.baseUrl : undefined,
     openaiProviders: openaiProviders.length > 1 ? openaiProviders : undefined,
-    bedrock: bedrockConfig,
+    bedrock: bedrockProviders.length === 1 ? bedrockProviders[0] : undefined,
+    bedrockProviders: bedrockProviders.length > 1 ? bedrockProviders : undefined,
     gemini: geminiConfig,
     openaiCompatibleProviders: openaiCompatibleProviders.length > 0 ? openaiCompatibleProviders : undefined,
     openaiCompletionsProviders: openaiCompletionsProviders.length > 0 ? openaiCompletionsProviders : undefined,
