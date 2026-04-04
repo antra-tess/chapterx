@@ -90,7 +90,7 @@ export class MembraneProvider {
       // Determine formatter: config mode > per-model config > smart default by model name
       const formatterType = formatterFromMode(request.config.mode)
         ?? getFormatterForModel(request.config.model)
-        ?? (request.config.model.startsWith('claude-') || request.config.model.startsWith('anthropic.') ? 'anthropic-xml' : 'native');
+        ?? (request.config.model.startsWith('claude-') || request.config.model.includes('anthropic.claude') ? 'anthropic-xml' : 'native');
       const formatter = formatterType === 'native'
         ? new NativeFormatter()
         : formatterType === 'anthropic-xml'
@@ -211,7 +211,7 @@ export class MembraneProvider {
       const formatterType = options.formatterOverride
         ?? formatterFromMode(request.config.mode)
         ?? getFormatterForModel(request.config.model)
-        ?? (request.config.model.startsWith('claude-') || request.config.model.startsWith('anthropic.') ? 'anthropic-xml' : 'native');
+        ?? (request.config.model.startsWith('claude-') || request.config.model.includes('anthropic.claude') ? 'anthropic-xml' : 'native');
       const formatter = formatterType === 'native'
         ? new NativeFormatter()
         : formatterType === 'anthropic-xml'
