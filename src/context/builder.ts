@@ -614,10 +614,10 @@ export class ContextBuilder {
     }
     
     // Not rolling yet - keep all messages for cache efficiency
-    // Exception: if prompt_caching is disabled, always apply character limit
+    // But still enforce limits when context exceeds them
     if (!rollDecision.shouldRoll) {
       const cachingEnabled = config.prompt_caching !== false;
-      if (cachingEnabled || totalChars <= normalLimit) {
+      if (cachingEnabled && totalChars <= normalLimit) {
         logger.debug({
           messagesSinceRoll,
           threshold: config.rolling_threshold,
