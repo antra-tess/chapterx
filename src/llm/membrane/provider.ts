@@ -9,6 +9,8 @@ import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type { LLMCompletion, LLMRequest } from '../../types.js';
 import { getCurrentTrace } from '../../trace/index.js';
+import { StreamingMetricsCollector } from '../../trace/streaming-collector.js';
+import { getStreamingMetricsWriter } from '../../trace/streaming-writer.js';
 import { logger } from '../../utils/logger.js';
 import {
   toMembraneRequest,
@@ -206,6 +208,14 @@ export class MembraneProvider {
     const llmRequestRefs: string[] = [];
     const llmResponseRefs: string[] = [];
 
+    // Streaming metrics collector — records per-chunk timing with full text
+    const metricsCollector = new StreamingMetricsCollector(
+      trace?.getBotId() ?? 'unknown',
+      request.config.model,
+      request.config.streaming === false ? 'synthesized' : 'stream',
+      trace?.getTraceId(),
+    );
+
     try {
       // Determine formatter: explicit override > config mode > per-model config > smart default by model name
       const formatterType = options.formatterOverride
@@ -224,8 +234,15 @@ export class MembraneProvider {
 
       // Cast to any because our local types may not exactly match membrane's updated types
       const streamOptions: any = {
-        onChunk: options.onChunk,
-        onBlock: options.onBlock,
+        // Wrap onChunk/onBlock to record metrics, then forward to caller
+        onChunk: (text: string, meta: any) => {
+          metricsCollector.recordChunk(text, meta);
+          options.onChunk?.(text, meta);
+        },
+        onBlock: (event: any) => {
+          metricsCollector.recordBlock(event);
+          options.onBlock?.(event);
+        },
         onToolCalls: options.onToolCalls,
         onPreToolContent: options.onPreToolContent,
         onUsage: options.onUsage,
@@ -278,6 +295,9 @@ export class MembraneProvider {
               systemPromptLength: request.system_prompt?.length || 0,
               hasTools: (request.tools?.length || 0) > 0,
               toolCount: request.tools?.length || 0,
+              temperature: request.config.temperature,
+              maxTokens: request.config.max_tokens,
+              stopSequences: request.stop_sequences,
             },
             {
               stopReason: 'end_turn',
@@ -296,6 +316,12 @@ export class MembraneProvider {
           );
         }
 
+        // Write streaming metrics (aborted)
+        this.writeStreamingMetrics(metricsCollector, {
+          usage: completion.usage,
+          stopReason: 'end_turn',
+        });
+
         return completion;
       }
 
@@ -310,6 +336,9 @@ export class MembraneProvider {
             systemPromptLength: request.system_prompt?.length || 0,
             hasTools: (request.tools?.length || 0) > 0,
             toolCount: request.tools?.length || 0,
+            temperature: request.config.temperature,
+            maxTokens: request.config.max_tokens,
+            stopSequences: request.stop_sequences,
           },
           {
             stopReason: completion.stopReason,
@@ -335,6 +364,17 @@ export class MembraneProvider {
           },
         );
       }
+
+      // Write streaming metrics (success)
+      this.writeStreamingMetrics(metricsCollector, {
+        usage: {
+          inputTokens: completion.usage?.inputTokens || 0,
+          outputTokens: completion.usage?.outputTokens || 0,
+          cacheCreationTokens: completion.usage?.cacheCreationTokens,
+          cacheReadTokens: completion.usage?.cacheReadTokens,
+        },
+        stopReason: completion.stopReason,
+      });
 
       return completion;
     } catch (error: any) {
@@ -384,7 +424,32 @@ export class MembraneProvider {
       } else {
         logger.warn({ hasTrace: !!trace, hasCallId: !!callId }, 'Cannot record error to trace - missing trace context or callId');
       }
+
+      // Write streaming metrics (error — may have partial chunks before failure)
+      this.writeStreamingMetrics(metricsCollector, {
+        error: `${error.name || 'Error'}: ${error.message}`,
+      });
+
       throw error;
+    }
+  }
+
+  /**
+   * Finalize and write streaming metrics. Never throws.
+   */
+  private writeStreamingMetrics(
+    collector: StreamingMetricsCollector,
+    options: {
+      usage?: { inputTokens: number; outputTokens: number; cacheCreationTokens?: number; cacheReadTokens?: number }
+      stopReason?: string
+      error?: string
+    }
+  ): void {
+    try {
+      const entry = collector.finalize(options);
+      getStreamingMetricsWriter().writeMetrics(entry);
+    } catch (err) {
+      logger.warn({ err }, 'Failed to write streaming metrics');
     }
   }
 

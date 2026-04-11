@@ -1920,185 +1920,113 @@ export class AgentLoop {
   /**
    * Make an LLM completion request using membrane.
    *
-   * When TTS relay is connected and ttsStreamContext is set, streams chunks
-   * to the relay for real-time text-to-speech.
+   * Always uses membrane.stream() for streaming metrics collection.
+   * TTS relay callbacks are added when the relay is connected.
+   * The `streaming` config flag controls whether membrane actually streams
+   * from the provider or synthesizes callbacks from a complete() call.
    */
   private async completeLLM(request: any, config: BotConfig): Promise<any> {
     if (!this.membraneProvider) {
       throw new Error('Membrane not initialized - call setMembrane() before processing requests')
     }
 
-    // Check if we should stream to TTS
+    // TTS relay is an additional consumer of the stream, not the gate
     const shouldStreamToTTS =
       config.tts_relay?.enabled &&
       this.ttsRelayClient?.isConnected() &&
       this.ttsStreamContext
 
-    // Stream mode: use membrane.stream() with TTS callbacks
+    // Build stream options — TTS callbacks are conditional
+    const streamOptions: any = {}
+
     if (shouldStreamToTTS) {
-      logger.debug({ model: request.config?.model }, 'Using membrane stream for LLM with TTS')
-      return this.completeLLMWithTTSStream(request, config)
-    }
+      const ctx = this.ttsStreamContext!
+      const relay = this.ttsRelayClient!
 
-    // Standard completion
-    logger.debug({ model: request.config?.model }, 'Using membrane for LLM completion')
-    return this.membraneProvider.completeFromLLMRequest(request)
-  }
+      streamOptions.signal = ctx.abortController.signal
 
-  /**
-   * Complete LLM request with streaming to TTS relay
-   */
-  private async completeLLMWithTTSStream(request: any, _config: BotConfig): Promise<any> {
-    const ctx = this.ttsStreamContext!
-    const relay = this.ttsRelayClient!
+      streamOptions.onChunk = (text: string, meta: any) => {
+        const blockType = meta?.type ?? 'text'
+        const visible = meta?.visible ?? true
+        logger.info({
+          textPreview: text.substring(0, 80),
+          blockIndex: meta?.blockIndex,
+          blockType,
+          visible,
+          hasThinkingTag: text.includes('<thinking>') || text.includes('</thinking>'),
+        }, `TTS chunk: type=${blockType} visible=${visible}`)
 
-    try {
-      const result = await this.membraneProvider!.stream(request, {
-        signal: ctx.abortController.signal,
-        onChunk: (text, meta) => {
-          // Log with explicit visibility tracking for debugging thinking detection
-          const blockType = meta?.type ?? 'text'
-          const visible = meta?.visible ?? true
-          logger.info({
-            textPreview: text.substring(0, 80),
-            blockIndex: meta?.blockIndex,
-            blockType,
-            visible,
-            hasThinkingTag: text.includes('<thinking>') || text.includes('</thinking>'),
-          }, `TTS chunk: type=${blockType} visible=${visible}`)
+        relay.sendChunk({
+          channelId: ctx.channelId,
+          userId: ctx.userId,
+          username: ctx.username,
+          text,
+          blockIndex: meta?.blockIndex ?? 0,
+          blockType,
+          visible,
+        })
+      }
 
-          relay.sendChunk({
+      streamOptions.onBlock = (event: any) => {
+        const blockIndex = event?.index ?? 0
+        const blockType = event?.block?.type ?? 'text'
+        const blockContent = (event?.block as any)?.content ?? ''
+
+        logger.info({
+          eventType: event?.event,
+          blockIndex,
+          blockType,
+          contentPreview: blockContent.substring(0, 80),
+        }, `TTS block: ${event?.event} type=${blockType}`)
+
+        if (event?.event === 'block_start') {
+          relay.sendBlockStart({
             channelId: ctx.channelId,
             userId: ctx.userId,
             username: ctx.username,
-            text,
-            blockIndex: meta?.blockIndex ?? 0,
-            blockType,
-            visible,
-          })
-        },
-        onBlock: (event) => {
-          // Log block events to see if thinking blocks are separate
-          // Note: membrane BlockEvent uses event.index and event.block.type/content
-          const blockIndex = event?.index ?? 0
-          const blockType = event?.block?.type ?? 'text'
-          // content only exists on block_complete events
-          const blockContent = (event?.block as any)?.content ?? ''
-
-          logger.info({
-            eventType: event?.event,
             blockIndex,
             blockType,
-            contentPreview: blockContent.substring(0, 80),
-          }, `TTS block: ${event?.event} type=${blockType}`)
+          })
+        } else if (event?.event === 'block_complete') {
+          relay.sendBlockComplete({
+            channelId: ctx.channelId,
+            userId: ctx.userId,
+            username: ctx.username,
+            blockIndex,
+            blockType,
+            content: blockContent,
+          })
+        }
+      }
+    }
 
-          if (event?.event === 'block_start') {
-            relay.sendBlockStart({
-              channelId: ctx.channelId,
-              userId: ctx.userId,
-              username: ctx.username,
-              blockIndex,
-              blockType,
-            })
-          } else if (event?.event === 'block_complete') {
-            relay.sendBlockComplete({
-              channelId: ctx.channelId,
-              userId: ctx.userId,
-              username: ctx.username,
-              blockIndex,
-              blockType,
-              content: blockContent,
-            })
-          }
-        },
-        // Execute tools and record to trace
-        onToolCalls: async (calls, _context) => {
-          const results: Array<{ toolUseId: string; content: string; isError?: boolean }> = []
+    logger.debug({
+      model: request.config?.model,
+      tts: !!shouldStreamToTTS,
+    }, 'Using membrane stream for LLM completion')
 
-          for (const call of calls) {
-            const toolStartTime = Date.now()
-            // Convert membrane's call format to ChapterX's ToolCall type
-            const cxCall: ToolCall = {
-              id: call.id,
-              name: call.name,
-              input: call.input as Record<string, any>,
-              messageId: '', // Not available in TTS stream context
-              timestamp: new Date(),
-              originalCompletionText: _context.accumulated || '',
-            }
-            const result = await this.toolSystem.executeTool(cxCall)
-            const toolDurationMs = Date.now() - toolStartTime
+    try {
+      const result = await this.membraneProvider.stream(request, streamOptions)
 
-            // Format output string
-            const outputStr = typeof result.output === 'string'
-              ? result.output
-              : JSON.stringify(result.output)
-
-            // Build result content
-            let content: string
-            let isError = false
-            if (result.error) {
-              content = `Error executing ${call.name}: ${result.error}`
-              isError = true
-            } else {
-              content = outputStr
-              // Note: image handling for TTS mode could be added here if needed
-            }
-
-            // Record to trace
-            const traceOutput = result.error
-              ? `[ERROR] ${result.error}`
-              : (outputStr.length > 1000 ? outputStr.slice(0, 1000) + '...' : outputStr)
-            traceToolExecution({
-              toolCallId: call.id,
-              toolName: call.name,
-              input: call.input,
-              output: traceOutput,
-              outputTruncated: !result.error && outputStr.length > 1000,
-              fullOutputLength: result.error ? traceOutput.length : outputStr.length,
-              durationMs: toolDurationMs,
-              sentToDiscord: false, // TTS mode doesn't send tool output to Discord
-              error: result.error ? String(result.error) : undefined,
-              imageCount: result.images?.length,
-            })
-
-            logger.debug({
-              toolName: call.name,
-              durationMs: toolDurationMs,
-              hasError: !!result.error,
-              outputLength: outputStr.length,
-            }, 'TTS stream tool executed')
-
-            results.push({
-              toolUseId: call.id,
-              content,
-              isError,
-            })
-          }
-
-          return results
-        },
-      })
-
-      // Log final result to see content block types
-      logger.info({
-        contentBlockCount: result?.content?.length,
-        contentBlockTypes: result?.content?.map((b: any) => b.type),
-        stopReason: result?.stopReason,
-      }, 'TTS stream complete - membrane result summary')
+      if (shouldStreamToTTS) {
+        logger.info({
+          contentBlockCount: result?.content?.length,
+          contentBlockTypes: result?.content?.map((b: any) => b.type),
+          stopReason: result?.stopReason,
+        }, 'Stream complete - membrane result summary')
+      }
 
       return result
     } catch (error: any) {
-      // Check if this was an abort due to TTS interruption
-      if (ctx.interruptedText && (error.name === 'AbortError' || ctx.abortController.signal.aborted)) {
+      // Handle TTS interruption abort
+      if (shouldStreamToTTS && this.ttsStreamContext?.interruptedText &&
+          (error.name === 'AbortError' || this.ttsStreamContext.abortController.signal.aborted)) {
         logger.info(
-          { channelId: ctx.channelId, textLength: ctx.interruptedText.length },
+          { channelId: this.ttsStreamContext.channelId, textLength: this.ttsStreamContext.interruptedText.length },
           'Stream aborted due to TTS interruption, using interrupted text'
         )
-        // Return a synthetic completion with just the interrupted text
-        // Format matches what fromMembraneResponse returns
         return {
-          content: [{ type: 'text', text: ctx.interruptedText }],
+          content: [{ type: 'text', text: this.ttsStreamContext.interruptedText }],
           stopReason: 'interrupted',
           usage: { inputTokens: 0, outputTokens: 0 },
           model: 'interrupted',
