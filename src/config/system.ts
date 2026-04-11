@@ -374,6 +374,14 @@ export class ConfigSystem {
     if (config.top_p !== undefined && (config.top_p < 0 || config.top_p > 1)) {
       throw new ConfigError('top_p must be between 0 and 1')
     }
+
+    // TTS relay requires real streaming for real-time token delivery
+    if (config.streaming === false && config.tts_relay?.enabled) {
+      logger.warn(
+        { botName: config.name },
+        'streaming:false with tts_relay.enabled — TTS will receive synthesized callbacks from membrane.complete(), not real-time per-token delivery'
+      )
+    }
   }
 }
 

@@ -409,7 +409,11 @@ export class TraceCollector {
   getTraceId(): string {
     return this.traceId
   }
-  
+
+  getBotId(): string {
+    return this.botId
+  }
+
   getLLMCallCount(): number {
     return this.llmCalls.length
   }
