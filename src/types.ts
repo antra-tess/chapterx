@@ -202,6 +202,7 @@ export interface BotConfig {
   // Retries
   llm_retries: number
   discord_backoff_max: number
+  deferred_retries: boolean
   
   // Misc
   system_prompt?: string
