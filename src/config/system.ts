@@ -316,6 +316,7 @@ export class ConfigSystem {
       // Retries
       llm_retries: config.llm_retries ?? 0,
       discord_backoff_max: config.discord_backoff_max || 32000,
+      deferred_retries: config.deferred_retries ?? false,
 
       // Misc
       system_prompt: systemPrompt,

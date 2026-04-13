@@ -187,11 +187,14 @@ export class AgentLoop {
   async run(): Promise<void> {
     this.running = true
 
-    // Initialize deferred queue for handling transient API failures
-    this.deferredQueue = new DeferredQueue()
-    await this.deferredQueue.initialize(this.botId, (event) => this.queue.push(event))
+    // Initialize deferred queue for handling transient API failures (opt-in)
+    const botConfig = this.configSystem.loadBotConfigOnly(this.botId)
+    if (botConfig.deferred_retries) {
+      this.deferredQueue = new DeferredQueue()
+      await this.deferredQueue.initialize(this.botId, (event) => this.queue.push(event))
+    }
 
-    logger.info({ botId: this.botId }, 'Agent loop started')
+    logger.info({ botId: this.botId, deferredRetries: !!botConfig.deferred_retries }, 'Agent loop started')
 
     while (this.running) {
       try {
