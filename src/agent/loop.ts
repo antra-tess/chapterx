@@ -2728,11 +2728,14 @@ export class AgentLoop {
       // Handle stop sequence continuation for XML tools format
       // Only applies when using anthropic-xml formatter (detected by presence of XML tags)
       if (completion.stopReason === 'stop_sequence') {
-        const completionText = completion.content
-          .filter((c: any) => c.type === 'text')
-          .map((c: any) => c.text)
-          .join('')
-        
+        // Use rawAssistantText to preserve XML tags that membrane parses into
+        // structured blocks (thinking, tool_use) — needed for function_calls counting
+        const completionText = completion.rawAssistantText
+          ?? completion.content
+            .filter((c: any) => c.type === 'text')
+            .map((c: any) => c.text)
+            .join('')
+
         const triggeredStopSequence = completion.raw?.stop_sequence
         
         // Check if we're inside an unclosed <function_calls> block
@@ -2759,7 +2762,10 @@ export class AgentLoop {
           // Check for unclosed thinking tag - need to continue
           // Only assume thinking is open if it was actually prefilled (not in continuation mode)
           let unclosedTag = this.detectUnclosedXmlTag(completionText)
-          if (!unclosedTag && thinkingWasPrefilled && !completionText.includes('</thinking>')) {
+          // Only assume thinking is unclosed if it's not in text blocks AND membrane
+          // didn't already extract it into a separate thinking content block
+          const hasThinkingBlock = completion.content.some((c: any) => c.type === 'thinking')
+          if (!unclosedTag && thinkingWasPrefilled && !completionText.includes('</thinking>') && !hasThinkingBlock) {
             unclosedTag = 'thinking'
           }
           if (unclosedTag) {
@@ -2779,11 +2785,15 @@ export class AgentLoop {
       // Note: When prefill_thinking is enabled, membrane's extended thinking API
       // handles thinking blocks, so no manual tag prepending is needed
 
-      // Get new completion text
-      const newText = completion.content
-        .filter((c: any) => c.type === 'text')
-        .map((c: any) => c.text)
-        .join('')
+      // Get new completion text — prefer rawAssistantText which preserves XML tags
+      // that membrane may have parsed into structured blocks (thinking, tool_use).
+      // This is critical for inline tool execution: parseAnthropicToolCalls needs
+      // the raw <function_calls> XML that membrane strips into tool_use blocks.
+      const newText = completion.rawAssistantText
+        ?? completion.content
+          .filter((c: any) => c.type === 'text')
+          .map((c: any) => c.text)
+          .join('')
 
       accumulatedOutput += newText
 
@@ -2793,10 +2803,12 @@ export class AgentLoop {
           generatedImageBlocks.push(block)
         }
       }
-      
+
       // If we stopped on </function_calls>, append it back (stop sequence consumes the matched text)
-      if (completion.stopReason === 'stop_sequence' && 
-          completion.raw?.stop_sequence === AgentLoop.FUNC_CALLS_CLOSE) {
+      // rawAssistantText may already include the stop sequence — check before appending
+      if (completion.stopReason === 'stop_sequence' &&
+          completion.raw?.stop_sequence === AgentLoop.FUNC_CALLS_CLOSE &&
+          !accumulatedOutput.endsWith(AgentLoop.FUNC_CALLS_CLOSE)) {
         accumulatedOutput += AgentLoop.FUNC_CALLS_CLOSE
       }
       
@@ -3502,11 +3514,12 @@ export class AgentLoop {
     thinkingWasPrefilled: boolean = false,
     maxContinuations: number = 5
   ): Promise<any> {
-    let accumulatedText = partialCompletion.content
-      .filter((c: any) => c.type === 'text')
-      .map((c: any) => c.text)
-      .join('')
-    
+    let accumulatedText = partialCompletion.rawAssistantText
+      ?? partialCompletion.content
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.text)
+        .join('')
+
     let continuationCount = 0
     let lastCompletion = partialCompletion
     
@@ -3543,12 +3556,13 @@ export class AgentLoop {
       
       const continuation = await this.completeLLM(continuationRequest, config)
       
-      // Get continuation text
-      const continuationText = continuation.content
-        .filter((c: any) => c.type === 'text')
-        .map((c: any) => c.text)
-        .join('')
-      
+      // Get continuation text — prefer rawAssistantText to preserve XML
+      const continuationText = continuation.rawAssistantText
+        ?? continuation.content
+          .filter((c: any) => c.type === 'text')
+          .map((c: any) => c.text)
+          .join('')
+
       accumulatedText += continuationText
       lastCompletion = continuation
       
