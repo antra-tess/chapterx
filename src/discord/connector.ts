@@ -31,10 +31,10 @@ export interface ConnectorOptions {
 
 /**
  * A pinned message tracked via gateway events.
- * Holds the minimal set of fields needed to resolve .config / .steer without
- * calling the Discord /pins endpoint after the initial bootstrap.
+ * Holds the minimal set of fields needed to resolve .config / .steer / .pause
+ * without calling the Discord /pins endpoint after the initial bootstrap.
  */
-interface TrackedPin {
+export interface TrackedPin {
   id: string
   content: string
   authorId: string
@@ -257,6 +257,16 @@ export class DiscordConnector {
   }
 
   /**
+   * Filters tracked pins for `.pause` messages. Returns full TrackedPin records
+   * (not just content) because the pause-state counters key on pin id.
+   * Note: no authorBot filter — pauses may be authored by soma (a bot).
+   */
+  private extractPausesFromTrackedPins(pins: Map<string, TrackedPin>): TrackedPin[] {
+    const sorted = [...pins.values()].sort((a, b) => a.id.localeCompare(b.id))
+    return sorted.filter((p) => p.content.startsWith('.pause'))
+  }
+
+  /**
    * Load URL to filename mapping from disk (enables persistent image cache)
    */
   private loadUrlMap(): void {
@@ -447,6 +457,21 @@ export class DiscordConnector {
     }
     if (!pins) return []
     return this.extractSteersFromTrackedPins(pins)
+  }
+
+  /**
+   * Fetch pinned `.pause` messages from a channel (cached, mirrors fetchPinnedConfigs).
+   * Returns full TrackedPin records because the pause-state counters key on pin id.
+   * Bootstraps from the API on cold miss.
+   */
+  async fetchPinnedPauses(channelId: string): Promise<TrackedPin[]> {
+    let pins = this.pinnedByChannel.get(channelId)
+    if (!pins) {
+      await this.bootstrapChannelPins(channelId)
+      pins = this.pinnedByChannel.get(channelId)
+    }
+    if (!pins) return []
+    return this.extractPausesFromTrackedPins(pins)
   }
 
   /**
@@ -1939,6 +1964,16 @@ export class DiscordConnector {
     const pins = this.pinnedByChannel.get(channelId)
     if (!pins) return null
     return this.extractSteersFromTrackedPins(pins)
+  }
+
+  /**
+   * Synchronous view over the tracked-pin cache for `.pause` lookups.
+   * Returns null on cold miss (caller treats as "no pauses" — hot path never fetches).
+   */
+  getCachedPinnedPauses(channelId: string): TrackedPin[] | null {
+    const pins = this.pinnedByChannel.get(channelId)
+    if (!pins) return null
+    return this.extractPausesFromTrackedPins(pins)
   }
 
   private setupEventHandlers(): void {
