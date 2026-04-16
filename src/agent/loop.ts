@@ -29,6 +29,7 @@ import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.
 import { MembraneProvider } from '../llm/membrane/index.js'
 import { resolveToolModeForModel } from '../llm/membrane/adapter.js'
 import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
+import { PauseState } from './pause.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
 type Membrane = any
@@ -62,6 +63,12 @@ export class AgentLoop {
   // Deferred activation queue for transient API errors
   private deferredQueue?: DeferredQueue
 
+  // Pause-state (tracks `.pause` pin counters per channel/pin)
+  private pauseState: PauseState
+  // Lazily-resolved canonical display name for target matching on `.pause` pins.
+  // Empty string = "loaded, but no name set"; undefined = "not yet loaded".
+  private botDisplayName?: string
+
   constructor(
     private botId: string,
     private queue: EventQueue,
@@ -74,6 +81,22 @@ export class AgentLoop {
   ) {
     this.activationStore = new ActivationStore(cacheDir)
     this.cacheDir = cacheDir
+    this.pauseState = new PauseState(
+      this.connector,
+      () => this.resolveBotDisplayName(),
+    )
+  }
+
+  private resolveBotDisplayName(): string | undefined {
+    if (this.botDisplayName === undefined) {
+      try {
+        const cfg = this.configSystem.loadBotConfigOnly(this.botId)
+        this.botDisplayName = typeof cfg.name === 'string' ? cfg.name : ''
+      } catch {
+        this.botDisplayName = ''
+      }
+    }
+    return this.botDisplayName || undefined
   }
 
   /**
@@ -1004,6 +1027,11 @@ export class AgentLoop {
       return false
     }
 
+    // Pin IDs of pause pins applicable to this bot — iterated per non-dot event
+    // for the count gate. Computed once per batch; changes in the pin set
+    // between events in the same batch are picked up on the next batch.
+    const pausePinIds = this.pauseState.pausePinsForBot(channelId, this.botId)
+
     // Check each message event for activation triggers
     for (const event of events) {
       if (event.type !== 'message') {
@@ -1017,19 +1045,42 @@ export class AgentLoop {
         continue
       }
 
-      // Skip bot's own messages
+      // Classify content up-front: both the pause-observe path and the
+      // existing activation skip-dot below reuse this.
+      // Strip leading Discord mentions (<@userId>) and ChapterX reply tags
+      // (<reply:@...>) so ".test @bot" is caught regardless of mention position.
+      const content = message.content?.trim()
+      const contentForDotCheck = content
+        ?.replace(/^(<@!?\d+>\s*)+/, '')    // Strip leading Discord mentions
+        ?.replace(/^<reply:@[^>]+>\s*/, '') // Strip ChapterX reply prefix
+      const isDotMessage = !!(contentForDotCheck && /^\.[a-zA-Z]/.test(contentForDotCheck))
+
+      // Pause gate, checked BEFORE observe so `messages: N` blocks N events
+      // and the (N+1)th passes (natural reading of "pause for N messages").
+      const pausedNow = pausePinIds.length > 0
+        && this.pauseState.isPaused(channelId, this.botId, Date.now())
+
+      // Count non-dot messages (any author, including this bot and other bots)
+      // against every active pause pin targeting us.
+      if (!isDotMessage) {
+        for (const pinId of pausePinIds) {
+          this.pauseState.observeMessage(channelId, pinId)
+        }
+      }
+
+      if (pausedNow) {
+        logger.debug({ channelId, botId: this.botId, messageId: message.id }, 'Skipping activation — bot is paused')
+        continue
+      }
+
+      // Skip bot's own messages (activation-path only — pause counting above
+      // intentionally includes them).
       if (message.author?.id === this.botUserId) {
         continue
       }
 
       // Skip dot messages — hidden/command messages should never trigger activation
-      // Strip leading Discord mentions (<@userId>) and ChapterX reply tags (<reply:@...>)
-      // so ".test @bot" is caught regardless of mention position
-      const content = message.content?.trim()
-      const contentForDotCheck = content
-        ?.replace(/^(<@!?\d+>\s*)+/, '')    // Strip leading Discord mentions
-        ?.replace(/^<reply:@[^>]+>\s*/, '') // Strip ChapterX reply prefix
-      if (contentForDotCheck && /^\.[a-zA-Z]/.test(contentForDotCheck)) {
+      if (isDotMessage) {
         continue
       }
 
