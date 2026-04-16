@@ -103,8 +103,6 @@ async function main() {
     const connector = new DiscordConnector(queue, {
       token: discordToken,
       cacheDir: cachePath + '/images',
-      pinCacheDir: cachePath + '/pins',
-      steerCacheDir: cachePath + '/steer-pins',
       maxBackoffMs: 32000,
     })
 
