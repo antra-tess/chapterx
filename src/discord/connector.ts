@@ -3,7 +3,7 @@
  * Handles all Discord API interactions
  */
 
-import { Attachment, Client, Collection, GatewayIntentBits, Message, PermissionFlagsBits, OAuth2Scopes, TextChannel } from 'discord.js'
+import { Attachment, Client, Collection, GatewayIntentBits, Message, Partials, PermissionFlagsBits, OAuth2Scopes, TextChannel } from 'discord.js'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -80,6 +80,7 @@ export class DiscordConnector {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMessageReactions,
       ],
+      partials: [Partials.Message],
     })
 
     this.setupEventHandlers()
