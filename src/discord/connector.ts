@@ -22,8 +22,19 @@ import { retryDiscord } from '../utils/retry.js'
 export interface ConnectorOptions {
   token: string
   cacheDir: string
-  pinCacheDir?: string  // Directory for persisting pinned config cache to disk
   maxBackoffMs: number
+}
+
+/**
+ * A pinned message tracked via gateway events.
+ * Holds the minimal set of fields needed to resolve .config without
+ * calling the Discord /pins endpoint after the initial bootstrap.
+ */
+interface TrackedPin {
+  id: string
+  content: string
+  authorId: string
+  authorBot: boolean
 }
 
 const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
@@ -61,8 +72,13 @@ export class DiscordConnector {
   private messageCache = new Map<string, (Message | null)[]>()  // channelId → messages (chronological, nulls are tombstones)
   private messageCacheIndex = new Map<string, Map<string, number>>()  // channelId → (messageId → array index)
   private messageCachePopulated = new Set<string>()  // channels that had initial API fetch
-  private pinnedConfigCache = new Map<string, string[]>()  // channelId → pinned config strings
-  private pinnedConfigDirty = new Set<string>()  // channels whose pins changed since last fetch
+
+  // Canonical pin cache: channelId -> (messageId -> TrackedPin).
+  // Maintained entirely from gateway events after a one-time bootstrap per channel.
+  // .config reads are filter-views over this map.
+  private pinnedByChannel = new Map<string, Map<string, TrackedPin>>()
+  private pinCacheDir: string | null = null  // <cacheDir>/pins, set in constructor
+  private pinPersistTimers = new Map<string, NodeJS.Timeout>()
 
   // Cache observability and maintenance
   private cacheStats = { hits: 0, misses: 0, apiCalls: 0, evictions: 0 }
@@ -94,59 +110,142 @@ export class DiscordConnector {
     this.urlMapPath = join(options.cacheDir, 'url-map.json')
     this.loadUrlMap()
 
-    // Initialize disk-based pin cache directory
-    if (options.pinCacheDir) {
-      if (!existsSync(options.pinCacheDir)) {
-        mkdirSync(options.pinCacheDir, { recursive: true })
-      }
-      this.loadPinCacheFromDisk()
+    // Event-driven tracked-pin cache. Supersedes the legacy pin cache
+    // (that dir — <cachePath>/pins — is orphaned and can be deleted by ops;
+    // first cold-miss bootstraps the new format).
+    this.pinCacheDir = join(options.cacheDir, 'pins')
+    if (!existsSync(this.pinCacheDir)) {
+      mkdirSync(this.pinCacheDir, { recursive: true })
+    }
+    this.loadTrackedPinsFromDisk()
+  }
+
+  // ────────────────────────────────────────────────────────────────────
+  // Event-driven pin tracking
+  //
+  // Canonical in-memory map is `pinnedByChannel`; maintained by
+  // messageCreate / messageUpdate / messageDelete handlers. A cold-miss
+  // bootstrap fetches once from the API and then events keep the map live.
+  // ────────────────────────────────────────────────────────────────────
+
+  private getOrCreateChannelPinMap(channelId: string): Map<string, TrackedPin> {
+    let m = this.pinnedByChannel.get(channelId)
+    if (!m) {
+      m = new Map()
+      this.pinnedByChannel.set(channelId, m)
+    }
+    return m
+  }
+
+  private trackPin(channelId: string, message: Pick<Message, 'id' | 'content'> & { author?: { id?: string; bot?: boolean } | null }): void {
+    const pins = this.getOrCreateChannelPinMap(channelId)
+    pins.set(message.id, {
+      id: message.id,
+      content: message.content ?? '',
+      authorId: message.author?.id ?? '',
+      authorBot: message.author?.bot ?? false,
+    })
+    this.schedulePinCachePersist(channelId)
+  }
+
+  private schedulePinCachePersist(channelId: string): void {
+    const existing = this.pinPersistTimers.get(channelId)
+    if (existing) clearTimeout(existing)
+    const timer = setTimeout(() => {
+      this.pinPersistTimers.delete(channelId)
+      this.persistTrackedPins(channelId)
+    }, 1000)  // 1s debounce: collapses bursts of mutations in one channel
+    this.pinPersistTimers.set(channelId, timer)
+  }
+
+  private persistTrackedPins(channelId: string): void {
+    if (!this.pinCacheDir) return
+    const pins = this.pinnedByChannel.get(channelId)
+    if (!pins) return
+    try {
+      const data: TrackedPin[] = [...pins.values()]
+      writeFileSync(join(this.pinCacheDir, `${channelId}.json`), JSON.stringify(data), 'utf-8')
+    } catch (err) {
+      logger.warn({ err, channelId }, 'Failed to persist tracked-pin cache')
     }
   }
 
-  /**
-   * Load all persisted pin caches from disk into memory on startup.
-   */
-  private loadPinCacheFromDisk(): void {
-    const dir = this.options.pinCacheDir
-    if (!dir || !existsSync(dir)) return
-
+  private loadTrackedPinsFromDisk(): void {
+    if (!this.pinCacheDir || !existsSync(this.pinCacheDir)) return
     try {
-      const files = readdirSync(dir).filter(f => f.endsWith('.json'))
+      const files = readdirSync(this.pinCacheDir).filter(f => f.endsWith('.json'))
       let loaded = 0
       for (const file of files) {
+        const channelId = file.replace('.json', '')
         try {
-          const channelId = file.replace('.json', '')
-          const data = JSON.parse(readFileSync(join(dir, file), 'utf-8'))
-          if (Array.isArray(data)) {
-            this.pinnedConfigCache.set(channelId, data)
-            loaded++
+          const raw = readFileSync(join(this.pinCacheDir, file), 'utf-8')
+          const data = JSON.parse(raw) as TrackedPin[]
+          if (!Array.isArray(data)) continue
+          const map = new Map<string, TrackedPin>()
+          for (const pin of data) {
+            if (pin?.id) map.set(pin.id, pin)
           }
+          this.pinnedByChannel.set(channelId, map)
+          loaded++
         } catch {
-          // Skip corrupted files
+          // skip corrupt file
         }
       }
       if (loaded > 0) {
-        logger.info({ loaded, dir }, 'Loaded pinned config cache from disk')
+        logger.info({ channels: loaded }, 'Tracked-pin cache loaded from disk')
       }
-    } catch (error) {
-      logger.warn({ error, dir }, 'Failed to read pin cache directory')
+    } catch (err) {
+      logger.warn({ err }, 'Tracked-pin disk load failed')
     }
   }
 
   /**
-   * Persist pinned configs for a channel to disk.
+   * One-time bootstrap: fetches the pins endpoint for a channel we have
+   * never seen, then lets event handlers maintain the map from then on.
+   * On failure, installs an empty map so further reads don't re-trigger
+   * the bootstrap; events will still fill it in as pins mutate.
    */
-  private savePinCacheToDisk(channelId: string, configs: string[]): void {
-    const dir = this.options.pinCacheDir
-    if (!dir) return
-
+  private async bootstrapChannelPins(channelId: string): Promise<void> {
     try {
-      writeFileSync(join(dir, `${channelId}.json`), JSON.stringify(configs), 'utf-8')
+      const channel = await this.client.channels.fetch(channelId) as TextChannel | null
+      if (!channel || !channel.isTextBased()) {
+        this.pinnedByChannel.set(channelId, new Map())
+        return
+      }
+      const { messages: pinnedMessages, failed } = await this.fetchPinnedWithTimeout(channel, 10000)
+      if (failed) {
+        logger.warn({ channelId }, 'Tracked-pin bootstrap failed — events will populate when pins mutate')
+        this.pinnedByChannel.set(channelId, new Map())
+        return
+      }
+      const pins = this.getOrCreateChannelPinMap(channelId)
+      for (const msg of pinnedMessages.values()) {
+        pins.set(msg.id, {
+          id: msg.id,
+          content: msg.content ?? '',
+          authorId: msg.author?.id ?? '',
+          authorBot: msg.author?.bot ?? false,
+        })
+      }
+      this.schedulePinCachePersist(channelId)
+      logger.info({ channelId, pinCount: pins.size }, 'Tracked-pin cache bootstrapped from API')
     } catch (error) {
-      logger.warn({ error, channelId }, 'Failed to write pin cache to disk')
+      logger.warn({ error, channelId }, 'Tracked-pin bootstrap errored')
+      this.pinnedByChannel.set(channelId, new Map())
     }
   }
-  
+
+  /**
+   * Filters tracked pins for `.config` messages and applies the same
+   * `.config [target]\n---\n<yaml>` → `target: <t>\n<yaml>` parse as
+   * extractConfigs(Message[]). Sort order matches the legacy path
+   * (ascending message ID, so newer pins override older in merge).
+   */
+  private extractConfigsFromTrackedPins(pins: Map<string, TrackedPin>): string[] {
+    const sorted = [...pins.values()].sort((a, b) => a.id.localeCompare(b.id))
+    return this.extractConfigs(sorted)
+  }
+
   /**
    * Load URL to filename mapping from disk (enables persistent image cache)
    */
@@ -309,77 +408,15 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Fetch just pinned configs from a channel (fast - single API call)
-   * Used to load config BEFORE determining fetch depth.
-   * Falls back to disk cache if API call fails (e.g. Cloudflare 429).
-   */
   async fetchPinnedConfigs(channelId: string): Promise<string[]> {
-    // Check push-based memory cache first
-    const cached = this.getCachedPinnedConfigs(channelId)
-    if (cached !== null) {
-      logger.debug({ channelId }, 'Pinned config cache hit')
-      return cached
+    let pins = this.pinnedByChannel.get(channelId)
+    if (!pins) {
+      // Cold miss: bootstrap from the API once, then let events maintain it.
+      await this.bootstrapChannelPins(channelId)
+      pins = this.pinnedByChannel.get(channelId)
     }
-
-    try {
-      const channel = await this.client.channels.fetch(channelId) as TextChannel
-      if (!channel || !channel.isTextBased()) {
-        return []
-      }
-      const { messages: pinnedMessages, failed } = await this.fetchPinnedWithTimeout(channel, 10000)
-
-      // Only cache if the fetch actually succeeded (not rate limited/timed out).
-      // A successful fetch with 0 pins is valid — channel genuinely has no configs.
-      if (!failed) {
-        const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
-        const configs = this.extractConfigs(sortedPinned)
-
-        // Store in memory + disk (also clears dirty flag)
-        this.cachePinnedConfigs(channelId, configs)
-        this.savePinCacheToDisk(channelId, configs)
-        logger.debug({ channelId, configCount: configs.length }, 'Pinned config cache miss - fetched from API')
-
-        return configs
-      }
-
-      // Fetch failed (timeout/429) — fall back to disk cache
-      return this.loadPinCacheForChannel(channelId)
-    } catch (error) {
-      logger.warn({ error, channelId }, 'Failed to fetch pinned configs')
-      return this.loadPinCacheForChannel(channelId)
-    }
-  }
-
-  /**
-   * Load pinned configs for a single channel from disk cache.
-   * Returns empty array if no disk cache exists.
-   */
-  private loadPinCacheForChannel(channelId: string): string[] {
-    // Check if memory was populated from disk on startup
-    const memCached = this.pinnedConfigCache.get(channelId)
-    if (memCached) {
-      logger.info({ channelId, configCount: memCached.length }, 'Using disk-cached pinned configs (API unavailable)')
-      return memCached
-    }
-
-    // Try reading directly from disk
-    const dir = this.options.pinCacheDir
-    if (!dir) return []
-    const filePath = join(dir, `${channelId}.json`)
-    if (!existsSync(filePath)) return []
-
-    try {
-      const data = JSON.parse(readFileSync(filePath, 'utf-8'))
-      if (Array.isArray(data)) {
-        this.pinnedConfigCache.set(channelId, data)
-        logger.info({ channelId, configCount: data.length }, 'Loaded pinned configs from disk fallback')
-        return data
-      }
-    } catch {
-      // Corrupted file
-    }
-    return []
+    if (!pins) return []
+    return this.extractConfigsFromTrackedPins(pins)
   }
 
   /**
@@ -637,18 +674,15 @@ export class DiscordConnector {
       endProfile('messageConvert')
 
       startProfile('pinnedFetch')
-      // Use pre-fetched pinned configs if provided, otherwise fetch them
+      // Use pre-fetched pinned configs if provided, otherwise resolve via tracked-pin cache.
       let pinnedConfigs: string[]
       if (params.pinnedConfigs) {
         pinnedConfigs = params.pinnedConfigs
         logger.debug({ pinnedCount: pinnedConfigs.length }, 'Using pre-fetched pinned configs')
       } else {
-      // Fetch pinned messages for config (fallback path — handleActivation normally pre-fetches)
-      const { messages: pinnedMessages } = await this.fetchPinnedWithTimeout(channel, 10000)
-      // Sort by ID (oldest first) so newer pins override older ones in merge
-      const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
-      logger.debug({ pinnedCount: pinnedMessages.size, pinnedIds: sortedPinned.map(m => m.id) }, 'Fetched pinned messages (sorted oldest-first)')
-        pinnedConfigs = this.extractConfigs(sortedPinned)
+        // Fallback path — routes through the event-driven cache (bootstraps once on cold miss).
+        pinnedConfigs = await this.fetchPinnedConfigs(channelId)
+        logger.debug({ pinnedCount: pinnedConfigs.length }, 'Resolved pinned configs from tracked-pin cache')
       }
       endProfile('pinnedFetch')
 
@@ -2160,23 +2194,14 @@ export class DiscordConnector {
   }
 
   /**
-   * Get cached pinned configs, or null if cache is empty/dirty.
-   * Does NOT clear the dirty flag — that only happens on successful API fetch
-   * (via cachePinnedConfigs). This ensures failed refetches don't lose dirty state.
+   * Synchronous view over the tracked-pin cache for the activation hot path.
+   * Returns null on cold miss (channel never seen) — the caller treats that
+   * as "no channel config" and falls back to base config. NEVER fetches here.
    */
   getCachedPinnedConfigs(channelId: string): string[] | null {
-    if (this.pinnedConfigDirty.has(channelId)) {
-      return null  // Force refetch, but keep dirty flag until API succeeds
-    }
-    return this.pinnedConfigCache.get(channelId) || null
-  }
-
-  /**
-   * Store pinned configs in cache after API fetch.
-   */
-  cachePinnedConfigs(channelId: string, configs: string[]): void {
-    this.pinnedConfigCache.set(channelId, configs)
-    this.pinnedConfigDirty.delete(channelId)
+    const pins = this.pinnedByChannel.get(channelId)
+    if (!pins) return null
+    return this.extractConfigsFromTrackedPins(pins)
   }
 
   private setupEventHandlers(): void {
@@ -2205,6 +2230,12 @@ export class DiscordConnector {
       // Update message cache
       this.pushMessageToCache(message.channelId, message)
 
+      // Pre-pinned messages (rare: webhook-delivered or boosts) — track on create.
+      if (message.pinned === true && message.channelId) {
+        this.trackPin(message.channelId, message)
+        logger.info({ channelId: message.channelId, messageId: message.id }, 'Tracked pin from messageCreate')
+      }
+
       this.queue.push({
         type: 'message',
         channelId: message.channelId,
@@ -2221,6 +2252,26 @@ export class DiscordConnector {
         this.updateMessageInCache(newMsg.channelId, newMsg as Message)
       }
 
+      // Pin tracking: unified handler for add / remove / content-update.
+      // MESSAGE_UPDATE carries the full payload for pin flips and content edits;
+      // oldMsg may be partial (Partials.Message) so we drive decisions off newMsg only.
+      if (newMsg.id && newMsg.channelId) {
+        const channelPins = this.getOrCreateChannelPinMap(newMsg.channelId)
+        const wasTracked = channelPins.has(newMsg.id)
+        const isPinned = newMsg.pinned === true
+
+        if (isPinned) {
+          this.trackPin(newMsg.channelId, newMsg as Message)
+          if (!wasTracked) {
+            logger.info({ channelId: newMsg.channelId, messageId: newMsg.id }, 'Tracked pin added via messageUpdate')
+          }
+        } else if (wasTracked) {
+          channelPins.delete(newMsg.id)
+          this.schedulePinCachePersist(newMsg.channelId)
+          logger.info({ channelId: newMsg.channelId, messageId: newMsg.id }, 'Tracked pin removed via messageUpdate')
+        }
+      }
+
       this.queue.push({
         type: 'edit',
         channelId: newMsg.channelId,
@@ -2234,6 +2285,16 @@ export class DiscordConnector {
       // Update message cache
       if (message.id && message.channelId) {
         this.removeMessageFromCache(message.channelId, message.id)
+      }
+
+      // Pin tracking: MESSAGE_DELETE doesn't say if the message was pinned;
+      // unconditional delete is a no-op if it wasn't tracked.
+      if (message.id && message.channelId) {
+        const channelPins = this.pinnedByChannel.get(message.channelId)
+        if (channelPins?.delete(message.id)) {
+          this.schedulePinCachePersist(message.channelId)
+          logger.info({ channelId: message.channelId, messageId: message.id }, 'Tracked pin dropped via messageDelete')
+        }
       }
 
       this.queue.push({
@@ -2259,36 +2320,22 @@ export class DiscordConnector {
     })
 
     this.client.on('channelPinsUpdate', (channel) => {
-      // Proactively fetch new pins on gateway event (like Chapter2).
-      // This is safe because pin updates are rare (someone manually pinning/unpinning),
-      // unlike the old shouldActivate path which hit the API on every message batch.
-      // Small random jitter (0-2s) prevents 80+ bots from fetching simultaneously.
-      const channelId = (channel as any).id
-      if (!channelId) return
+      // Pin state is now maintained event-driven via messageUpdate.
+      // Kept only for observability during rollout; confirm the event fires so
+      // we can correlate with any edge case. No fetchPinned call here.
+      logger.debug({ channelId: (channel as any)?.id }, 'channelPinsUpdate seen (no-op)')
+    })
 
-      const jitterMs = Math.random() * 2000
-      setTimeout(async () => {
-        try {
-          const ch = await this.client.channels.fetch(channelId) as TextChannel
-          if (!ch || !ch.isTextBased()) return
-
-          const { messages: pinnedMessages, failed } = await this.fetchPinnedWithTimeout(ch, 10000)
-          if (!failed) {
-            const sortedPinned = Array.from(pinnedMessages.values()).sort((a, b) => a.id.localeCompare(b.id))
-            const configs = this.extractConfigs(sortedPinned)
-            this.cachePinnedConfigs(channelId, configs)
-            this.savePinCacheToDisk(channelId, configs)
-            logger.info({ channelId, configCount: configs.length }, 'Pinned configs refreshed via gateway event')
-          } else {
-            // API failed (e.g., Cloudflare 429) — mark dirty so handleActivation retries
-            this.pinnedConfigDirty.add(channelId)
-            logger.warn({ channelId }, 'Pins gateway refresh failed — marked dirty for retry')
-          }
-        } catch (error) {
-          this.pinnedConfigDirty.add(channelId)
-          logger.warn({ error, channelId }, 'Pins gateway refresh error — marked dirty for retry')
-        }
-      }, jitterMs)
+    // Shard lifecycle — observability only. Discord's RESUME replays missed events
+    // when the gap is short enough; we accept some drift risk beyond that for v1.
+    this.client.on('shardReady', (shardId, unavailableGuilds) => {
+      logger.info({ shardId, unavailableGuilds: unavailableGuilds?.size ?? 0 }, 'Shard ready')
+    })
+    this.client.on('shardResume', (shardId, replayedEvents) => {
+      logger.info({ shardId, replayedEvents }, 'Shard resumed — events replayed')
+    })
+    this.client.on('shardDisconnect', (event, shardId) => {
+      logger.warn({ shardId, code: event.code, reason: event.reason }, 'Shard disconnected')
     })
   }
 
@@ -2494,7 +2541,7 @@ export class DiscordConnector {
     return { messages: empty, failed: true }
   }
 
-  private extractConfigs(messages: Message[]): string[] {
+  private extractConfigs(messages: Array<{ content: string }>): string[] {
     const configs: string[] = []
 
     for (const msg of messages) {
