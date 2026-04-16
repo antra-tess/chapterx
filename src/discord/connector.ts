@@ -2180,12 +2180,19 @@ export class DiscordConnector {
    * Public for API access
    */
   convertMessage(msg: Message, messageMap?: Map<string, Message>): DiscordMessage {
-    // Replace user ID mentions with username mentions for bot consumption
-    // Use actual username (not displayName/nick) to match chapter2 behavior
-    let content = msg.content
-    for (const [userId, user] of msg.mentions.users.entries()) {
-      content = content.replace(new RegExp(`<@!?${userId}>`, 'g'), `<@${user.username}>`)
-    }
+    // Replace user ID mentions with username mentions for bot consumption.
+    // Cascade: msg.mentions.users → client user cache → guild member cache.
+    // Use actual username (not displayName/nick) to match chapter2 behavior.
+    // Falls back to @unknown-user only when every cache misses, so raw snowflake
+    // IDs never leak to the LLM. Historical messages, oblique/webhook content,
+    // and cross-guild references commonly miss msg.mentions.users but are
+    // present in the client-wide user cache.
+    let content = msg.content.replace(/<@!?(\d+)>/g, (_match, userId) => {
+      const user = msg.mentions.users.get(userId)
+        ?? msg.client.users.cache.get(userId)
+        ?? msg.guild?.members.cache.get(userId)?.user
+      return user?.username ? `<@${user.username}>` : '@unknown-user'
+    })
 
     // Convert custom Discord emojis to readable :name: format
     // <:EmojiName:123456789> and <a:EmojiName:123456789> → :EmojiName:
@@ -2197,10 +2204,6 @@ export class DiscordConnector {
       const channel = msg.guild?.channels.cache.get(channelId)
       return channel && 'name' in channel ? `#${channel.name}` : `#unknown-channel`
     })
-
-    // Clean up any remaining unresolved user mentions (not in msg.mentions.users)
-    // <@123456789> → @unknown-user (prevents raw snowflake IDs leaking to LLM)
-    content = content.replace(/<@!?(\d+)>/g, '@unknown-user')
     
     // Check if this is an oblique bridge message and extract the real username
     const obliqueUsername = this.extractObliqueUsername(msg.author.username)
