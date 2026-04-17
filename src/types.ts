@@ -227,6 +227,12 @@ export interface BotConfig {
 
   // API mode
   api_only?: boolean  // If true, disable Discord activation handling - only serve API requests
+
+  // Speaker gating
+  // If set on a channel-pinned .config, only bots whose id or display name
+  // appears in this list will activate in that channel (covers both
+  // user-triggered and self_activation paths).
+  may_speak?: string[]
   
   // Soma integration (credit system)
   soma?: SomaConfig

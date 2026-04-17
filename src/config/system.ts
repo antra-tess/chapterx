@@ -327,6 +327,7 @@ export class ConfigSystem {
       prefill_user_message_file: config.prefill_user_message_file,
       reply_on_random: config.reply_on_random ?? 500,
       reply_on_name: config.reply_on_name ?? false,
+      may_speak: config.may_speak,
       max_queued_replies: config.max_queued_replies || 1,
       
       // Loop prevention
