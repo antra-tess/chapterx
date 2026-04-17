@@ -558,16 +558,18 @@ export class ContextBuilder {
 
   private filterDotMessages(messages: DiscordMessage[]): DiscordMessage[] {
     return messages.filter((msg) => {
-      // Filter dot commands (after stripping reply prefix)
-      // Dot commands are a period followed by a letter: .config, .history, .m, etc.
-      // Must NOT match ellipsis (... or ..) which users type as normal conversation
-      // Replies look like "<reply:@username> .test" so we need to strip the prefix
-      const contentWithoutReply = msg.content.trim().replace(/^<reply:@[^>]+>\s*/, '')
-      if (/^\.[a-zA-Z]/.test(contentWithoutReply)) {
+      // Dot prefix: any `.` not immediately followed by another `.`. Covers real
+      // commands (`.config`) and hide-markers (`. side comment`, `.*bit*`,
+      // `.4.7`). Ellipsis (`..`, `...`) is preserved because the second dot
+      // breaks the match. Reply (`<reply:@user>`) and leading mentions
+      // (`<@name>`, `<@&role>`) are stripped first so `<@alice> .config` still
+      // filters. Anyone can also add the 🫥 reaction to hide a message.
+      const stripped = msg.content.trim()
+        .replace(/^<reply:@[^>]+>\s*/, '')
+        .replace(/^(<@[^>]+>\s*)+/, '')
+      if (/^\.(?!\.)/.test(stripped)) {
         return false
       }
-      // Filter messages with dotted_line_face reaction (🫥)
-      // Anyone can add this reaction to hide a message from context
       if (msg.reactions?.some(r => r.emoji === '🫥' || r.emoji === 'dotted_line_face')) {
         return false
       }
