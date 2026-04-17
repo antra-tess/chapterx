@@ -1028,6 +1028,22 @@ export class AgentLoop {
       return false
     }
 
+    // may_speak gate: placed pre-event-loop so it covers both user-triggered
+    // events and self_activation (timers, deferred retries).
+    if (Array.isArray(config?.may_speak)) {
+      const botIdLower = this.botId.toLowerCase()
+      const displayNameLower = typeof config.name === 'string' ? config.name.toLowerCase() : ''
+      const allowed = config.may_speak.some((raw: unknown) => {
+        if (typeof raw !== 'string') return false
+        const target = raw.trim().replace(/^<@!?([^>]+)>$/, '$1').toLowerCase()
+        return target === botIdLower || (displayNameLower !== '' && target === displayNameLower)
+      })
+      if (!allowed) {
+        logger.debug({ channelId, botId: this.botId, may_speak: config.may_speak }, 'Skipping activation — bot not in may_speak list')
+        return false
+      }
+    }
+
     // Pin IDs of pause pins applicable to this bot — iterated per non-dot event
     // for the count gate. Computed once per batch; changes in the pin set
     // between events in the same batch are picked up on the next batch.
