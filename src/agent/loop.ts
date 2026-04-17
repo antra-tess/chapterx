@@ -987,17 +987,11 @@ export class AgentLoop {
   }
 
   private async shouldActivate(events: Event[], channelId: string, guildId: string): Promise<boolean> {
-    // Check for self_activation events first (timer-triggered)
-    for (const event of events) {
-      if (event.type === 'self_activation') {
-        logger.info({
-          channelId,
-          timerId: event.data?.timerId,
-          contextNote: event.data?.contextNote?.slice(0, 50),
-        }, 'Activated by timer (self_activation)')
-        return true
-      }
-    }
+    // Self_activation events (timer fires + deferred-retry fires) are handled
+    // inside the main event loop below rather than as an early exit, so they
+    // also respect the pause gate. A paused channel should stay quiet
+    // regardless of what triggered the activation — a user who pinned
+    // `.pause` does not want the bot to speak because a timer went off.
 
     // Use cached pin configs if available (populated by previous handleActivation calls),
     // otherwise fall back to base config (shared + guild + bot YAML, no channel overrides).
@@ -1039,8 +1033,32 @@ export class AgentLoop {
     // between events in the same batch are picked up on the next batch.
     const pausePinIds = this.pauseState.pausePinsForBot(channelId)
 
-    // Check each message event for activation triggers
+    // Check each event for activation triggers. Pause gate covers all event
+    // types — message, timer self_activation, deferred retry — so a paused
+    // channel never fires regardless of trigger.
     for (const event of events) {
+      if (event.type === 'self_activation') {
+        // Timer / deferred-retry. Honor pause (but don't tick the counter —
+        // timers don't count toward `messages: N`).
+        const pausedNow = pausePinIds.length > 0
+          && this.pauseState.isPaused(channelId, Date.now())
+        if (pausedNow) {
+          logger.debug({
+            channelId,
+            botId: this.botId,
+            timerId: event.data?.timerId,
+            deferredType: event.data?.type,
+          }, 'Skipping self_activation — bot is paused')
+          continue
+        }
+        logger.info({
+          channelId,
+          timerId: event.data?.timerId,
+          contextNote: event.data?.contextNote?.slice(0, 50),
+        }, 'Activated by timer (self_activation)')
+        return true
+      }
+
       if (event.type !== 'message') {
         continue
       }
