@@ -5,12 +5,18 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest'
-import { parsePauseMessage, isPauseActive, PauseState, type PauseConnectorLike } from './pause.js'
+import { parsePauseMessage, isPauseActive, PauseState, type PauseConnectorLike, type BotIdentity } from './pause.js'
 import type { TrackedPin } from '../discord/connector.js'
 
 const BOT = 'haiku45'
 const DISPLAY = 'Haiku'
 const CH = 'ch-1'
+
+// Keep existing tests ergonomic: a helper that builds a BotIdentity from the
+// two positional strings the old parsePauseMessage signature took.
+function id(botId: string, configName?: string, extra: Partial<BotIdentity> = {}): BotIdentity {
+  return { botId, configName, ...extra }
+}
 
 function pin(id: string, content: string): TrackedPin {
   return { id, content, authorId: 'u-1', authorBot: false }
@@ -52,7 +58,7 @@ describe('parsePauseMessage: happy paths', () => {
   it('parses a duration-only pause', () => {
     const parsed = parsePauseMessage(
       `.pause @${BOT}\n---\nstarted_at: 2026-04-16T20:30:00Z\nduration_seconds: 600`,
-      BOT,
+      id(BOT),
     )
     expect(parsed).not.toBeNull()
     expect(parsed!.startedAt).toBe(Date.parse('2026-04-16T20:30:00Z'))
@@ -63,7 +69,7 @@ describe('parsePauseMessage: happy paths', () => {
   it('parses a count-only pause', () => {
     const parsed = parsePauseMessage(
       `.pause ${BOT}\n---\nstarted_at: 2026-04-16T20:30:00Z\nmessages: 10`,
-      BOT,
+      id(BOT),
     )
     expect(parsed).not.toBeNull()
     expect(parsed!.messages).toBe(10)
@@ -73,7 +79,7 @@ describe('parsePauseMessage: happy paths', () => {
   it('parses a both-gates pause with reason', () => {
     const parsed = parsePauseMessage(
       `.pause\n---\nstarted_at: 2026-04-16T20:30:00Z\nduration_seconds: 300\nmessages: 5\nreason: debugging`,
-      BOT,
+      id(BOT),
     )
     expect(parsed).toEqual({
       startedAt: Date.parse('2026-04-16T20:30:00Z'),
@@ -86,7 +92,7 @@ describe('parsePauseMessage: happy paths', () => {
   it('coerces a non-integer messages value to floor', () => {
     const parsed = parsePauseMessage(
       `.pause\n---\nstarted_at: 2026-04-16T20:30:00Z\nmessages: 5.9`,
-      BOT,
+      id(BOT),
     )
     expect(parsed!.messages).toBe(5)
   })
@@ -94,37 +100,37 @@ describe('parsePauseMessage: happy paths', () => {
 
 describe('parsePauseMessage: invalid inputs', () => {
   it('rejects content that does not start with .pause', () => {
-    expect(parsePauseMessage('hello\n---\nstarted_at: 2026-04-16T20:30:00Z\nmessages: 5', BOT)).toBeNull()
+    expect(parsePauseMessage('hello\n---\nstarted_at: 2026-04-16T20:30:00Z\nmessages: 5', id(BOT))).toBeNull()
   })
 
   it('rejects missing `---` separator', () => {
-    expect(parsePauseMessage('.pause\nstarted_at: 2026-04-16T20:30:00Z\nmessages: 5', BOT)).toBeNull()
+    expect(parsePauseMessage('.pause\nstarted_at: 2026-04-16T20:30:00Z\nmessages: 5', id(BOT))).toBeNull()
   })
 
   it('rejects malformed YAML body', () => {
-    expect(parsePauseMessage('.pause\n---\n:: :: not yaml', BOT)).toBeNull()
+    expect(parsePauseMessage('.pause\n---\n:: :: not yaml', id(BOT))).toBeNull()
   })
 
   it('rejects missing started_at', () => {
-    expect(parsePauseMessage('.pause\n---\nmessages: 5', BOT)).toBeNull()
+    expect(parsePauseMessage('.pause\n---\nmessages: 5', id(BOT))).toBeNull()
   })
 
   it('rejects non-ISO started_at', () => {
-    expect(parsePauseMessage('.pause\n---\nstarted_at: never\nmessages: 5', BOT)).toBeNull()
+    expect(parsePauseMessage('.pause\n---\nstarted_at: never\nmessages: 5', id(BOT))).toBeNull()
   })
 
   it('rejects neither-gate-set', () => {
-    expect(parsePauseMessage('.pause\n---\nstarted_at: 2026-04-16T20:30:00Z', BOT)).toBeNull()
+    expect(parsePauseMessage('.pause\n---\nstarted_at: 2026-04-16T20:30:00Z', id(BOT))).toBeNull()
   })
 
   it('rejects zero / negative gates as if unset (effectively neither set)', () => {
     expect(parsePauseMessage(
       '.pause\n---\nstarted_at: 2026-04-16T20:30:00Z\nduration_seconds: 0\nmessages: 0',
-      BOT,
+      id(BOT),
     )).toBeNull()
     expect(parsePauseMessage(
       '.pause\n---\nstarted_at: 2026-04-16T20:30:00Z\nduration_seconds: -1',
-      BOT,
+      id(BOT),
     )).toBeNull()
   })
 })
@@ -133,38 +139,66 @@ describe('parsePauseMessage: target matching', () => {
   const body = '---\nstarted_at: 2026-04-16T20:30:00Z\nmessages: 5'
 
   it('empty target (just `.pause`) matches every bot', () => {
-    expect(parsePauseMessage(`.pause\n${body}`, BOT)).not.toBeNull()
-    expect(parsePauseMessage(`.pause\n${body}`, 'someOtherBot')).not.toBeNull()
+    expect(parsePauseMessage(`.pause\n${body}`, id(BOT))).not.toBeNull()
+    expect(parsePauseMessage(`.pause\n${body}`, id('someOtherBot'))).not.toBeNull()
   })
 
   it('exact botName match (case-insensitive)', () => {
-    expect(parsePauseMessage(`.pause ${BOT}\n${body}`, BOT)).not.toBeNull()
-    expect(parsePauseMessage(`.pause HAIKU45\n${body}`, BOT)).not.toBeNull()
+    expect(parsePauseMessage(`.pause ${BOT}\n${body}`, id(BOT))).not.toBeNull()
+    expect(parsePauseMessage(`.pause HAIKU45\n${body}`, id(BOT))).not.toBeNull()
   })
 
-  it('display-name match (case-insensitive)', () => {
-    expect(parsePauseMessage(`.pause Haiku\n${body}`, BOT, DISPLAY)).not.toBeNull()
-    expect(parsePauseMessage(`.pause haiku\n${body}`, BOT, DISPLAY)).not.toBeNull()
+  it('config-name match (case-insensitive)', () => {
+    expect(parsePauseMessage(`.pause Haiku\n${body}`, id(BOT, DISPLAY))).not.toBeNull()
+    expect(parsePauseMessage(`.pause haiku\n${body}`, id(BOT, DISPLAY))).not.toBeNull()
+  })
+
+  it('discord username match (case-insensitive)', () => {
+    expect(parsePauseMessage(
+      `.pause opus4.7\n${body}`,
+      id('opus47', 'Opus4.7', { discordUsername: 'opus4.7' }),
+    )).not.toBeNull()
+  })
+
+  it('discord global-name match — handles spaces (the real-world bug)', () => {
+    // Admin writes `.pause Opus 4.7` (the name they see in Discord).
+    // botId is `opus47`, config name is `Opus4.7` (no space) — neither matches.
+    // The Discord global name `Opus 4.7` is the one that must resolve it.
+    expect(parsePauseMessage(
+      `.pause Opus 4.7\n${body}`,
+      id('opus47', 'Opus4.7', { discordGlobalName: 'Opus 4.7' }),
+    )).not.toBeNull()
+  })
+
+  it('<@userId> mention matches discordUserId', () => {
+    expect(parsePauseMessage(
+      `.pause <@1234567890>\n${body}`,
+      id('opus47', 'Opus4.7', { discordUserId: '1234567890' }),
+    )).not.toBeNull()
+    expect(parsePauseMessage(
+      `.pause <@!1234567890>\n${body}`,
+      id('opus47', 'Opus4.7', { discordUserId: '1234567890' }),
+    )).not.toBeNull()
   })
 
   it('@-prefixed target strips the @', () => {
-    expect(parsePauseMessage(`.pause @${BOT}\n${body}`, BOT)).not.toBeNull()
-    expect(parsePauseMessage(`.pause @Haiku\n${body}`, BOT, DISPLAY)).not.toBeNull()
+    expect(parsePauseMessage(`.pause @${BOT}\n${body}`, id(BOT))).not.toBeNull()
+    expect(parsePauseMessage(`.pause @Haiku\n${body}`, id(BOT, DISPLAY))).not.toBeNull()
   })
 
-  it('<@id> mention target strips the wrapper', () => {
-    expect(parsePauseMessage(`.pause <@haiku45>\n${body}`, BOT)).not.toBeNull()
-    expect(parsePauseMessage(`.pause <@!haiku45>\n${body}`, BOT)).not.toBeNull()
+  it('<@name> textual target falls back to string compare against botId', () => {
+    expect(parsePauseMessage(`.pause <@haiku45>\n${body}`, id(BOT))).not.toBeNull()
+    expect(parsePauseMessage(`.pause <@!haiku45>\n${body}`, id(BOT))).not.toBeNull()
   })
 
   it('non-matching target returns null', () => {
-    expect(parsePauseMessage(`.pause otherBot\n${body}`, BOT)).toBeNull()
-    expect(parsePauseMessage(`.pause @otherBot\n${body}`, BOT, DISPLAY)).toBeNull()
+    expect(parsePauseMessage(`.pause otherBot\n${body}`, id(BOT))).toBeNull()
+    expect(parsePauseMessage(`.pause @otherBot\n${body}`, id(BOT, DISPLAY))).toBeNull()
   })
 
   it('`.pause all` is NOT treated specially — use empty target to mean all', () => {
     // Since `.config` never learned `all`, `.pause` doesn't either.
-    expect(parsePauseMessage(`.pause all\n${body}`, BOT)).toBeNull()
+    expect(parsePauseMessage(`.pause all\n${body}`, id(BOT))).toBeNull()
   })
 })
 
@@ -220,7 +254,7 @@ describe('PauseState.observeMessage', () => {
 
   beforeEach(() => {
     connector = new FakeConnector()
-    state = new PauseState(connector)
+    state = new PauseState(connector, () => id(BOT))
   })
 
   it('starts counts at zero on cold read', () => {
@@ -258,26 +292,26 @@ describe('PauseState.pausePinsForBot', () => {
 
   beforeEach(() => {
     connector = new FakeConnector()
-    state = new PauseState(connector, () => DISPLAY)
+    state = new PauseState(connector, () => id(BOT, DISPLAY))
   })
 
   it('returns [] when no pauses', () => {
-    expect(state.pausePinsForBot(CH, BOT)).toEqual([])
+    expect(state.pausePinsForBot(CH)).toEqual([])
   })
 
   it('includes pins targeting this bot', () => {
     connector.set(CH, [pause('p1', { target: `@${BOT}`, startedAt: START, duration: 600 })])
-    expect(state.pausePinsForBot(CH, BOT)).toEqual(['p1'])
+    expect(state.pausePinsForBot(CH)).toEqual(['p1'])
   })
 
   it('includes pins with no target (apply to all bots)', () => {
     connector.set(CH, [pause('p1', { startedAt: START, messages: 5 })])
-    expect(state.pausePinsForBot(CH, BOT)).toEqual(['p1'])
+    expect(state.pausePinsForBot(CH)).toEqual(['p1'])
   })
 
   it('excludes pins targeting another bot', () => {
     connector.set(CH, [pause('p1', { target: 'someOtherBot', startedAt: START, messages: 5 })])
-    expect(state.pausePinsForBot(CH, BOT)).toEqual([])
+    expect(state.pausePinsForBot(CH)).toEqual([])
   })
 
   it('mixes multiple pins — returns only matching', () => {
@@ -286,7 +320,21 @@ describe('PauseState.pausePinsForBot', () => {
       pause('p2', { target: 'other', startedAt: START, messages: 5 }),
       pause('p3', { startedAt: START, messages: 3 }),
     ])
-    expect(state.pausePinsForBot(CH, BOT).sort()).toEqual(['p1', 'p3'])
+    expect(state.pausePinsForBot(CH).sort()).toEqual(['p1', 'p3'])
+  })
+
+  it('matches a Discord-global-name target with spaces (the real-world bug)', () => {
+    const c = new FakeConnector()
+    const s = new PauseState(c, () => id('opus47', 'Opus4.7', { discordGlobalName: 'Opus 4.7' }))
+    c.set(CH, [pause('p1', { target: 'Opus 4.7', startedAt: START, duration: 7200 })])
+    expect(s.pausePinsForBot(CH)).toEqual(['p1'])
+  })
+
+  it('matches a <@userId> target against discordUserId', () => {
+    const c = new FakeConnector()
+    const s = new PauseState(c, () => id('opus47', 'Opus4.7', { discordUserId: '1234567890' }))
+    c.set(CH, [pause('p1', { target: '<@1234567890>', startedAt: START, duration: 7200 })])
+    expect(s.pausePinsForBot(CH)).toEqual(['p1'])
   })
 })
 
@@ -297,46 +345,46 @@ describe('PauseState.isPaused', () => {
 
   beforeEach(() => {
     connector = new FakeConnector()
-    state = new PauseState(connector)
+    state = new PauseState(connector, () => id(BOT))
   })
 
   it('returns false with no pauses', () => {
-    expect(state.isPaused(CH, BOT, START + 1_000)).toBe(false)
+    expect(state.isPaused(CH, START + 1_000)).toBe(false)
   })
 
   it('returns false before started_at', () => {
     connector.set(CH, [pause('p1', { startedAt: '2026-04-16T20:30:00Z', duration: 600 })])
-    expect(state.isPaused(CH, BOT, START - 10_000)).toBe(false)
+    expect(state.isPaused(CH, START - 10_000)).toBe(false)
   })
 
   it('returns true during the time window', () => {
     connector.set(CH, [pause('p1', { startedAt: '2026-04-16T20:30:00Z', duration: 600 })])
-    expect(state.isPaused(CH, BOT, START + 60_000)).toBe(true)
+    expect(state.isPaused(CH, START + 60_000)).toBe(true)
   })
 
   it('returns false after the time window', () => {
     connector.set(CH, [pause('p1', { startedAt: '2026-04-16T20:30:00Z', duration: 600 })])
-    expect(state.isPaused(CH, BOT, START + 600_000)).toBe(false)
+    expect(state.isPaused(CH, START + 600_000)).toBe(false)
   })
 
   it('count gate: active below threshold, inactive at/above', () => {
     connector.set(CH, [pause('p1', { startedAt: '2026-04-16T20:30:00Z', messages: 3 })])
-    expect(state.isPaused(CH, BOT, START + 1_000)).toBe(true)  // count=0
+    expect(state.isPaused(CH, START + 1_000)).toBe(true)  // count=0
     state.observeMessage(CH, 'p1')
     state.observeMessage(CH, 'p1')
-    expect(state.isPaused(CH, BOT, START + 1_000)).toBe(true)  // count=2, still below 3
+    expect(state.isPaused(CH, START + 1_000)).toBe(true)  // count=2, still below 3
     state.observeMessage(CH, 'p1')
-    expect(state.isPaused(CH, BOT, START + 1_000)).toBe(false) // count=3, expired
+    expect(state.isPaused(CH, START + 1_000)).toBe(false) // count=3, expired
   })
 
   it('pin for another bot does not pause this bot', () => {
     connector.set(CH, [pause('p1', { target: 'someOtherBot', startedAt: '2026-04-16T20:30:00Z', duration: 600 })])
-    expect(state.isPaused(CH, BOT, START + 60_000)).toBe(false)
+    expect(state.isPaused(CH, START + 60_000)).toBe(false)
   })
 
   it('invalid pins (malformed) do not pause the bot', () => {
     connector.set(CH, [pin('p1', '.pause\nnot-yaml-body')])
-    expect(state.isPaused(CH, BOT, START + 60_000)).toBe(false)
+    expect(state.isPaused(CH, START + 60_000)).toBe(false)
   })
 
   it('multiple pins: paused if ANY active', () => {
@@ -344,7 +392,7 @@ describe('PauseState.isPaused', () => {
       pause('p1', { target: 'other', startedAt: '2026-04-16T20:30:00Z', duration: 600 }),
       pause('p2', { startedAt: '2026-04-16T20:30:00Z', messages: 5 }),
     ])
-    expect(state.isPaused(CH, BOT, START + 60_000)).toBe(true)
+    expect(state.isPaused(CH, START + 60_000)).toBe(true)
   })
 })
 
@@ -355,14 +403,14 @@ describe('PauseState.isPaused', () => {
 describe('pause semantics: N-blocked', () => {
   it('with the loop-ordering (isPaused check BEFORE observe): N blocked, (N+1)th passes', () => {
     const connector = new FakeConnector()
-    const state = new PauseState(connector)
+    const state = new PauseState(connector, () => id(BOT))
     const START = Date.parse('2026-04-16T20:30:00Z')
     connector.set(CH, [pause('p1', { startedAt: '2026-04-16T20:30:00Z', messages: 3 })])
 
     // Simulate the loop.ts order: for each event, (1) check isPaused, (2) observeMessage.
     const passedAt: number[] = []
     for (let i = 1; i <= 5; i++) {
-      const paused = state.isPaused(CH, BOT, START + 1_000)
+      const paused = state.isPaused(CH, START + 1_000)
       state.observeMessage(CH, 'p1')
       if (!paused) passedAt.push(i)
     }

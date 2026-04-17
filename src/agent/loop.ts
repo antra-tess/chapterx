@@ -65,9 +65,9 @@ export class AgentLoop {
 
   // Pause-state (tracks `.pause` pin counters per channel/pin)
   private pauseState: PauseState
-  // Lazily-resolved canonical display name for target matching on `.pause` pins.
+  // Lazily-resolved config `name:` field for target matching on `.pause` pins.
   // Empty string = "loaded, but no name set"; undefined = "not yet loaded".
-  private botDisplayName?: string
+  private botConfigName?: string
 
   constructor(
     private botId: string,
@@ -83,20 +83,27 @@ export class AgentLoop {
     this.cacheDir = cacheDir
     this.pauseState = new PauseState(
       this.connector,
-      () => this.resolveBotDisplayName(),
+      () => this.resolveBotIdentity(),
     )
   }
 
-  private resolveBotDisplayName(): string | undefined {
-    if (this.botDisplayName === undefined) {
+  private resolveBotIdentity(): import('./pause.js').BotIdentity {
+    if (this.botConfigName === undefined) {
       try {
         const cfg = this.configSystem.loadBotConfigOnly(this.botId)
-        this.botDisplayName = typeof cfg.name === 'string' ? cfg.name : ''
+        this.botConfigName = typeof cfg.name === 'string' ? cfg.name : ''
       } catch {
-        this.botDisplayName = ''
+        this.botConfigName = ''
       }
     }
-    return this.botDisplayName || undefined
+    const discord = this.connector.getBotDiscordIdentity()
+    return {
+      botId: this.botId,
+      configName: this.botConfigName || undefined,
+      discordUserId: discord.userId,
+      discordUsername: discord.username,
+      discordGlobalName: discord.globalName,
+    }
   }
 
   /**
@@ -1030,7 +1037,7 @@ export class AgentLoop {
     // Pin IDs of pause pins applicable to this bot — iterated per non-dot event
     // for the count gate. Computed once per batch; changes in the pin set
     // between events in the same batch are picked up on the next batch.
-    const pausePinIds = this.pauseState.pausePinsForBot(channelId, this.botId)
+    const pausePinIds = this.pauseState.pausePinsForBot(channelId)
 
     // Check each message event for activation triggers
     for (const event of events) {
@@ -1060,7 +1067,7 @@ export class AgentLoop {
       // Pause gate, checked BEFORE observe so `messages: N` blocks N events
       // and the (N+1)th passes (natural reading of "pause for N messages").
       const pausedNow = pausePinIds.length > 0
-        && this.pauseState.isPaused(channelId, this.botId, Date.now())
+        && this.pauseState.isPaused(channelId, Date.now())
 
       // Count non-dot messages (any author, including this bot and other bots)
       // against every active pause pin targeting us.
