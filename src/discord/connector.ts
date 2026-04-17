@@ -1976,6 +1976,20 @@ export class DiscordConnector {
     return this.extractPausesFromTrackedPins(pins)
   }
 
+  /**
+   * Discord identity of the bot user this connector is logged in as.
+   * Returns empty fields until the `ready` event has fired.
+   */
+  getBotDiscordIdentity(): { userId?: string; username?: string; globalName?: string } {
+    const u = this.client.user
+    if (!u) return {}
+    return {
+      userId: u.id,
+      username: u.username,
+      globalName: u.globalName ?? undefined,
+    }
+  }
+
   private setupEventHandlers(): void {
     this.client.on('ready', () => {
       logger.info({ user: this.client.user?.tag }, 'Discord client ready')

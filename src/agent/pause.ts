@@ -31,6 +31,26 @@ export interface ParsedPause {
   reason?: string
 }
 
+/**
+ * All identity forms a `.pause` target may address this bot by. Any non-empty
+ * field is a valid match; case-insensitive. The parser tries each in turn, so
+ * admins can write `.pause opus47` (dir name), `.pause Opus4.7` (config name),
+ * `.pause Opus 4.7` (Discord global name, with spaces), `.pause @opus4.7`
+ * (Discord username), or `.pause <@123…>` (user-ID mention) and all resolve.
+ */
+export interface BotIdentity {
+  /** EMS directory / internal bot id — e.g. `opus47`. */
+  botId: string
+  /** Config `name:` field — e.g. `Opus4.7`. */
+  configName?: string
+  /** Discord account username — e.g. `opus4.7`. */
+  discordUsername?: string
+  /** Discord account global display name — e.g. `Opus 4.7` (with spaces). */
+  discordGlobalName?: string
+  /** Discord user ID snowflake — matches `<@id>` mentions. */
+  discordUserId?: string
+}
+
 export interface PauseConnectorLike {
   getCachedPinnedPauses(channelId: string): TrackedPin[] | null
 }
@@ -43,8 +63,7 @@ export interface PauseConnectorLike {
  */
 export function parsePauseMessage(
   content: string,
-  botName: string,
-  botDisplayName?: string,
+  identity: BotIdentity,
 ): ParsedPause | null {
   if (!content.startsWith('.pause')) return null
 
@@ -62,9 +81,17 @@ export function parsePauseMessage(
       .replace(/^<@!?([^>]+)>$/, '$1')
       .replace(/^@/, '')
       .toLowerCase()
-    const matchesBotId = stripped === botName.toLowerCase()
-    const matchesDisplayName = !!(botDisplayName && stripped === botDisplayName.toLowerCase())
-    if (!matchesBotId && !matchesDisplayName) return null
+    const candidates = [
+      identity.botId,
+      identity.configName,
+      identity.discordUsername,
+      identity.discordGlobalName,
+      identity.discordUserId,
+    ]
+    const matched = candidates.some(
+      (c) => !!c && stripped === c.toLowerCase(),
+    )
+    if (!matched) return null
   }
 
   // Parse the YAML body.
@@ -150,7 +177,7 @@ export class PauseState {
 
   constructor(
     private connector: PauseConnectorLike,
-    private getBotDisplayName: () => string | undefined = () => undefined,
+    private getBotIdentity: () => BotIdentity,
   ) {}
 
   getCount(channelId: string, pinId: string): number {
@@ -172,11 +199,12 @@ export class PauseState {
    * event. Cheap: one sync read + N small YAML parses (N ≈ number of pinned
    * pauses, usually 0 or 1).
    */
-  pausePinsForBot(channelId: string, botName: string): string[] {
+  pausePinsForBot(channelId: string): string[] {
     const pins = this.connector.getCachedPinnedPauses(channelId) ?? []
+    const identity = this.getBotIdentity()
     const out: string[] = []
     for (const pin of pins) {
-      if (parsePauseMessage(pin.content, botName, this.getBotDisplayName())) {
+      if (parsePauseMessage(pin.content, identity)) {
         out.push(pin.id)
       }
     }
@@ -184,13 +212,14 @@ export class PauseState {
   }
 
   /**
-   * Is this (channelId, botName) currently paused? True if ANY active pause
-   * pin applies to this bot.
+   * Is this channel currently paused for this bot? True if ANY active pause
+   * pin applies.
    */
-  isPaused(channelId: string, botName: string, now: number): boolean {
+  isPaused(channelId: string, now: number): boolean {
     const pins = this.connector.getCachedPinnedPauses(channelId) ?? []
+    const identity = this.getBotIdentity()
     for (const pin of pins) {
-      const parsed = parsePauseMessage(pin.content, botName, this.getBotDisplayName())
+      const parsed = parsePauseMessage(pin.content, identity)
       if (!parsed) continue
       if (isPauseActive(parsed, this.getCount(channelId, pin.id), now)) return true
     }
