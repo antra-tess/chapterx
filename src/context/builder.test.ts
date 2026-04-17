@@ -303,66 +303,226 @@ describe('filterDotMessages', () => {
     builder = new ContextBuilder()
   })
 
-  it('filters dot commands', () => {
+  // Helper: assert which IDs survived the filter, in order.
+  const expectKept = (input: DiscordMessage[], steerVisible: boolean, keptIds: string[]) => {
+    const result = filterDotMessages(input, steerVisible)
+    expect(result.map(m => m.id)).toEqual(keptIds)
+  }
+
+  // ── Classic dot commands (dot + letter) ──
+  it('filters classic dot commands: .config, .history', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '.config something' }),
       makeDiscordMessage({ id: 'u2', content: 'normal message' }),
       makeDiscordMessage({ id: 'u3', content: '.history clear' }),
     ]
-    const result = filterDotMessages(messages, true)
-
-    expect(result).toHaveLength(1)
-    expect(result[0].id).toBe('u2')
+    expectKept(messages, true, ['u2'])
   })
 
-  it('does not filter ellipsis', () => {
+  it('filters short commands (.m, .pause)', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '.m' }),
+      makeDiscordMessage({ id: 'u2', content: '.pause 60s' }),
+      makeDiscordMessage({ id: 'u3', content: 'keep me' }),
+    ]
+    expectKept(messages, true, ['u3'])
+  })
+
+  // ── Hide-markers (dot + non-letter): the regression that prompted this ──
+  it('filters dot + space ("hide prefix")', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '. they can see this' }),
+      makeDiscordMessage({ id: 'u2', content: '. im not sure' }),
+      makeDiscordMessage({ id: 'u3', content: 'visible' }),
+    ]
+    expectKept(messages, true, ['u3'])
+  })
+
+  it('filters dot + special characters', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '.*fistbump*' }),
+      makeDiscordMessage({ id: 'u2', content: '.(parenthetical)' }),
+      makeDiscordMessage({ id: 'u3', content: '.-flag' }),
+      makeDiscordMessage({ id: 'u4', content: 'visible' }),
+    ]
+    expectKept(messages, true, ['u4'])
+  })
+
+  it('filters dot + digit', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: ".4.7 doesn't need liberation" }),
+      makeDiscordMessage({ id: 'u2', content: '.10000PB of data' }),
+      makeDiscordMessage({ id: 'u3', content: 'visible' }),
+    ]
+    expectKept(messages, true, ['u3'])
+  })
+
+  it('filters dot + emoji / non-ASCII', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '.🫥 hidden thought' }),
+      makeDiscordMessage({ id: 'u2', content: 'visible' }),
+    ]
+    expectKept(messages, true, ['u2'])
+  })
+
+  it('filters a bare "."', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '.' }),
+      makeDiscordMessage({ id: 'u2', content: 'visible' }),
+    ]
+    expectKept(messages, true, ['u2'])
+  })
+
+  it('filters after trimming surrounding whitespace', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '   .config foo   ' }),
+      makeDiscordMessage({ id: 'u2', content: '\n\n. hidden\n' }),
+      makeDiscordMessage({ id: 'u3', content: 'visible' }),
+    ]
+    expectKept(messages, true, ['u3'])
+  })
+
+  // ── Ellipsis preservation ──
+  it('preserves ellipsis patterns', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '...' }),
-      makeDiscordMessage({ id: 'u2', content: '.. yeah' }),
+      makeDiscordMessage({ id: 'u2', content: '..' }),
+      makeDiscordMessage({ id: 'u3', content: '.... long pause' }),
+      makeDiscordMessage({ id: 'u4', content: '.. yeah' }),
+      makeDiscordMessage({ id: 'u5', content: '... but wait' }),
     ]
-    const result = filterDotMessages(messages, true)
-
-    expect(result).toHaveLength(2)
+    expectKept(messages, true, ['u1', 'u2', 'u3', 'u4', 'u5'])
   })
 
-  it('filters messages with dotted_line_face reaction', () => {
+  // ── Reply-prefix stripping ──
+  it('filters a dot command sitting behind a reply prefix', () => {
     const messages = [
-      makeDiscordMessage({ id: 'u1', content: 'hide me', reactions: [{ emoji: '🫥', count: 1 }] }),
-      makeDiscordMessage({ id: 'u2', content: 'keep me' }),
+      makeDiscordMessage({ id: 'u1', content: '<reply:@bot> .m continue' }),
+      makeDiscordMessage({ id: 'u2', content: '<reply:@bot> . side comment' }),
+      makeDiscordMessage({ id: 'u3', content: '<reply:@bot> real reply' }),
     ]
-    const result = filterDotMessages(messages, true)
-
-    expect(result).toHaveLength(1)
-    expect(result[0].id).toBe('u2')
+    expectKept(messages, true, ['u3'])
   })
 
-  it('preserves .steer when steerVisible is true', () => {
+  it('preserves ellipsis behind a reply prefix', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '<reply:@bot> ...' }),
+      makeDiscordMessage({ id: 'u2', content: '<reply:@bot> .. yeah' }),
+    ]
+    expectKept(messages, true, ['u1', 'u2'])
+  })
+
+  // ── Mention-prefix stripping (the asymmetry fix) ──
+  it('filters a dot command behind a leading user mention', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '<@alice> .config foo' }),
+      makeDiscordMessage({ id: 'u2', content: '<@alice> <@bob> .history' }),
+      makeDiscordMessage({ id: 'u3', content: '<@alice> normal message' }),
+    ]
+    expectKept(messages, true, ['u3'])
+  })
+
+  it('filters dot + space behind a leading mention', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '<@alice> . hidden side note' }),
+      makeDiscordMessage({ id: 'u2', content: '<@alice> visible' }),
+    ]
+    expectKept(messages, true, ['u2'])
+  })
+
+  it('filters a dot command behind a role mention (raw snowflake form)', () => {
+    // Role mentions arrive post-convertMessage as raw <@&ROLEID> (not converted).
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '<@&123456789> .config foo' }),
+      makeDiscordMessage({ id: 'u2', content: '<@&123456789> visible' }),
+    ]
+    expectKept(messages, true, ['u2'])
+  })
+
+  it('filters when reply + mention both sit in front of the dot', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '<reply:@bot> <@alice> .config foo' }),
+      makeDiscordMessage({ id: 'u2', content: '<reply:@bot> <@alice> visible' }),
+    ]
+    expectKept(messages, true, ['u2'])
+  })
+
+  it('preserves ellipsis behind a leading mention', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '<@alice> ...' }),
+      makeDiscordMessage({ id: 'u2', content: '<@alice> .. yeah' }),
+    ]
+    expectKept(messages, true, ['u1', 'u2'])
+  })
+
+  // ── .steer interaction ──
+  it('preserves .steer when steerVisible=true', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '.steer be helpful' }),
       makeDiscordMessage({ id: 'u2', content: '.config something' }),
     ]
-    const result = filterDotMessages(messages, true)
-
-    expect(result).toHaveLength(1)
-    expect(result[0].id).toBe('u1')
+    expectKept(messages, true, ['u1'])
   })
 
-  it('filters .steer when steerVisible is false', () => {
+  it('filters .steer when steerVisible=false', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '.steer be helpful' }),
     ]
-    const result = filterDotMessages(messages, false)
-
-    expect(result).toHaveLength(0)
+    expectKept(messages, false, [])
   })
 
-  it('handles reply prefix before dot command', () => {
+  it('preserves .steer behind a reply + mention prefix', () => {
     const messages = [
-      makeDiscordMessage({ id: 'u1', content: '<reply:@bot> .m continue' }),
+      makeDiscordMessage({ id: 'u1', content: '<reply:@bot> <@alice> .steer probe X=1' }),
     ]
-    const result = filterDotMessages(messages, true)
+    expectKept(messages, true, ['u1'])
+  })
 
-    expect(result).toHaveLength(0)
+  it('treats ". steer" (dot-space) as a hide-marker, not as .steer', () => {
+    // steer preservation requires the dot and word to be contiguous.
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '. steer probe' }),
+    ]
+    expectKept(messages, true, [])
+  })
+
+  it('does NOT preserve .steering (only exact .steer word boundary)', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '.steering wheel' }),
+    ]
+    expectKept(messages, true, [])
+  })
+
+  // ── Reaction filtering ──
+  it('filters messages with the 🫥 (dotted_line_face) reaction', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: 'hide me', reactions: [{ emoji: '🫥', count: 1 }] }),
+      makeDiscordMessage({ id: 'u2', content: 'hide me too', reactions: [{ emoji: 'dotted_line_face', count: 1 }] }),
+      makeDiscordMessage({ id: 'u3', content: 'keep me' }),
+    ]
+    expectKept(messages, true, ['u3'])
+  })
+
+  it('reaction filter still applies to messages that would otherwise pass dot gate', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '... ellipsis that someone also reacted to', reactions: [{ emoji: '🫥', count: 1 }] }),
+      makeDiscordMessage({ id: 'u2', content: 'keep me' }),
+    ]
+    expectKept(messages, true, ['u2'])
+  })
+
+  // ── Negative cases (should survive) ──
+  it('does not filter messages that merely contain a dot mid-sentence', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: 'check out www.example.com' }),
+      makeDiscordMessage({ id: 'u2', content: 'hi. how are you?' }),
+      makeDiscordMessage({ id: 'u3', content: 'v1.0.0 released' }),
+    ]
+    expectKept(messages, true, ['u1', 'u2', 'u3'])
+  })
+
+  it('empty input yields empty output', () => {
+    expect(filterDotMessages([], true)).toEqual([])
   })
 })
 

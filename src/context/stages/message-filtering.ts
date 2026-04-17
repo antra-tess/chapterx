@@ -54,17 +54,22 @@ export function mergeConsecutiveBotMessages(
 /**
  * Filter dot commands and reaction-hidden messages from context.
  *
- * Dot commands: period followed by a letter (.config, .history, .m, etc.)
- * Does NOT match ellipsis (... or ..) which users type normally.
+ * Dot prefix: any `.` not immediately followed by another `.`. Covers real
+ * commands (`.config`) and hide-markers (`. side comment`, `.*bit*`, `.4.7`).
+ * Ellipsis (`..`, `...`) is preserved because the second dot breaks the match.
+ * Reply (`<reply:@user>`) and leading mentions (`<@name>`, `<@&role>`) are
+ * stripped first so `<@alice> .config` still filters.
+ *
  * .steer is preserved when steerVisible is true.
  *
  * Also filters messages with the 🫥 (dotted_line_face) reaction.
  */
 export function filterDotMessages(messages: DiscordMessage[], steerVisible: boolean = true): DiscordMessage[] {
   return messages.filter((msg) => {
-    // Filter dot commands (after stripping reply prefix)
-    const contentWithoutReply = msg.content.trim().replace(/^<reply:@[^>]+>\s*/, '')
-    if (/^\.[a-zA-Z]/.test(contentWithoutReply) && !(steerVisible && /^\.steer\b/.test(contentWithoutReply))) {
+    const stripped = msg.content.trim()
+      .replace(/^<reply:@[^>]+>\s*/, '')
+      .replace(/^(<@[^>]+>\s*)+/, '')
+    if (/^\.(?!\.)/.test(stripped) && !(steerVisible && /^\.steer\b/.test(stripped))) {
       return false
     }
     // Filter messages with dotted_line_face reaction (🫥)

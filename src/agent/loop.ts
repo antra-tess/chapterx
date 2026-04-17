@@ -1166,13 +1166,15 @@ export class AgentLoop {
 
       // Classify content up-front: both the pause-observe path and the
       // existing activation skip-dot below reuse this.
-      // Strip leading Discord mentions (<@userId>) and ChapterX reply tags
-      // (<reply:@...>) so ".test @bot" is caught regardless of mention position.
+      // Strip leading Discord mentions (user `<@id>` / `<@!id>` and role
+      // `<@&id>`) and ChapterX reply tags (<reply:@...>) so "<@bot> . text"
+      // and "<@&role> .config" are both caught. Dot predicate: any `.` not
+      // followed by another `.` (preserves `..` / `...` ellipsis).
       const content = message.content?.trim()
       const contentForDotCheck = content
-        ?.replace(/^(<@!?\d+>\s*)+/, '')    // Strip leading Discord mentions
+        ?.replace(/^(<@[!&]?\d+>\s*)+/, '') // Strip leading Discord mentions (user + role)
         ?.replace(/^<reply:@[^>]+>\s*/, '') // Strip ChapterX reply prefix
-      const isDotMessage = !!(contentForDotCheck && /^\.[a-zA-Z]/.test(contentForDotCheck))
+      const isDotMessage = !!(contentForDotCheck && /^\.(?!\.)/.test(contentForDotCheck))
 
       // Pause gate, checked BEFORE observe so `messages: N` blocks N events
       // and the (N+1)th passes (natural reading of "pause for N messages").
