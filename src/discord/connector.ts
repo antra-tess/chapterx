@@ -1651,6 +1651,18 @@ export class DiscordConnector {
     }
   }
 
+  async getMessageBefore(channelId: string, beforeMessageId: string): Promise<Message | null> {
+    try {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+      if (!channel || !channel.isTextBased()) return null
+      const fetched = await channel.messages.fetch({ limit: 1, before: beforeMessageId })
+      return fetched.first() ?? null
+    } catch (error) {
+      logger.warn({ error, channelId, beforeMessageId }, 'Failed to fetch message before')
+      return null
+    }
+  }
+
   /**
    * Close the Discord client
    */

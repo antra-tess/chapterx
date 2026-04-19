@@ -206,7 +206,8 @@ export interface BotConfig {
   llm_retries: number
   discord_backoff_max: number
   deferred_retries: boolean
-  
+  supports_continuation?: boolean  // If false, reject m continue when last message is bot's own (default: true)
+
   // Misc
   system_prompt?: string
   system_prompt_file?: string  // Path to file containing system prompt (relative to config dir)

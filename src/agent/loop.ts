@@ -516,9 +516,10 @@ export class AgentLoop {
     if (mCommandEvent) {
       const message = mCommandEvent.data as any
 
-      // Before deleting, check if this is a chat-mode bot that can't handle m continue.
-      // Chat-mode bots don't support prefill, so the conversation can't end with an
-      // assistant turn — which is what m continue produces after stripping the empty completion.
+      // Check if this bot supports continuation when the last message is its own.
+      // Models that can't handle consecutive assistant turns (e.g. Opus 4.x native)
+      // set supports_continuation: false — we reject only when the last real message
+      // is from the bot itself. If someone else spoke last, no prefill is needed.
       try {
         const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
         const modeCheckConfig = this.configSystem.loadConfig({
@@ -526,18 +527,19 @@ export class AgentLoop {
           guildId,
           channelConfigs: pinnedConfigs,
         })
-        if (modeCheckConfig.mode === 'chat') {
-          logger.info({ channelId, botId: this.botId, mode: 'chat' },
-            'm continue rejected — chat-mode bots do not support continuation')
-          // Delete the m command immediately, then react to whatever is now the latest message
-          await this.connector.deleteMessage(channelId, message.id)
-            .catch((err: any) => logger.debug({ error: err.message }, 'Failed to delete rejected m continue'))
-          await this.connector.reactToLatestMessage(channelId, '🚫')
-          return
+        if (modeCheckConfig.supports_continuation === false) {
+          const lastMsg = await this.connector.getMessageBefore(channelId, message.id)
+          if (lastMsg && lastMsg.author.id === this.botUserId) {
+            logger.info({ channelId, botId: this.botId, lastMessageAuthor: lastMsg.author.id },
+              'm continue rejected — bot does not support continuation and last message is its own')
+            await this.connector.deleteMessage(channelId, message.id)
+              .catch((err: any) => logger.debug({ error: err.message }, 'Failed to delete rejected m continue'))
+            await this.connector.reactToLatestMessage(channelId, '🚫')
+            return
+          }
         }
       } catch (error: any) {
-        // Config load failure — allow activation to proceed (fail-open)
-        logger.warn({ error: error.message }, 'Failed to check mode for m continue — proceeding')
+        logger.warn({ error: error.message }, 'Failed to check continuation support for m continue — proceeding')
       }
 
       // Delete the m command message
