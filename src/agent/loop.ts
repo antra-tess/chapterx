@@ -10,7 +10,7 @@ import { DiscordConnector } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { ToolSystem } from '../tools/system.js'
-import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult } from '../types.js'
+import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult, VendorConfig } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { sleep } from '../utils/retry.js'
 import { 
@@ -29,6 +29,8 @@ import { SomaClient, shouldChargeTrigger, SomaTriggerType } from '../soma/index.
 import { MembraneProvider } from '../llm/membrane/index.js'
 import { resolveToolModeForModel } from '../llm/membrane/adapter.js'
 import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
+import { parseSteerMessage, isSteerMessage, loadCatalog, resolveDirective, toProviderParams, formatReadout, listAvailableLabels, resolveVendorForModel, fetchProbeReadout, fetchProxyReadout } from '../steering/index.js'
+import type { ChannelSteering } from '../steering/index.js'
 import { PauseState } from './pause.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
@@ -59,6 +61,8 @@ export class AgentLoop {
 
   // TTS relay integration (optional)
   private ttsRelayClient?: TTSRelayClient
+
+  private vendorConfigs: Record<string, VendorConfig> = {}
 
   // Deferred activation queue for transient API errors
   private deferredQueue?: DeferredQueue
@@ -114,6 +118,13 @@ export class AgentLoop {
     logger.info({ botUserId: userId }, 'Bot user ID set')
   }
   
+  /**
+   * Set vendor configs for direct API calls (e.g., /v1/encode for probe readouts)
+   */
+  setVendorConfigs(vendors: Record<string, VendorConfig>): void {
+    this.vendorConfigs = vendors
+  }
+
   /**
    * Set membrane instance for LLM calls (required)
    */
@@ -927,6 +938,114 @@ export class AgentLoop {
     return mergedConfigs
   }
 
+  private async collectPinnedSteersWithInheritance(
+    channelId: string,
+    baseSteers: Array<{ content: string; authorId: string }>
+  ): Promise<Array<{ content: string; authorId: string }>> {
+    const mergedSteers: Array<{ content: string; authorId: string }> = []
+    const parentChain = await this.buildParentChannelChain(channelId)
+    const seen = new Set<string>([channelId])
+
+    for (const ancestorId of parentChain) {
+      if (seen.has(ancestorId)) {
+        continue
+      }
+      seen.add(ancestorId)
+      const ancestorSteers = await this.connector.fetchPinnedSteerMessages(ancestorId)
+      if (ancestorSteers.length > 0) {
+        mergedSteers.push(...ancestorSteers)
+      }
+    }
+
+    mergedSteers.push(...baseSteers)
+    return mergedSteers
+  }
+
+  /**
+   * Resolve steer messages into a ChannelSteering object (stateless, like config loading).
+   * Merges directives across all messages: later messages override same-key directives.
+   * `.steer clear` resets accumulated directives from earlier pins.
+   */
+  private resolveSteerMessages(
+    steerMessages: Array<{ content: string; authorId: string }>,
+    config: BotConfig,
+  ): ChannelSteering | null {
+    const botDiscordUsername = this.connector.getBotUsername()
+    const matchesBot = (t: string) => {
+      const tl = t.toLowerCase()
+      return tl === config.name.toLowerCase()
+        || tl === this.botId.toLowerCase()
+        || (botDiscordUsername != null && tl === botDiscordUsername.toLowerCase())
+    }
+
+    // Accumulate directives across all matching steer messages (merge, not replace)
+    let mergedDirectives: Record<string, number> = {}
+    let mergedReadoutProbes: string[] = []
+    let lastSetBy = ''
+
+    for (const { content, authorId } of steerMessages) {
+      const result = parseSteerMessage(content)
+      if (!result.ok) {
+        logger.debug({ error: result.error, content: content.slice(0, 80) }, 'Steer parse failed')
+        continue
+      }
+
+      // .steer clear — reset accumulated directives
+      if ('clear' in result) {
+        if (matchesBot(result.target)) {
+          mergedDirectives = {}
+          mergedReadoutProbes = []
+          logger.info({ clearedBy: authorId }, 'Steering cleared via pinned .steer clear')
+        }
+        continue
+      }
+
+      const parsed = result.data
+      if (!matchesBot(parsed.target)) {
+        continue
+      }
+
+      // Merge directives (later wins for same key)
+      for (const [key, value] of Object.entries(parsed.directives)) {
+        mergedDirectives[key] = value
+      }
+
+      mergedReadoutProbes.push(...parsed.readout_probes)
+      lastSetBy = authorId
+    }
+
+    if (Object.keys(mergedDirectives).length === 0) {
+      return null
+    }
+
+    // Resolve merged directives against the probe catalog
+    const catalog = loadCatalog(config.continuation_model)
+    if (!catalog) {
+      logger.warn({ model: config.continuation_model }, 'No probe catalog for model — .steer ignored')
+      return null
+    }
+
+    const { interventions, errors } = resolveDirective(catalog, mergedDirectives)
+    if (errors.length > 0) {
+      logger.warn({ errors, available: listAvailableLabels(catalog).length }, 'Some .steer labels could not be resolved')
+    }
+
+    if (interventions.length === 0) {
+      return null
+    }
+
+    // Derive readout probes from resolved interventions (accurate set names)
+    const resolvedProbes = [...new Set(interventions.map(i => i.probe))]
+
+    return {
+      interventions,
+      readout_probes: resolvedProbes.length > 0 ? resolvedProbes : [...new Set(mergedReadoutProbes)],
+      updated_at: new Date().toISOString(),
+      set_by: lastSetBy,
+      model: config.continuation_model,
+    }
+  }
+
   private async buildParentChannelChain(channelId: string, maxDepth: number = 10): Promise<string[]> {
     const chain: string[] = []
     const visited = new Set<string>([channelId])
@@ -1280,59 +1399,48 @@ export class AgentLoop {
       endProfile('fetchContext')
 
       // Cache stability: maintain a consistent starting point for prompt caching
-      // Skip if prompt caching is disabled
+      // Note: fetch overshoot trimming is now handled in fetchContext Stage 3.
+      // This block only handles anchor initialization, resets, and expansion.
       if (promptCachingEnabled) {
         const cacheOldestId = state.cacheOldestMessageId
         const fetchedOldestId = discordContext.messages[0]?.id
 
-        // If .history clear was used, reset cache marker to the new oldest message
-        // This prevents the next activation from extending backwards past the clear boundary
         if (discordContext.inheritanceInfo?.historyDidClear && fetchedOldestId) {
+          // .history clear → reset anchor to the new context boundary
           logger.debug({
             oldCacheMarker: cacheOldestId,
             newCacheMarker: fetchedOldestId,
-          }, 'Resetting cache marker after .history clear')
+          }, 'Resetting cache anchor after .history clear')
           this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
         } else if (!cacheOldestId && fetchedOldestId) {
-          // First activation - set cache marker to oldest fetched message
+          // First activation → initialize anchor
           this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
-          logger.debug({ channelId, oldestMessageId: fetchedOldestId }, 'Initialized cached starting point for cache stability')
+          logger.debug({ channelId, oldestMessageId: fetchedOldestId }, 'Initialized cache anchor for prompt stability')
         } else if (cacheOldestId && fetchedOldestId) {
           const cacheIdx = discordContext.messages.findIndex(m => m.id === cacheOldestId)
-          const historyWasUsed = !!discordContext.inheritanceInfo?.historyOriginChannelId
-          
-          if (cacheIdx > 0 && historyWasUsed) {
-            // .history command brought in older context - expand cache marker to include it
-            // This is expected behavior: .history intentionally loads historical messages
+
+          if (cacheIdx > 0) {
+            // Context is older than anchor — .history brought in historical messages.
+            // (Non-.history overshoot was already trimmed by fetchContext Stage 3.)
+            // Expand anchor to include the new older context.
             logger.debug({
               oldCacheMarker: cacheOldestId,
               newCacheMarker: fetchedOldestId,
               olderMessagesIncluded: cacheIdx,
-              historyOrigin: discordContext.inheritanceInfo?.historyOriginChannelId,
-            }, 'Expanding cache marker to include .history context')
+            }, 'Expanding cache anchor to include .history context')
             this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
-          } else if (cacheIdx > 0) {
-            // No .history used, but fetch overshot - trim older messages for cache stability
-            // This is overshoot from connector's batch fetching, not intentional context expansion
-            logger.debug({
-              cacheMarker: cacheOldestId,
-              fetchedOldest: fetchedOldestId,
-              trimmingCount: cacheIdx,
-              totalBefore: discordContext.messages.length,
-            }, 'Trimming fetch overshoot to maintain cache stability')
-            discordContext.messages = discordContext.messages.slice(cacheIdx)
           } else if (cacheIdx === -1) {
-            // Cached oldest message no longer in fetch - cache stability is broken
+            // Anchor message deleted or out of range → reset
             logger.warn({
               cacheOldestId,
               fetchedMessages: discordContext.messages.length,
-            }, 'Cached oldest message not found in fetch - resetting cached starting point')
+            }, 'Cache anchor not found in fetch — resetting')
             this.stateManager.updateCacheOldestMessageId(this.botId, channelId, fetchedOldestId)
           }
-          // If cacheIdx === 0, the cache marker is at the start - perfect, no action needed
+          // cacheIdx === 0 → perfect alignment, no action needed
         }
       } else {
-        logger.debug({ channelId }, 'Prompt caching disabled - skipping cache marker logic')
+        logger.debug({ channelId }, 'Prompt caching disabled — skipping cache anchor logic')
       }
       
       // Record raw Discord messages to trace (before any transformation)
@@ -1366,7 +1474,51 @@ export class AgentLoop {
         channelConfigs: inheritedPinnedConfigs,
       })
       endProfile('configLoad')
-      
+
+      // 4.5. Load steering from pinned .steer messages (stateless, like .config)
+      startProfile('steerLoad')
+
+      // Fetch pinned steers for current channel (cached) + inherit from parent chain
+      const pinnedSteers = await this.connector.fetchPinnedSteerMessages(channelId)
+      const inheritedSteers = await this.collectPinnedSteersWithInheritance(channelId, pinnedSteers)
+
+      // Filter by steer_roles (async role lookups)
+      const authorizedSteers: Array<{ content: string; authorId: string }> = []
+      for (const steer of inheritedSteers) {
+        if (config.steer_roles && config.steer_roles.length > 0) {
+          const roles = await this.connector.fetchMemberRoles(steer.authorId, guildId) ?? undefined
+          if (!roles) {
+            logger.debug({ authorId: steer.authorId, guildId }, 'Steer role check: could not fetch member roles — skipping')
+            continue
+          }
+          if (!config.steer_roles.some(r => roles.some(role => role.toLowerCase() === r.toLowerCase()))) {
+            logger.debug({ authorId: steer.authorId, roles, required: config.steer_roles }, 'Steer role check failed — skipping')
+            continue
+          }
+        }
+        authorizedSteers.push(steer)
+      }
+
+      // Resolve all authorized steer messages into a single ChannelSteering (merged)
+      const activeSteering = this.resolveSteerMessages(authorizedSteers, config)
+
+      if (activeSteering && activeSteering.interventions.length > 0) {
+        const steeringParams = toProviderParams(activeSteering)
+        config.provider_params = {
+          ...config.provider_params,
+          ...steeringParams,
+        }
+        logger.info({
+          channelId,
+          interventions: activeSteering.interventions.length,
+          probes: activeSteering.readout_probes,
+        }, 'Injected steering into provider_params')
+      } else {
+        logger.debug({ channelId }, 'No active steering for this channel')
+      }
+
+      endProfile('steerLoad')
+
       // Record config in trace (for debugging)
       traceSetConfig(config)
 
@@ -1719,6 +1871,64 @@ export class AgentLoop {
         messageContexts: inlineMessageContexts
       } = executionResult
       endProfile('llmCall')
+
+      // 6.5. Send steering readout if active and opted in
+      if (activeSteering && config.steer_readout === true) {
+        try {
+          const credentials = resolveVendorForModel(config.continuation_model, this.vendorConfigs)
+          if (!credentials) {
+            logger.debug({ model: config.continuation_model }, 'Readout skipped: no vendor credentials resolved')
+          }
+          let readoutResponse: Record<string, unknown> = {}
+
+          if (credentials) {
+            const completionId = (completion.raw as Record<string, unknown>)?.id as string | undefined
+              || (completion as Record<string, unknown>).id as string | undefined
+
+            if (!completionId) {
+              logger.debug('Readout skipped: no completion ID in LLM response')
+            }
+
+            if (completionId) {
+              logger.debug({ completionId }, 'Fetching steering readout from proxy')
+              const proxyData = await fetchProxyReadout(completionId, credentials)
+              if (!proxyData) {
+                logger.debug({ completionId }, 'Readout: proxy returned no data (404 or timeout)')
+              }
+              if (proxyData) {
+                readoutResponse.intervention_applied = proxyData.intervention_applied
+                readoutResponse.probe_status = proxyData.probe_status
+                readoutResponse.response_token_ids = proxyData.response_token_ids
+
+                if (proxyData.response_token_ids && proxyData.response_token_ids.length > 0 && activeSteering.readout_probes.length > 0) {
+                  const encodeResult = await fetchProbeReadout(
+                    proxyData.response_token_ids,
+                    activeSteering.readout_probes,
+                    config.continuation_model,
+                    credentials,
+                  )
+                  if (encodeResult) {
+                    readoutResponse.token_probes = encodeResult.token_probes
+                    readoutResponse.probe_names = encodeResult.probe_names
+                    readoutResponse.probe_status = 'complete'
+                  }
+                }
+              }
+            }
+          }
+
+          const readout = formatReadout(readoutResponse, activeSteering)
+          if (readout) {
+            await this.connector.sendMessageWithAttachment(
+              channelId,
+              '.steer-readout',
+              { name: 'steering-readout.txt', content: readout }
+            )
+          }
+        } catch (err) {
+          logger.warn({ err }, 'Failed to send steering readout')
+        }
+      }
 
       // 7. Stop typing
       await this.connector.stopTyping(channelId)
@@ -3446,7 +3656,7 @@ export class AgentLoop {
           .filter((c: any) => c.type === 'text')
           .map((c: any) => c.text)
           .join('')
-      
+
       accumulatedText += continuationText
       lastCompletion = continuation
       

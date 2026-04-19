@@ -141,7 +141,9 @@ export class ConfigSystem {
       const config = YAML.parse(yamlString) || {}
 
       // Match target against botId (e.g. "haiku45") or display name (e.g. "Haiku"), case-insensitive
-      const target = config.target?.toLowerCase()
+      // Strip Discord mention syntax: <@username> → username, <@!id> → id
+      const rawTarget = config.target ? String(config.target).replace(/^<@!?([^>]+)>$/, '$1') : undefined
+      const target = rawTarget?.toLowerCase()
       const matchesBotId = target === botName.toLowerCase()
       const matchesDisplayName = botDisplayName && target === botDisplayName.toLowerCase()
       const targetMatches = !config.target || matchesBotId || matchesDisplayName
@@ -278,6 +280,9 @@ export class ConfigSystem {
       rolling_threshold: config.rolling_threshold || 50,
       recent_participant_count: config.recent_participant_count || 10,
       authorized_roles: config.authorized_roles || [],
+      steer_roles: config.steer_roles,
+      steer_visible: config.steer_visible === true,  // Default: false (opt-in)
+      steer_readout: config.steer_readout === true,  // Default: false (opt-in)
       prompt_caching: config.prompt_caching !== false,  // Default: true
       cache_ttl: config.cache_ttl,  // Optional: '5m' (default) or '1h' (extended Anthropic caching)
 

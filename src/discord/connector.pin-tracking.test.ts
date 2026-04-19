@@ -23,6 +23,7 @@ import { EventQueue } from '../agent/event-queue.js'
 
 const CH = '100000000000000001'
 const USER = '700000000000000001'
+const BOT = '700000000000000099'
 
 type Harness = {
   connector: DiscordConnector
@@ -155,7 +156,7 @@ describe('pin tracking: messageDelete', () => {
 })
 
 // ────────────────────────────────────────────────────────────────────────────
-// Read path: fetchPinnedConfigs
+// Read path: fetchPinnedConfigs / fetchPinnedSteerMessages
 // ────────────────────────────────────────────────────────────────────────────
 
 describe('fetchPinnedConfigs', () => {
@@ -172,6 +173,7 @@ describe('fetchPinnedConfigs', () => {
   it('returns only .config entries, parsed via extractConfigs', async () => {
     h.client.emit('messageUpdate', fakeMsg({ id: '1', content: 'hello', pinned: false }), fakeMsg({ id: '1', content: 'hello', pinned: true }))
     h.client.emit('messageUpdate', fakeMsg({ id: '2', content: '.config\n---\na: 1', pinned: false }), fakeMsg({ id: '2', content: '.config\n---\na: 1', pinned: true }))
+    h.client.emit('messageUpdate', fakeMsg({ id: '3', content: '.steer foo', pinned: false }), fakeMsg({ id: '3', content: '.steer foo', pinned: true }))
     const configs = await h.connector.fetchPinnedConfigs(CH)
     expect(configs).toEqual(['a: 1'])
   })
@@ -202,5 +204,24 @@ describe('fetchPinnedConfigs', () => {
     spy.mockClear()
     await h.connector.fetchPinnedConfigs(CH)
     expect(spy).not.toHaveBeenCalled()
+  })
+})
+
+describe('fetchPinnedSteerMessages', () => {
+  let h: Harness
+  beforeEach(() => {
+    h = makeHarness()
+    ;(h.connector as any).bootstrapChannelPins = vi.fn(async () => {
+      (h.connector as any).pinnedByChannel.set(CH, new Map())
+    })
+  })
+  afterEach(() => h.cleanup())
+
+  it('returns only non-bot-authored .steer entries', async () => {
+    h.client.emit('messageUpdate', fakeMsg({ id: '1', content: '.steer human', pinned: false, authorId: USER, authorBot: false }), fakeMsg({ id: '1', content: '.steer human', pinned: true, authorId: USER, authorBot: false }))
+    h.client.emit('messageUpdate', fakeMsg({ id: '2', content: '.steer bot', pinned: false, authorId: BOT, authorBot: true }), fakeMsg({ id: '2', content: '.steer bot', pinned: true, authorId: BOT, authorBot: true }))
+    h.client.emit('messageUpdate', fakeMsg({ id: '3', content: '.config\n---\na: 1', pinned: false }), fakeMsg({ id: '3', content: '.config\n---\na: 1', pinned: true }))
+    const steers = await h.connector.fetchPinnedSteerMessages(CH)
+    expect(steers).toEqual([{ content: '.steer human', authorId: USER }])
   })
 })
