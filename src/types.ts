@@ -299,6 +299,8 @@ export interface VendorConfig {
     name_format?: string
     /** Message separator (default: '\n\n') */
     message_separator?: string
+    /** Add lowercased stop sequence variants to catch mixed-case simming (default: false) */
+    case_insensitive_stops?: boolean
   }
 }
 

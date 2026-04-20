@@ -225,6 +225,7 @@ export interface MembraneFactoryConfig {
     eotToken?: string;
     nameFormat?: string;
     messageSeparator?: string;
+    caseInsensitiveStops?: boolean;
   };
 
   /**
@@ -888,6 +889,7 @@ function createFormatter(config: MembraneFactoryConfig): PrefillFormatter {
         eotToken: config.completionsConfig?.eotToken,
         nameFormat: config.completionsConfig?.nameFormat,
         messageSeparator: config.completionsConfig?.messageSeparator,
+        caseInsensitiveStops: config.completionsConfig?.caseInsensitiveStops,
         maxParticipantsForStop: config.maxParticipantsForStop,
       });
 
@@ -926,6 +928,7 @@ export interface VendorConfigInput {
     eot_token?: string;
     name_format?: string;
     message_separator?: string;
+    case_insensitive_stops?: boolean;
   };
 }
 
@@ -981,6 +984,7 @@ export function createMembraneFromVendorConfigs(
         eotToken: vendorConfig.completions_config.eot_token,
         nameFormat: vendorConfig.completions_config.name_format,
         messageSeparator: vendorConfig.completions_config.message_separator,
+        caseInsensitiveStops: vendorConfig.completions_config.case_insensitive_stops,
       };
       logger.debug({ vendorName, completionsConfig: detectedCompletionsConfig }, 'Using completions config from vendor');
     }
