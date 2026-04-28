@@ -31,7 +31,7 @@ import { resolveToolModeForModel } from '../llm/membrane/adapter.js'
 import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
 import { parseSteerMessage, isSteerMessage, loadCatalog, resolveDirective, toProviderParams, formatReadout, listAvailableLabels, resolveVendorForModel, fetchProbeReadout, fetchProxyReadout } from '../steering/index.js'
 import type { ChannelSteering } from '../steering/index.js'
-import { PauseState } from './pause.js'
+import { SleepState } from './sleep.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
 type Membrane = any
@@ -67,9 +67,9 @@ export class AgentLoop {
   // Deferred activation queue for transient API errors
   private deferredQueue?: DeferredQueue
 
-  // Pause-state (tracks `.pause` pin counters per channel/pin)
-  private pauseState: PauseState
-  // Lazily-resolved config `name:` field for target matching on `.pause` pins.
+  // Sleep-state (tracks `.sleep` pin counters per channel/pin)
+  private sleepState: SleepState
+  // Lazily-resolved config `name:` field for target matching on `.sleep` pins.
   // Empty string = "loaded, but no name set"; undefined = "not yet loaded".
   private botConfigName?: string
 
@@ -85,13 +85,13 @@ export class AgentLoop {
   ) {
     this.activationStore = new ActivationStore(cacheDir)
     this.cacheDir = cacheDir
-    this.pauseState = new PauseState(
+    this.sleepState = new SleepState(
       this.connector,
       () => this.resolveBotIdentity(),
     )
   }
 
-  private resolveBotIdentity(): import('./pause.js').BotIdentity {
+  private resolveBotIdentity(): import('./sleep.js').BotIdentity {
     if (this.botConfigName === undefined) {
       try {
         const cfg = this.configSystem.loadBotConfigOnly(this.botId)
@@ -1110,9 +1110,9 @@ export class AgentLoop {
   private async shouldActivate(events: Event[], channelId: string, guildId: string): Promise<boolean> {
     // Self_activation events (timer fires + deferred-retry fires) are handled
     // inside the main event loop below rather than as an early exit, so they
-    // also respect the pause gate. A paused channel should stay quiet
+    // also respect the sleep gate. A sleeping channel should stay quiet
     // regardless of what triggered the activation — a user who pinned
-    // `.pause` does not want the bot to speak because a timer went off.
+    // `.sleep` does not want the bot to speak because a timer went off.
 
     // Use cached pin configs if available (populated by previous handleActivation calls),
     // otherwise fall back to base config (shared + guild + bot YAML, no channel overrides).
@@ -1165,27 +1165,27 @@ export class AgentLoop {
       }
     }
 
-    // Pin IDs of pause pins applicable to this bot — iterated per non-dot event
+    // Pin IDs of sleep pins applicable to this bot — iterated per non-dot event
     // for the count gate. Computed once per batch; changes in the pin set
     // between events in the same batch are picked up on the next batch.
-    const pausePinIds = this.pauseState.pausePinsForBot(channelId)
+    const sleepPinIds = this.sleepState.sleepPinsForBot(channelId)
 
-    // Check each event for activation triggers. Pause gate covers all event
-    // types — message, timer self_activation, deferred retry — so a paused
+    // Check each event for activation triggers. Sleep gate covers all event
+    // types — message, timer self_activation, deferred retry — so a sleeping
     // channel never fires regardless of trigger.
     for (const event of events) {
       if (event.type === 'self_activation') {
-        // Timer / deferred-retry. Honor pause (but don't tick the counter —
+        // Timer / deferred-retry. Honor sleep (but don't tick the counter —
         // timers don't count toward `messages: N`).
-        const pausedNow = pausePinIds.length > 0
-          && this.pauseState.isPaused(channelId, Date.now())
-        if (pausedNow) {
+        const sleepingNow = sleepPinIds.length > 0
+          && this.sleepState.isSleeping(channelId, Date.now())
+        if (sleepingNow) {
           logger.debug({
             channelId,
             botId: this.botId,
             timerId: event.data?.timerId,
             deferredType: event.data?.type,
-          }, 'Skipping self_activation — bot is paused')
+          }, 'Skipping self_activation — bot is sleeping')
           continue
         }
         logger.info({
@@ -1207,7 +1207,7 @@ export class AgentLoop {
         continue
       }
 
-      // Classify content up-front: both the pause-observe path and the
+      // Classify content up-front: both the sleep-observe path and the
       // existing activation skip-dot below reuse this.
       // Strip leading Discord mentions (user `<@id>` / `<@!id>` and role
       // `<@&id>`) and ChapterX reply tags (<reply:@...>) so "<@bot> . text"
@@ -1219,25 +1219,25 @@ export class AgentLoop {
         ?.replace(/^<reply:@[^>]+>\s*/, '') // Strip ChapterX reply prefix
       const isDotMessage = !!(contentForDotCheck && /^\.(?!\.)/.test(contentForDotCheck))
 
-      // Pause gate, checked BEFORE observe so `messages: N` blocks N events
-      // and the (N+1)th passes (natural reading of "pause for N messages").
-      const pausedNow = pausePinIds.length > 0
-        && this.pauseState.isPaused(channelId, Date.now())
+      // Sleep gate, checked BEFORE observe so `messages: N` blocks N events
+      // and the (N+1)th passes (natural reading of "sleep for N messages").
+      const sleepingNow = sleepPinIds.length > 0
+        && this.sleepState.isSleeping(channelId, Date.now())
 
       // Count non-dot messages (any author, including this bot and other bots)
-      // against every active pause pin targeting us.
+      // against every active sleep pin targeting us.
       if (!isDotMessage) {
-        for (const pinId of pausePinIds) {
-          this.pauseState.observeMessage(channelId, pinId)
+        for (const pinId of sleepPinIds) {
+          this.sleepState.observeMessage(channelId, pinId)
         }
       }
 
-      if (pausedNow) {
-        logger.debug({ channelId, botId: this.botId, messageId: message.id }, 'Skipping activation — bot is paused')
+      if (sleepingNow) {
+        logger.debug({ channelId, botId: this.botId, messageId: message.id }, 'Skipping activation — bot is sleeping')
         continue
       }
 
-      // Skip bot's own messages (activation-path only — pause counting above
+      // Skip bot's own messages (activation-path only — sleep counting above
       // intentionally includes them).
       if (message.author?.id === this.botUserId) {
         continue

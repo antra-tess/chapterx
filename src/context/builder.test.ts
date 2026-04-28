@@ -319,10 +319,10 @@ describe('filterDotMessages', () => {
     expectKept(messages, true, ['u2'])
   })
 
-  it('filters short commands (.m, .pause)', () => {
+  it('filters short commands (.m, .sleep)', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '.m' }),
-      makeDiscordMessage({ id: 'u2', content: '.pause 60s' }),
+      makeDiscordMessage({ id: 'u2', content: '.sleep 60s' }),
       makeDiscordMessage({ id: 'u3', content: 'keep me' }),
     ]
     expectKept(messages, true, ['u3'])

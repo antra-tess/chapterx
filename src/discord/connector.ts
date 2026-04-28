@@ -31,7 +31,7 @@ export interface ConnectorOptions {
 
 /**
  * A pinned message tracked via gateway events.
- * Holds the minimal set of fields needed to resolve .config / .steer / .pause
+ * Holds the minimal set of fields needed to resolve .config / .steer / .sleep
  * without calling the Discord /pins endpoint after the initial bootstrap.
  */
 export interface TrackedPin {
@@ -257,13 +257,13 @@ export class DiscordConnector {
   }
 
   /**
-   * Filters tracked pins for `.pause` messages. Returns full TrackedPin records
-   * (not just content) because the pause-state counters key on pin id.
-   * Note: no authorBot filter — pauses may be authored by soma (a bot).
+   * Filters tracked pins for `.sleep` messages. Returns full TrackedPin records
+   * (not just content) because the sleep-state counters key on pin id.
+   * Note: no authorBot filter — sleeps may be authored by soma (a bot).
    */
-  private extractPausesFromTrackedPins(pins: Map<string, TrackedPin>): TrackedPin[] {
+  private extractSleepsFromTrackedPins(pins: Map<string, TrackedPin>): TrackedPin[] {
     const sorted = [...pins.values()].sort((a, b) => a.id.localeCompare(b.id))
-    return sorted.filter((p) => p.content.startsWith('.pause'))
+    return sorted.filter((p) => p.content.startsWith('.sleep'))
   }
 
   /**
@@ -460,18 +460,18 @@ export class DiscordConnector {
   }
 
   /**
-   * Fetch pinned `.pause` messages from a channel (cached, mirrors fetchPinnedConfigs).
-   * Returns full TrackedPin records because the pause-state counters key on pin id.
+   * Fetch pinned `.sleep` messages from a channel (cached, mirrors fetchPinnedConfigs).
+   * Returns full TrackedPin records because the sleep-state counters key on pin id.
    * Bootstraps from the API on cold miss.
    */
-  async fetchPinnedPauses(channelId: string): Promise<TrackedPin[]> {
+  async fetchPinnedSleeps(channelId: string): Promise<TrackedPin[]> {
     let pins = this.pinnedByChannel.get(channelId)
     if (!pins) {
       await this.bootstrapChannelPins(channelId)
       pins = this.pinnedByChannel.get(channelId)
     }
     if (!pins) return []
-    return this.extractPausesFromTrackedPins(pins)
+    return this.extractSleepsFromTrackedPins(pins)
   }
 
   /**
@@ -1979,13 +1979,13 @@ export class DiscordConnector {
   }
 
   /**
-   * Synchronous view over the tracked-pin cache for `.pause` lookups.
-   * Returns null on cold miss (caller treats as "no pauses" — hot path never fetches).
+   * Synchronous view over the tracked-pin cache for `.sleep` lookups.
+   * Returns null on cold miss (caller treats as "no sleeps" — hot path never fetches).
    */
-  getCachedPinnedPauses(channelId: string): TrackedPin[] | null {
+  getCachedPinnedSleeps(channelId: string): TrackedPin[] | null {
     const pins = this.pinnedByChannel.get(channelId)
     if (!pins) return null
-    return this.extractPausesFromTrackedPins(pins)
+    return this.extractSleepsFromTrackedPins(pins)
   }
 
   /**
