@@ -98,7 +98,9 @@ export class MembraneProvider {
         : formatterType === 'anthropic-xml'
           ? new AnthropicXmlFormatter()
           : formatterType === 'completions'
-            ? new CompletionsFormatter()
+            ? new CompletionsFormatter({
+                eotToken: request.config.turnEndToken,
+              })
             : undefined;
 
       logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter for model');
@@ -227,7 +229,9 @@ export class MembraneProvider {
         : formatterType === 'anthropic-xml'
           ? new AnthropicXmlFormatter()
           : formatterType === 'completions'
-            ? new CompletionsFormatter()
+            ? new CompletionsFormatter({
+                eotToken: request.config.turnEndToken,
+              })
             : undefined;
 
       logger.debug({ model: request.config.model, formatter: formatterType }, 'Using formatter for model');
