@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import type { Message, TextChannel } from 'discord.js'
+import { MessageType, type Message, type TextChannel } from 'discord.js'
 import {
   parseHistoryCommand,
   extractMessageIdFromUrl,
@@ -40,6 +40,7 @@ function discordUrl(channelId: string, messageId: string, guildId = GUILD_ID): s
 function msg(id: string, content: string, opts?: {
   authorId?: string
   memberRoles?: string[]
+  type?: MessageType
 }): Message {
   const roleCache = new Map<string, { name: string }>()
   if (opts?.memberRoles) {
@@ -60,6 +61,7 @@ function msg(id: string, content: string, opts?: {
       },
     } : null,
     author: { id: opts?.authorId ?? '700000000000000001' },
+    type: opts?.type ?? MessageType.Default,
   } as unknown as Message
 }
 
@@ -869,5 +871,20 @@ describe('fetchChannelMessages — edge cases', () => {
     // Range fetches msg 100-200 from same channel, then messages after .history (500, 600)
     expect(result.didClear).toBe(true)
     expect(result.messages.map(m => m.id)).toEqual(['100', '200', '500', '600'])
+  })
+
+  it('thread creation messages are excluded from context', async () => {
+    const deps = createMockDeps({
+      [CH1_ID]: [
+        msg('100', 'hello'),
+        msg('200', 'User started a thread: Bug Report', { type: MessageType.ThreadCreated }),
+        msg('300', 'world'),
+      ],
+    })
+
+    const result = await fetchChannelMessages(
+      channel(CH1_ID), undefined, undefined, 10, [], false, deps,
+    )
+    expect(result.messages.map(m => m.id)).toEqual(['100', '300'])
   })
 })

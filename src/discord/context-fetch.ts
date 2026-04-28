@@ -7,7 +7,7 @@
  * no mutable cross-call state.
  */
 
-import type { Message, TextChannel, GuildMember, Role } from 'discord.js'
+import { MessageType, type Message, type TextChannel, type GuildMember, type Role } from 'discord.js'
 import pino from 'pino'
 
 const logger = pino({ name: 'context-fetch' })
@@ -198,6 +198,8 @@ export async function fetchChannelMessages(
         // .history didn't apply to us (wrong bot target, unauthorized, malformed) — skip it
         continue
       }
+
+      if (msg.type === MessageType.ThreadCreated) continue
 
       collected.push(msg)
     }
