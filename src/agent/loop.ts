@@ -562,6 +562,32 @@ export class AgentLoop {
       }
     }
 
+    // Check for reaction-triggered continuation (same flow as m-command but no message to delete)
+    const reactionEvent = events.find((e) => e.type === 'reaction' && (e.data as any)._isReactionContinue)
+    if (reactionEvent) {
+      const reaction = reactionEvent.data as any
+
+      // Check if this bot supports continuation
+      try {
+        const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
+        const modeCheckConfig = this.configSystem.loadConfig({
+          botName: this.botId,
+          guildId,
+          channelConfigs: pinnedConfigs,
+        })
+        if (modeCheckConfig.supports_continuation === false) {
+          logger.info({ channelId, botId: this.botId },
+            'Reaction continuation rejected — bot does not support continuation')
+          return
+        }
+      } catch (error: any) {
+        logger.warn({ error: error.message }, 'Failed to check continuation support for reaction — proceeding')
+      }
+
+      logger.info({ channelId, emoji: reaction.emoji, messageId: reaction.messageId },
+        'Processing reaction-triggered continuation')
+    }
+
     // Cancel any pending deferred activation - new activity supersedes it
     if (this.deferredQueue?.hasPendingActivation(channelId)) {
       this.deferredQueue.cancelActivation(channelId)
@@ -700,11 +726,11 @@ export class AgentLoop {
   }
   
   private determineActivationReason(events: Event[]): {
-    reason: 'mention' | 'reply' | 'random' | 'm_command' | 'timer',
+    reason: 'mention' | 'reply' | 'random' | 'm_command' | 'reaction' | 'timer',
     events: Array<{ type: string; messageId?: string; authorId?: string; authorName?: string; contentPreview?: string }>
   } {
     const triggerEvents: Array<{ type: string; messageId?: string; authorId?: string; authorName?: string; contentPreview?: string }> = []
-    let reason: 'mention' | 'reply' | 'random' | 'm_command' | 'timer' = 'mention'
+    let reason: 'mention' | 'reply' | 'random' | 'm_command' | 'reaction' | 'timer' = 'mention'
 
     for (const event of events) {
       if (event.type === 'self_activation') {
@@ -714,6 +740,14 @@ export class AgentLoop {
           type: 'timer',
           messageId: event.data?.originalMessageId,
           contentPreview: event.data?.contextNote?.slice(0, 100),
+        })
+      } else if (event.type === 'reaction' && (event.data as any)._isReactionContinue) {
+        reason = 'reaction'
+        triggerEvents.push({
+          type: 'reaction',
+          messageId: event.data?.messageId,
+          authorId: event.data?.userId,
+          contentPreview: `${event.data?.emoji} on bot message`,
         })
       } else if (event.type === 'message') {
         const message = event.data as any
@@ -756,7 +790,7 @@ export class AgentLoop {
     events: Event[],
     channelId: string,
     guildId: string,
-    triggerReason: 'mention' | 'reply' | 'random' | 'm_command' | 'timer',
+    triggerReason: 'mention' | 'reply' | 'random' | 'm_command' | 'reaction' | 'timer',
     triggeringMessageId?: string
   ): Promise<{ status: 'allowed' | 'blocked'; transactionId?: string }> {
     // Load config to check if Soma is enabled
@@ -1194,6 +1228,26 @@ export class AgentLoop {
           contextNote: event.data?.contextNote?.slice(0, 50),
         }, 'Activated by timer (self_activation)')
         return true
+      }
+
+      // Check reaction events for continuation emoji
+      if (event.type === 'reaction') {
+        const reaction = event.data as any
+        if (!loadConfig()) continue
+
+        // Skip reactions from the bot itself
+        if (reaction.userId === this.botUserId) continue
+
+        // Check if emoji matches configured continuation emoji and is on bot's own message
+        if (config.continuation_emoji
+          && reaction.emoji === config.continuation_emoji
+          && reaction.messageAuthorId === this.botUserId) {
+          logger.debug({ messageId: reaction.messageId, emoji: reaction.emoji, userId: reaction.userId },
+            'Activated by continuation emoji on bot message')
+          event.data._isReactionContinue = true
+          return true
+        }
+        continue
       }
 
       if (event.type !== 'message') {

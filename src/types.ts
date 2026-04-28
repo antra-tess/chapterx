@@ -223,6 +223,9 @@ export interface BotConfig {
   max_bot_reply_chain_depth: number  // Max consecutive bot messages in reply chain (prevents bot loops)
   bot_reply_chain_depth_emote: string  // Emote to show when bot reply chain depth limit is reached
   
+  // Reaction triggers
+  continuation_emoji?: string  // Emoji that triggers continuation when reacted on bot's message (e.g., '▶️')
+
   // Bot mode
   mode?: 'chat' | 'prefill' | 'base-model'  // 'chat' = native formatter, no prefill; 'prefill' = anthropic-xml with prefill (default); 'base-model' = completions formatter
 

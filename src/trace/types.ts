@@ -101,7 +101,7 @@ export interface LogEntry {
 // ============================================================================
 
 export interface ActivationInfo {
-  reason: 'mention' | 'reply' | 'random' | 'm_command' | 'timer'
+  reason: 'mention' | 'reply' | 'random' | 'm_command' | 'reaction' | 'timer'
   
   /** The event(s) that triggered activation */
   triggerEvents: Array<{

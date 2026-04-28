@@ -334,6 +334,9 @@ export class ConfigSystem {
       // Loop prevention
       max_bot_reply_chain_depth: config.max_bot_reply_chain_depth ?? 2,
       bot_reply_chain_depth_emote: config.bot_reply_chain_depth_emote || '🔁',
+
+      // Reaction triggers
+      continuation_emoji: config.continuation_emoji,
       
       // Soma integration (credit system) - optional
       soma: config.soma ? {

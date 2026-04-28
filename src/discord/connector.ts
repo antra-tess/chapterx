@@ -95,7 +95,7 @@ export class DiscordConnector {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMessageReactions,
       ],
-      partials: [Partials.Message],
+      partials: [Partials.Message, Partials.Reaction],
     })
 
     this.setupEventHandlers()
@@ -2104,10 +2104,27 @@ export class DiscordConnector {
       })
     })
 
-    this.client.on('messageReactionAdd', (reaction) => {
+    this.client.on('messageReactionAdd', (reaction, user) => {
       // Refresh cached message so reaction data is up to date
       if (reaction.message.id && reaction.message.channelId) {
         this.updateMessageInCache(reaction.message.channelId, reaction.message as Message)
+      }
+
+      // Queue reaction event for activation processing
+      if (reaction.message.channelId && user.id) {
+        this.queue.push({
+          type: 'reaction',
+          channelId: reaction.message.channelId,
+          guildId: reaction.message.guild?.id || '',
+          data: {
+            messageId: reaction.message.id,
+            emoji: reaction.emoji.name,
+            userId: user.id,
+            messageAuthorId: reaction.message.author?.id,
+          },
+          timestamp: new Date(),
+          receivedAt: Date.now(),
+        })
       }
     })
 

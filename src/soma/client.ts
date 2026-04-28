@@ -17,7 +17,7 @@ import { logger } from '../utils/logger.js'
  * 
  * Random activations do NOT cost ichor
  */
-export type SomaTriggerType = 'mention' | 'reply' | 'm_command'
+export type SomaTriggerType = 'mention' | 'reply' | 'm_command' | 'reaction'
 
 export interface SomaCheckParams {
   userId: string           // Discord user ID
@@ -292,7 +292,7 @@ export class SomaClient {
  * Random activations are free, direct triggers cost ichor
  */
 export function shouldChargeTrigger(triggerType: string): triggerType is SomaTriggerType {
-  return ['mention', 'reply', 'm_command'].includes(triggerType)
+  return ['mention', 'reply', 'm_command', 'reaction'].includes(triggerType)
 }
 
 export interface SomaRefundParams {
