@@ -199,7 +199,9 @@ export async function fetchChannelMessages(
         continue
       }
 
-      if (msg.type === MessageType.ThreadCreated) continue
+      // Skip all system messages (channel rename, pin, boost, thread created, etc.)
+      // Only keep Default (0) and Reply (19)
+      if (msg.type !== MessageType.Default && msg.type !== MessageType.Reply) continue
 
       collected.push(msg)
     }
