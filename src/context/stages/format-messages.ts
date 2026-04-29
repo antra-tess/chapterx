@@ -329,6 +329,9 @@ export async function formatMessages(
       stripReplyTags(content)
     }
 
+    // Skip messages with no usable content (sticker-only, embed-only, etc.)
+    if (content.length === 0) continue
+
     participantMessages.push({
       participant,
       content,
