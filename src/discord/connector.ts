@@ -2181,7 +2181,7 @@ export class DiscordConnector {
     // IDs never leak to the LLM. Historical messages, oblique/webhook content,
     // and cross-guild references commonly miss msg.mentions.users but are
     // present in the client-wide user cache.
-    let content = msg.content.replace(/<@!?(\d+)>/g, (_match, userId) => {
+    let content = (msg.content ?? '').replace(/<@!?(\d+)>/g, (_match, userId) => {
       const user = msg.mentions.users.get(userId)
         ?? msg.client.users.cache.get(userId)
         ?? msg.guild?.members.cache.get(userId)?.user
