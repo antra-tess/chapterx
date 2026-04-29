@@ -2219,6 +2219,21 @@ export class DiscordConnector {
       return channel && 'name' in channel ? `#${channel.name}` : `#unknown-channel`
     })
     
+    // Guard against null author (partial messages, deleted users, broken webhooks)
+    if (!msg.author) {
+      return {
+        id: msg.id,
+        channelId: msg.channelId,
+        guildId: msg.guildId || '',
+        author: { id: 'unknown', username: 'unknown', displayName: 'unknown', bot: false },
+        content: msg.content ?? '',
+        timestamp: msg.createdAt,
+        attachments: [],
+        reactions: [],
+        mentions: [],
+      }
+    }
+
     // Check if this is an oblique bridge message and extract the real username
     const obliqueUsername = this.extractObliqueUsername(msg.author.username)
     const effectiveUsername = obliqueUsername || msg.author.username
