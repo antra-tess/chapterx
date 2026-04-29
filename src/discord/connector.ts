@@ -751,7 +751,9 @@ export class DiscordConnector {
       startProfile('messageConvert')
       // Convert to our format (with reply username lookup)
       const messageMap = new Map(messages.map(m => [m.id, m]))
-      const discordMessages: DiscordMessage[] = messages.map((msg) => this.convertMessage(msg, messageMap))
+      const discordMessages: DiscordMessage[] = messages
+        .map((msg) => this.convertMessage(msg, messageMap))
+        .filter((msg) => msg.content || msg.attachments.length > 0)
       endProfile('messageConvert')
 
       startProfile('pinnedFetch')
