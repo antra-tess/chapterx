@@ -2219,19 +2219,15 @@ export class DiscordConnector {
       return channel && 'name' in channel ? `#${channel.name}` : `#unknown-channel`
     })
     
-    // Guard against null author (partial messages, deleted users, broken webhooks)
+    // Defensive: log and skip if author is null (should be caught upstream in context-fetch)
     if (!msg.author) {
-      return {
-        id: msg.id,
-        channelId: msg.channelId,
-        guildId: msg.guildId || '',
-        author: { id: 'unknown', username: 'unknown', displayName: 'unknown', bot: false },
-        content: msg.content ?? '',
-        timestamp: msg.createdAt,
-        attachments: [],
-        reactions: [],
-        mentions: [],
-      }
+      logger.warn({
+        messageId: msg.id,
+        type: msg.type,
+        partial: msg.partial,
+        webhookId: msg.webhookId,
+      }, 'convertMessage called with null author — this should not happen')
+      throw new Error(`Message ${msg.id} has null author (partial=${msg.partial}, type=${msg.type}, webhookId=${msg.webhookId})`)
     }
 
     // Check if this is an oblique bridge message and extract the real username

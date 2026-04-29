@@ -203,6 +203,22 @@ export async function fetchChannelMessages(
       // Only keep Default (0) and Reply (19)
       if (msg.type !== MessageType.Default && msg.type !== MessageType.Reply) continue
 
+      // Log null-author messages for diagnosis — these shouldn't exist
+      if (!msg.author) {
+        logger.warn({
+          messageId: msg.id,
+          channelId: msg.channelId,
+          type: msg.type,
+          system: msg.system,
+          partial: msg.partial,
+          content: msg.content?.slice(0, 100),
+          webhookId: msg.webhookId,
+          hasAttachments: msg.attachments?.size > 0,
+          createdAt: msg.createdTimestamp,
+        }, 'Skipping message with null author in context fetch')
+        continue
+      }
+
       collected.push(msg)
     }
 
