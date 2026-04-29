@@ -369,6 +369,12 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     streaming: request.config.streaming,
   };
 
+  // Set assistant participant name so membrane can identify bot messages vs user messages
+  // Critical for native tool mode — without this, all messages become role: user
+  if (request.config.botName) {
+    (normalizedRequest as any).assistantParticipant = request.config.botName;
+  }
+
   // Handle stop sequences
   if (request.stop_sequences && request.stop_sequences.length > 0) {
     normalizedRequest.stopSequences = request.stop_sequences;
