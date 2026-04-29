@@ -2047,8 +2047,9 @@ export class DiscordConnector {
     })
 
     this.client.on('messageUpdate', (oldMsg, newMsg) => {
-      // Update message cache
-      if (newMsg.id && newMsg.channelId) {
+      // Update message cache — skip partial messages to avoid overwriting
+      // fully-resolved cached data with incomplete gateway payloads.
+      if (newMsg.id && newMsg.channelId && !newMsg.partial) {
         this.updateMessageInCache(newMsg.channelId, newMsg as Message)
       }
 
@@ -2107,8 +2108,9 @@ export class DiscordConnector {
     })
 
     this.client.on('messageReactionAdd', (reaction, user) => {
-      // Refresh cached message so reaction data is up to date
-      if (reaction.message.id && reaction.message.channelId) {
+      // Only update cache with fully-resolved messages — partial messages from
+      // reaction events have null author/content and would corrupt the cache.
+      if (reaction.message.id && reaction.message.channelId && !reaction.message.partial) {
         this.updateMessageInCache(reaction.message.channelId, reaction.message as Message)
       }
 
@@ -2131,7 +2133,7 @@ export class DiscordConnector {
     })
 
     this.client.on('messageReactionRemove', (reaction) => {
-      if (reaction.message.id && reaction.message.channelId) {
+      if (reaction.message.id && reaction.message.channelId && !reaction.message.partial) {
         this.updateMessageInCache(reaction.message.channelId, reaction.message as Message)
       }
     })
@@ -2176,6 +2178,22 @@ export class DiscordConnector {
    * Public for API access
    */
   convertMessage(msg: Message, messageMap?: Map<string, Message>): DiscordMessage {
+    // Partial or system messages may lack author/content — return a minimal
+    // placeholder that the downstream empty-content filter will discard.
+    if (!msg.author) {
+      return {
+        id: msg.id,
+        channelId: msg.channelId,
+        guildId: msg.guildId || '',
+        author: { id: 'system', username: 'system', displayName: 'system', bot: true },
+        content: '',
+        timestamp: msg.createdAt,
+        attachments: [],
+        reactions: [],
+        mentions: [],
+      }
+    }
+
     // Replace user ID mentions with username mentions for bot consumption.
     // Cascade: msg.mentions.users → client user cache → guild member cache.
     // Use actual username (not displayName/nick) to match chapter2 behavior.
