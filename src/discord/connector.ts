@@ -1707,24 +1707,21 @@ export class DiscordConnector {
     }
 
     // Slow path: message is older than newest cached.
-    // Guard against inserting very old messages that would poison the cache window.
-    // This can happen when fetchSingle fetches a thread start message or a replied-to
-    // message from months ago — inserting it makes the cache think it covers that period.
+    // Log a warning with stack trace when inserting old messages so we can
+    // diagnose what's poisoning the cache with stale data.
     const oldestCached = cache.find((m): m is Message => m !== null)
     if (oldestCached) {
-      const oldestTs = oldestCached.createdTimestamp
-      const msgTs = message.createdTimestamp
-      const gapMs = oldestTs - msgTs
-      if (gapMs > 24 * 60 * 60 * 1000) {  // >24h older than oldest cached
+      const gapMs = oldestCached.createdTimestamp - message.createdTimestamp
+      if (gapMs > 60 * 60 * 1000) {  // >1h older than oldest cached
         logger.warn({
           channelId,
           messageId: message.id,
-          messageTimestamp: new Date(msgTs).toISOString(),
+          messageTimestamp: new Date(message.createdTimestamp).toISOString(),
           oldestCachedId: oldestCached.id,
-          oldestCachedTimestamp: new Date(oldestTs).toISOString(),
+          oldestCachedTimestamp: new Date(oldestCached.createdTimestamp).toISOString(),
           gapHours: (gapMs / 3600000).toFixed(1),
-        }, 'Rejecting out-of-order message — too old for cache window (would poison fetch)')
-        return
+          stack: new Error().stack,
+        }, 'Inserting message significantly older than cache window — potential cache poisoning')
       }
     }
 
