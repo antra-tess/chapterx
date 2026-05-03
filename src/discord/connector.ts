@@ -1706,10 +1706,29 @@ export class DiscordConnector {
       return
     }
 
-    // Slow path: message is older than newest cached (e.g., single-message fetch for thread start).
-    // Must insert in chronological position to maintain cache ordering.
-    // Without this, the batch fetch fast path (cache.slice(0, beforeIdx)) returns wrong messages
-    // because it assumes chronological ordering.
+    // Slow path: message is older than newest cached.
+    // Guard against inserting very old messages that would poison the cache window.
+    // This can happen when fetchSingle fetches a thread start message or a replied-to
+    // message from months ago — inserting it makes the cache think it covers that period.
+    const oldestCached = cache.find((m): m is Message => m !== null)
+    if (oldestCached) {
+      const oldestTs = oldestCached.createdTimestamp
+      const msgTs = message.createdTimestamp
+      const gapMs = oldestTs - msgTs
+      if (gapMs > 24 * 60 * 60 * 1000) {  // >24h older than oldest cached
+        logger.warn({
+          channelId,
+          messageId: message.id,
+          messageTimestamp: new Date(msgTs).toISOString(),
+          oldestCachedId: oldestCached.id,
+          oldestCachedTimestamp: new Date(oldestTs).toISOString(),
+          gapHours: (gapMs / 3600000).toFixed(1),
+        }, 'Rejecting out-of-order message — too old for cache window (would poison fetch)')
+        return
+      }
+    }
+
+    // Insert in chronological position to maintain cache ordering.
     let lo = 0, hi = cache.length
     while (lo < hi) {
       const mid = (lo + hi) >> 1
