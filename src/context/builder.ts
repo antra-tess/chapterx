@@ -90,7 +90,7 @@ export class ContextBuilder {
 
     // 2. Filter dot messages
     const beforeFilter = messages.length
-    messages = filterDotMessages(messages, config.steer_visible === true)
+    messages = filterDotMessages(messages, config.steer_visible === true, config.ignore_dotted_messages !== false)
     const filteredCount = beforeFilter - messages.length
 
     logger.debug({

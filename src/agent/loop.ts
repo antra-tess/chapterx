@@ -1298,7 +1298,7 @@ export class AgentLoop {
       }
 
       // Skip dot messages — hidden/command messages should never trigger activation
-      if (isDotMessage) {
+      if (isDotMessage && config.ignore_dotted_messages !== false) {
         continue
       }
 

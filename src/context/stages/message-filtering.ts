@@ -64,7 +64,8 @@ export function mergeConsecutiveBotMessages(
  *
  * Also filters messages with the 🫥 (dotted_line_face) reaction.
  */
-export function filterDotMessages(messages: DiscordMessage[], steerVisible: boolean = true): DiscordMessage[] {
+export function filterDotMessages(messages: DiscordMessage[], steerVisible: boolean = true, ignoreDotted: boolean = true): DiscordMessage[] {
+  if (!ignoreDotted) return messages
   return messages.filter((msg) => {
     const stripped = msg.content.trim()
       .replace(/^<reply:@[^>]+>\s*/, '')

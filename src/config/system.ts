@@ -335,6 +335,9 @@ export class ConfigSystem {
       max_bot_reply_chain_depth: config.max_bot_reply_chain_depth ?? 2,
       bot_reply_chain_depth_emote: config.bot_reply_chain_depth_emote || '🔁',
 
+      // Message filtering
+      ignore_dotted_messages: config.ignore_dotted_messages !== false,  // Default: true
+
       // Reaction triggers
       continuation_emoji: config.continuation_emoji ?? '▶️',
       
