@@ -1799,15 +1799,14 @@ export class DiscordConnector {
           return cache[idx]
         }
       }
-      // Cache miss for single message - fetch from API
+      // Cache miss for single message - fetch from API.
+      // Do NOT push into the chronological cache — fetchSingle is used for
+      // reply targets and .history references that can be arbitrarily old.
+      // Inserting them shifts the cache window backwards, causing batch
+      // fetches to serve stale context instead of recent messages.
       this.cacheStats.misses++
       this.cacheStats.apiCalls++
-      const msg = await channel.messages.fetch(options)
-      // Add to cache if we have one
-      if (msg && this.messageCache.has(channelId)) {
-        this.pushMessageToCache(channelId, msg)
-      }
-      return msg
+      return channel.messages.fetch(options)
     }
 
     // Batch fetch
