@@ -12,6 +12,7 @@ import uploadPlugin from './upload.js'
 import shareImagePlugin from './share-image.js'
 import mcpResourcesPlugin from './mcp-resources.js'
 import timerPlugin from './timer.js'
+import characterPlugin from './character.js'
 
 // Register all available plugins
 export const availablePlugins: Record<string, ToolPlugin> = {
@@ -22,6 +23,7 @@ export const availablePlugins: Record<string, ToolPlugin> = {
   'share-image': shareImagePlugin,
   'mcp-resources': mcpResourcesPlugin,
   'timer': timerPlugin,
+  'character': characterPlugin,
 }
 
 export * from './types.js'

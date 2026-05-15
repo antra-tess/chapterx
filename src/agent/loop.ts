@@ -1794,8 +1794,16 @@ export class AgentLoop {
         for (const [pluginName, plugin] of loadedPlugins) {
           if (plugin.getContextInjections) {
             try {
-              // Get plugin-specific config
-              const pluginInstanceConfig = config.plugin_config?.[pluginName]
+              // Get plugin-specific config, enriched with recent messages for RAG plugins
+              let pluginInstanceConfig = config.plugin_config?.[pluginName]
+              if (pluginName === 'character' && pluginInstanceConfig) {
+                const recentCount = pluginInstanceConfig.recent_messages || 7
+                const recentMsgs = discordContext.messages.slice(-recentCount)
+                pluginInstanceConfig = {
+                  ...pluginInstanceConfig,
+                  _recentMessages: recentMsgs.map((m: any) => `${m.author?.username || 'unknown'}: ${m.content || ''}`),
+                }
+              }
               
               // Skip disabled plugins (state_scope: 'off')
               if (pluginInstanceConfig?.state_scope === 'off') {
