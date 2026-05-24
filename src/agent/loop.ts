@@ -1298,7 +1298,11 @@ export class AgentLoop {
       }
 
       // Skip dot messages — hidden/command messages should never trigger activation
-      if (isDotMessage && config.ignore_dotted_messages !== false) {
+      // Exception: 👁️‍🗨️ reaction overrides hiding (makes dotted messages visible again)
+      const hasShowReaction = message.reactions?.some(
+        (r: any) => r.emoji === '👁️‍🗨️' || r.emoji === 'eye_in_speech_bubble'
+      )
+      if (isDotMessage && config.ignore_dotted_messages !== false && !hasShowReaction) {
         continue
       }
 
@@ -1635,6 +1639,9 @@ export class AgentLoop {
         pinMessage: async (messageId: string) => {
           await this.connector.pinMessage(channelId, messageId)
         },
+        addReaction: async (messageId: string, emoji: string) => {
+          await this.connector.addReaction(channelId, messageId, emoji)
+        },
         uploadFile: async (buffer: Buffer, filename: string, contentType: string, caption?: string) => {
           return await this.connector.sendFileAttachment(channelId, buffer, filename, contentType, caption)
         },
@@ -1784,6 +1791,9 @@ export class AgentLoop {
           },
           pinMessage: async (messageId: string) => {
             await this.connector.pinMessage(channelId, messageId)
+          },
+          addReaction: async (messageId: string, emoji: string) => {
+            await this.connector.addReaction(channelId, messageId, emoji)
           },
           uploadFile: async (buffer: Buffer, filename: string, contentType: string, caption?: string) => {
             return await this.connector.sendFileAttachment(channelId, buffer, filename, contentType, caption)

@@ -63,10 +63,18 @@ export function mergeConsecutiveBotMessages(
  * .steer is preserved when steerVisible is true.
  *
  * Also filters messages with the 🫥 (dotted_line_face) reaction.
+ *
+ * The 👁️‍🗨️ (eye_in_speech_bubble) reaction overrides hiding: a dotted
+ * message or a 🫥-reacted message with 👁️‍🗨️ is kept in context.
  */
 export function filterDotMessages(messages: DiscordMessage[], steerVisible: boolean = true, ignoreDotted: boolean = true): DiscordMessage[] {
   if (!ignoreDotted) return messages
   return messages.filter((msg) => {
+    // 👁️‍🗨️ reaction overrides all hiding — always keep the message
+    if (msg.reactions?.some(r => r.emoji === '👁️‍🗨️' || r.emoji === 'eye_in_speech_bubble')) {
+      return true
+    }
+
     const stripped = msg.content.trim()
       .replace(/^<reply:@[^>]+>\s*/, '')
       .replace(/^(<@[^>]+>\s*)+/, '')

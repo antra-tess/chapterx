@@ -511,6 +511,34 @@ describe('filterDotMessages', () => {
     expectKept(messages, true, ['u2'])
   })
 
+  // ── 👁️‍🗨️ reaction override (unhide) ──
+  it('👁️‍🗨️ reaction keeps a dotted message visible', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '.hidden command' }),
+      makeDiscordMessage({ id: 'u2', content: '.visible command', reactions: [{ emoji: '👁️‍🗨️', count: 1 }] }),
+      makeDiscordMessage({ id: 'u3', content: 'normal message' }),
+    ]
+    expectKept(messages, true, ['u2', 'u3'])
+  })
+
+  it('👁️‍🗨️ overrides 🫥 hiding', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: 'both reactions', reactions: [
+        { emoji: '🫥', count: 1 },
+        { emoji: '👁️‍🗨️', count: 1 },
+      ] }),
+      makeDiscordMessage({ id: 'u2', content: 'only hidden', reactions: [{ emoji: '🫥', count: 1 }] }),
+    ]
+    expectKept(messages, true, ['u1'])
+  })
+
+  it('eye_in_speech_bubble name also works as override', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '.dotted', reactions: [{ emoji: 'eye_in_speech_bubble', count: 1 }] }),
+    ]
+    expectKept(messages, true, ['u1'])
+  })
+
   // ── Negative cases (should survive) ──
   it('does not filter messages that merely contain a dot mid-sentence', () => {
     const messages = [
