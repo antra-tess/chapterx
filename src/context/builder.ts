@@ -93,14 +93,17 @@ export class ContextBuilder {
     // DEBUG: check reaction state before filtering
     const msgsWithReactions = messages.filter(m => m.reactions && m.reactions.length > 0)
     const dotMsgs = messages.filter(m => /^\.(?!\.)/.test(m.content.trim().replace(/^<reply:@[^>]+>\s*/, '').replace(/^(<@[^>]+>\s*)+/, '')))
-    if (msgsWithReactions.length > 0 || dotMsgs.length > 0) {
-      logger.info({
-        msgsWithReactions: msgsWithReactions.length,
-        dotMsgs: dotMsgs.length,
-        reactionDetails: msgsWithReactions.slice(0, 5).map(m => ({ id: m.id, reactions: m.reactions, content: m.content.slice(0, 40) })),
-        dotDetails: dotMsgs.slice(0, 5).map(m => ({ id: m.id, reactions: m.reactions, content: m.content.slice(0, 40) })),
-      }, 'DEBUG: pre-filter reaction/dot state')
-    }
+    const dotWithReactions = dotMsgs.filter(m => m.reactions && m.reactions.length > 0)
+    const eyeEmojis = msgsWithReactions.filter(m => m.reactions.some(r =>
+      r.emoji?.includes('👁') || r.emoji?.includes('eye') || r.emoji?.includes('speech')
+    ))
+    logger.info({
+      msgsWithReactions: msgsWithReactions.length,
+      dotMsgs: dotMsgs.length,
+      dotWithReactions: dotWithReactions.map(m => ({ id: m.id, reactions: m.reactions, content: m.content.slice(0, 60) })),
+      eyeEmojiMsgs: eyeEmojis.map(m => ({ id: m.id, reactions: m.reactions, content: m.content.slice(0, 60) })),
+      allUniqueEmojis: [...new Set(msgsWithReactions.flatMap(m => m.reactions.map(r => r.emoji)))].sort(),
+    }, 'DEBUG: pre-filter reaction/dot state')
     messages = filterDotMessages(messages, config.steer_visible === true, config.ignore_dotted_messages !== false)
     const filteredCount = beforeFilter - messages.length
 
