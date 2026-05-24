@@ -2122,11 +2122,22 @@ export class DiscordConnector {
       })
     })
 
-    this.client.on('messageReactionAdd', (reaction, user) => {
-      // Only update cache with fully-resolved messages — partial messages from
-      // reaction events have null author/content and would corrupt the cache.
-      if (reaction.message.id && reaction.message.channelId && !reaction.message.partial) {
-        this.updateMessageInCache(reaction.message.channelId, reaction.message as Message)
+    this.client.on('messageReactionAdd', async (reaction, user) => {
+      // Resolve partial messages so reaction data reaches our cache.
+      // Without this, reactions on older messages (outside Discord.js's
+      // internal ~200-message cache) never update our custom cache.
+      let message = reaction.message
+      if (message.partial) {
+        try {
+          message = await message.fetch()
+        } catch (e) {
+          logger.debug({ messageId: message.id, error: e }, 'Failed to fetch partial message for reaction')
+          // Still queue the reaction event below even if fetch fails
+        }
+      }
+
+      if (message.id && message.channelId && !message.partial) {
+        this.updateMessageInCache(message.channelId, message as Message)
       }
 
       // Queue reaction event for activation processing
@@ -2139,7 +2150,7 @@ export class DiscordConnector {
             messageId: reaction.message.id,
             emoji: reaction.emoji.name,
             userId: user.id,
-            messageAuthorId: reaction.message.author?.id,
+            messageAuthorId: (message.author?.id || reaction.message.author?.id),
           },
           timestamp: new Date(),
           receivedAt: Date.now(),
@@ -2147,9 +2158,18 @@ export class DiscordConnector {
       }
     })
 
-    this.client.on('messageReactionRemove', (reaction) => {
-      if (reaction.message.id && reaction.message.channelId && !reaction.message.partial) {
-        this.updateMessageInCache(reaction.message.channelId, reaction.message as Message)
+    this.client.on('messageReactionRemove', async (reaction) => {
+      let message = reaction.message
+      if (message.partial) {
+        try {
+          message = await message.fetch()
+        } catch (e) {
+          logger.debug({ messageId: message.id, error: e }, 'Failed to fetch partial message for reaction remove')
+          return
+        }
+      }
+      if (message.id && message.channelId && !message.partial) {
+        this.updateMessageInCache(message.channelId, message as Message)
       }
     })
 

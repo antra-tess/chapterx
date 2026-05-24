@@ -238,7 +238,7 @@ export class AgentLoop {
           await sleep(100)
         }
       } catch (error) {
-        logger.error({ error }, 'Error in agent loop')
+        logger.error({ err: error, errorMessage: (error as any)?.message, errorStack: (error as any)?.stack }, 'Error in agent loop')
         await sleep(1000)  // Back off on error
       }
     }
@@ -1299,8 +1299,9 @@ export class AgentLoop {
 
       // Skip dot messages — hidden/command messages should never trigger activation
       // Exception: 👁️‍🗨️ reaction overrides hiding (makes dotted messages visible again)
-      const hasShowReaction = message.reactions?.some(
-        (r: any) => r.emoji === '👁️‍🗨️' || r.emoji === 'eye_in_speech_bubble'
+      // Note: message.reactions is a Discord.js ReactionManager, not a plain array
+      const hasShowReaction = message.reactions?.cache?.some(
+        (r: any) => r.emoji?.name === '👁️‍🗨️' || r.emoji?.name === 'eye_in_speech_bubble'
       )
       if (isDotMessage && config.ignore_dotted_messages !== false && !hasShowReaction) {
         continue
