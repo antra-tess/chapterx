@@ -90,6 +90,17 @@ export class ContextBuilder {
 
     // 2. Filter dot messages
     const beforeFilter = messages.length
+    // DEBUG: check reaction state before filtering
+    const msgsWithReactions = messages.filter(m => m.reactions && m.reactions.length > 0)
+    const dotMsgs = messages.filter(m => /^\.(?!\.)/.test(m.content.trim().replace(/^<reply:@[^>]+>\s*/, '').replace(/^(<@[^>]+>\s*)+/, '')))
+    if (msgsWithReactions.length > 0 || dotMsgs.length > 0) {
+      logger.info({
+        msgsWithReactions: msgsWithReactions.length,
+        dotMsgs: dotMsgs.length,
+        reactionDetails: msgsWithReactions.slice(0, 5).map(m => ({ id: m.id, reactions: m.reactions, content: m.content.slice(0, 40) })),
+        dotDetails: dotMsgs.slice(0, 5).map(m => ({ id: m.id, reactions: m.reactions, content: m.content.slice(0, 40) })),
+      }, 'DEBUG: pre-filter reaction/dot state')
+    }
     messages = filterDotMessages(messages, config.steer_visible === true, config.ignore_dotted_messages !== false)
     const filteredCount = beforeFilter - messages.length
 
