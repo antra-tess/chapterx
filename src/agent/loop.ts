@@ -1301,7 +1301,7 @@ export class AgentLoop {
       // Exception: 👁️‍🗨️ reaction overrides hiding (makes dotted messages visible again)
       // Note: message.reactions is a Discord.js ReactionManager, not a plain array
       const hasShowReaction = message.reactions?.cache?.some(
-        (r: any) => r.emoji?.name === '👁️‍🗨️' || r.emoji?.name === 'eye_in_speech_bubble'
+        (r: any) => r.emoji?.name === '👁‍🗨' || r.emoji?.name === '👁️‍🗨️' || r.emoji?.name === 'eye_in_speech_bubble'
       )
       if (isDotMessage && config.ignore_dotted_messages !== false && !hasShowReaction) {
         continue

@@ -539,6 +539,13 @@ describe('filterDotMessages', () => {
     expectKept(messages, true, ['u1'])
   })
 
+  it('👁‍🗨 without variation selectors also works (Discord API form)', () => {
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '.dotted', reactions: [{ emoji: '👁‍🗨', count: 1 }] }),
+    ]
+    expectKept(messages, true, ['u1'])
+  })
+
   // ── Negative cases (should survive) ──
   it('does not filter messages that merely contain a dot mid-sentence', () => {
     const messages = [
