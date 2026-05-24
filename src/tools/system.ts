@@ -586,6 +586,7 @@ export class ToolSystem {
           config: this.pluginContext.config || {},
           sendMessage: this.pluginContext.sendMessage || (async () => []),
           pinMessage: this.pluginContext.pinMessage || (async () => {}),
+          addReaction: this.pluginContext.addReaction || (async () => {}),
           uploadFile: this.pluginContext.uploadFile,
           visibleImages: this.pluginContext.visibleImages,
         }

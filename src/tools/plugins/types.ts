@@ -86,6 +86,7 @@ export interface PluginContext {
   config: any  // Current bot config
   sendMessage: (content: string) => Promise<string[]>  // Send a message, returns message IDs
   pinMessage: (messageId: string) => Promise<void>  // Pin a message
+  addReaction: (messageId: string, emoji: string) => Promise<void>  // React to a message
   uploadFile?: (buffer: Buffer, filename: string, contentType: string, caption?: string) => Promise<string[]>  // Upload a file
   /** Images visible to the bot (from Discord context + MCP tool results), newest first */
   visibleImages?: VisibleImage[]

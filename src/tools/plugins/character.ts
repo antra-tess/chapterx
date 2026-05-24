@@ -21,9 +21,9 @@ import { join } from 'path'
 import type { ToolPlugin, PluginStateContext, ContextInjection } from './types.js'
 
 // Module-level cache: index_path → { vectors, chunks }
-const indexCache = new Map<string, { vectors: Float64Array, chunks: string[], dim: number }>()
+const indexCache = new Map<string, { vectors: Float32Array | Float64Array, chunks: string[], dim: number }>()
 
-function loadIndex(indexPath: string): { vectors: Float64Array, chunks: string[], dim: number } {
+function loadIndex(indexPath: string): { vectors: Float32Array | Float64Array, chunks: string[], dim: number } {
   const cached = indexCache.get(indexPath)
   if (cached) return cached
 
@@ -42,28 +42,42 @@ function loadIndex(indexPath: string): { vectors: Float64Array, chunks: string[]
 }
 
 /**
- * Minimal .npy parser for float64 2D arrays.
+ * Minimal .npy parser for float32/float64 2D arrays.
  * Handles numpy format 1.0 with fortran_order=False.
  */
-function parseNpy(buffer: Buffer): { data: Float64Array, shape: number[] } {
+function parseNpy(buffer: Buffer): { data: Float32Array | Float64Array, shape: number[] } {
   // Magic: \x93NUMPY
   const headerLen = buffer.readUInt16LE(8)
   const headerStr = buffer.subarray(10, 10 + headerLen).toString('ascii')
 
-  // Parse shape from header like "{'descr': '<f8', 'fortran_order': False, 'shape': (9187, 1024), }"
+  // Parse dtype from header
+  const descrMatch = headerStr.match(/'descr':\s*'([^']+)'/)
+  const descr = descrMatch?.[1] || '<f4'
+  const isFloat64 = descr === '<f8'
+
+  // Parse shape from header like "{'descr': '<f4', 'fortran_order': False, 'shape': (9187, 1024), }"
   const shapeMatch = headerStr.match(/\((\d+),\s*(\d+)\)/)
   if (!shapeMatch) throw new Error('Cannot parse .npy shape from header: ' + headerStr)
   const shape = [parseInt(shapeMatch[1]!), parseInt(shapeMatch[2]!)]
 
   const dataOffset = 10 + headerLen
-  const data = new Float64Array(buffer.buffer, buffer.byteOffset + dataOffset, shape[0]! * shape[1]!)
+  const numElements = shape[0]! * shape[1]!
+
+  // Copy data into a properly aligned buffer for typed array construction
+  const dataBytes = buffer.subarray(dataOffset)
+  const alignedBuffer = new ArrayBuffer(dataBytes.length)
+  new Uint8Array(alignedBuffer).set(dataBytes)
+
+  const data = isFloat64
+    ? new Float64Array(alignedBuffer, 0, numElements)
+    : new Float32Array(alignedBuffer, 0, numElements)
   return { data, shape }
 }
 
 /**
  * Query the embed server for a vector embedding.
  */
-async function embedQuery(url: string, model: string, text: string): Promise<Float64Array> {
+async function embedQuery(url: string, model: string, text: string): Promise<Float32Array | Float64Array> {
   const response = await fetch(`${url}/${model}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -84,13 +98,13 @@ async function embedQuery(url: string, model: string, text: string): Promise<Flo
  * Cosine similarity search. Vectors are assumed L2-normalized.
  */
 function searchTopK(
-  queryVec: Float64Array,
-  indexVecs: Float64Array,
+  queryVec: Float32Array | Float64Array,
+  indexVecs: Float32Array | Float64Array,
   dim: number,
   topK: number
 ): number[] {
   const n = indexVecs.length / dim
-  const scores = new Float64Array(n)
+  const scores = new Float32Array(n)
 
   // Normalize query
   let qNorm = 0
