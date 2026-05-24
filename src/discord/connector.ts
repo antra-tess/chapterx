@@ -2315,10 +2315,17 @@ export class DiscordConnector {
         width: att.width || undefined,
         height: att.height || undefined,
       })),
-      reactions: Array.from(msg.reactions.cache.values()).map((reaction) => ({
-        emoji: reaction.emoji.name || reaction.emoji.toString(),
-        count: reaction.count,
-      })),
+      reactions: (() => {
+        const reactionValues = Array.from(msg.reactions.cache.values())
+        // DEBUG: log for specific test messages
+        if (msg.content?.trim() === '.3' || msg.content?.trim() === '.4' || msg.content?.trim() === '.2') {
+          logger.info({ msgId: msg.id, content: msg.content, reactionCacheSize: msg.reactions.cache.size, reactionValues: reactionValues.map(r => ({ name: r.emoji.name, id: r.emoji.id, str: r.emoji.toString(), count: r.count })) }, 'DEBUG: convertMessage reaction cache for dot-test')
+        }
+        return reactionValues.map((reaction) => ({
+          emoji: reaction.emoji.name || reaction.emoji.toString(),
+          count: reaction.count,
+        }))
+      })(),
       authorRoles: msg.member ? Array.from(msg.member.roles.cache.values()).map(r => r.name) : undefined,
       mentions: Array.from(msg.mentions.users.keys()),
       referencedMessage: msg.reference?.messageId,
