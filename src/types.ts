@@ -41,6 +41,7 @@ export interface ParticipantMessage {
   content: ContentBlock[]
   timestamp?: Date
   messageId?: string  // Discord message ID (for cache markers)
+  isBot?: boolean  // Whether this message is from a bot (used for merge decisions)
   cacheBreakpoint?: boolean  // If true, cache boundary is placed AFTER this message
   cacheControl?: CacheControl  // @deprecated - use cacheBreakpoint instead
 }

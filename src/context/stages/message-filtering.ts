@@ -92,22 +92,21 @@ export function filterDotMessages(messages: DiscordMessage[], steerVisible: bool
 }
 
 /**
- * Merge consecutive ParticipantMessages from the bot.
- * Handles "m continue" scenarios where bot has multiple sequential messages
+ * Merge consecutive ParticipantMessages from bots.
+ * Handles "m continue" scenarios where a bot has multiple sequential messages
  * that should appear as one turn in the LLM context.
  * Only merges bot messages — consecutive user messages stay separate.
  */
 export function mergeConsecutiveParticipantMessages(
-  messages: ParticipantMessage[],
-  botName?: string
+  messages: ParticipantMessage[]
 ): ParticipantMessage[] {
   const merged: ParticipantMessage[] = []
 
   for (const msg of messages) {
     const lastMsg = merged[merged.length - 1]
 
-    // Only merge consecutive messages from the bot, not from users
-    if (lastMsg && lastMsg.participant === msg.participant && (!botName || msg.participant === botName)) {
+    // Only merge consecutive messages from bots, not from users
+    if (lastMsg && lastMsg.participant === msg.participant && msg.isBot) {
       // Merge content arrays
       // For text blocks, we join with space; for other types, just append
       const lastTextBlockIndex = lastMsg.content.map(c => c.type).lastIndexOf('text')

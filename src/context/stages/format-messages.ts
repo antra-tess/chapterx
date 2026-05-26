@@ -337,6 +337,7 @@ export async function formatMessages(
       content,
       timestamp: msg.timestamp,
       messageId: msg.id,
+      isBot: msg.author.bot,
     })
   }
 

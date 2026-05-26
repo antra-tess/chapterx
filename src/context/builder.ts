@@ -167,7 +167,7 @@ export class ContextBuilder {
     }
 
     // 7. Merge consecutive messages from the bot (not users)
-    participantMessages = mergeConsecutiveParticipantMessages(participantMessages, config.name)
+    participantMessages = mergeConsecutiveParticipantMessages(participantMessages)
 
     // 8. Apply limits
     const { messages: finalMessages, didTruncate, messagesRemoved } = applyLimits(

@@ -573,15 +573,25 @@ describe('mergeConsecutiveParticipantMessages', () => {
     builder = new ContextBuilder()
   })
 
-  it('merges consecutive messages from same participant', () => {
+  it('merges consecutive messages from same bot participant', () => {
+    const messages: ParticipantMessage[] = [
+      makeParticipantMessage({ participant: 'alice', content: [{ type: 'text', text: 'hello' }], messageId: 'a1', isBot: true }),
+      makeParticipantMessage({ participant: 'alice', content: [{ type: 'text', text: 'world' }], messageId: 'a2', isBot: true }),
+    ]
+    const result = mergeConsecutiveParticipantMessages(messages)
+
+    expect(result).toHaveLength(1)
+    expect(textOf(result[0])).toBe('hello world')
+  })
+
+  it('does not merge consecutive messages from users', () => {
     const messages: ParticipantMessage[] = [
       makeParticipantMessage({ participant: 'alice', content: [{ type: 'text', text: 'hello' }], messageId: 'a1' }),
       makeParticipantMessage({ participant: 'alice', content: [{ type: 'text', text: 'world' }], messageId: 'a2' }),
     ]
     const result = mergeConsecutiveParticipantMessages(messages)
 
-    expect(result).toHaveLength(1)
-    expect(textOf(result[0])).toBe('hello world')
+    expect(result).toHaveLength(2)
   })
 
   it('does not merge different participants', () => {
@@ -596,8 +606,8 @@ describe('mergeConsecutiveParticipantMessages', () => {
 
   it('preserves cacheBreakpoint from merged message', () => {
     const messages: ParticipantMessage[] = [
-      makeParticipantMessage({ participant: 'alice', cacheBreakpoint: false }),
-      makeParticipantMessage({ participant: 'alice', cacheBreakpoint: true }),
+      makeParticipantMessage({ participant: 'alice', cacheBreakpoint: false, isBot: true }),
+      makeParticipantMessage({ participant: 'alice', cacheBreakpoint: true, isBot: true }),
     ]
     const result = mergeConsecutiveParticipantMessages(messages)
 
@@ -615,10 +625,12 @@ describe('mergeConsecutiveParticipantMessages', () => {
       makeParticipantMessage({
         participant: 'alice',
         content: [{ type: 'text', text: 'look at this' }, imgBlock],
+        isBot: true,
       }),
       makeParticipantMessage({
         participant: 'alice',
         content: [{ type: 'text', text: 'pretty cool right' }],
+        isBot: true,
       }),
     ]
     const result = mergeConsecutiveParticipantMessages(messages)
