@@ -1747,9 +1747,8 @@ describe('traceInfo', () => {
 
     expect(result.traceInfo).toBeDefined()
     expect(result.traceInfo!.messagesConsidered).toBe(3)
-    // After mergeConsecutiveParticipantMessages, the 2 surviving alice messages
-    // get merged into 1 (same participant). So: 1 message + empty completion = 2,
-    // messagesIncluded excludes empty completion = 1
-    expect(result.traceInfo!.messagesIncluded).toBe(1)
+    // After filtering .config, 2 alice messages survive.
+    // User messages are no longer merged (only bot messages merge).
+    expect(result.traceInfo!.messagesIncluded).toBe(2)
   })
 })
