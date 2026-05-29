@@ -23,6 +23,7 @@ import {
 } from './stages/finalize.js'
 import { applyLimits } from './stages/cache-and-limits.js'
 import { formatToolUseWithResults } from './stages/tool-interleave.js'
+import { applyMentionFormat } from './stages/mentions.js'
 import {
   injectActivationCompletions,
   insertPluginInjections,
@@ -1691,6 +1692,152 @@ describe('display names mode', () => {
     })
 
     expect(result.request.messages[0].participant).toBe('alice.smith')
+  })
+})
+
+// ============================================================================
+// Unit tests: applyMentionFormat
+// ============================================================================
+
+describe('applyMentionFormat', () => {
+  it('formats mentions with @ prefix (no angle brackets)', () => {
+    const content: ContentBlock[] = [{ type: 'text', text: 'hey <@alice> check this' }]
+    applyMentionFormat(content, '@{name}')
+    expect(content[0].text).toBe('hey @alice check this')
+  })
+
+  it('formats mentions as bare names', () => {
+    const content: ContentBlock[] = [{ type: 'text', text: 'hey <@alice> check this' }]
+    applyMentionFormat(content, '{name}')
+    expect(content[0].text).toBe('hey alice check this')
+  })
+
+  it('formats mentions with brackets', () => {
+    const content: ContentBlock[] = [{ type: 'text', text: 'hey <@alice> check this' }]
+    applyMentionFormat(content, '[{name}]')
+    expect(content[0].text).toBe('hey [alice] check this')
+  })
+
+  it('preserves default angle bracket format', () => {
+    const content: ContentBlock[] = [{ type: 'text', text: 'hey <@alice> check this' }]
+    applyMentionFormat(content, '<@{name}>')
+    expect(content[0].text).toBe('hey <@alice> check this')
+  })
+
+  it('formats reply tags using the mention template', () => {
+    const content: ContentBlock[] = [{ type: 'text', text: '<reply:@bob> yeah I agree' }]
+    applyMentionFormat(content, '@{name}')
+    expect(content[0].text).toBe('(replying to @bob) yeah I agree')
+  })
+
+  it('formats reply tags with bare names', () => {
+    const content: ContentBlock[] = [{ type: 'text', text: '<reply:@bob> yeah I agree' }]
+    applyMentionFormat(content, '{name}')
+    expect(content[0].text).toBe('(replying to bob) yeah I agree')
+  })
+
+  it('resolves display names when provided', () => {
+    const content: ContentBlock[] = [{ type: 'text', text: 'hey <@alice.smith>' }]
+    const displayNames = new Map([['alice.smith', 'Alice']])
+    applyMentionFormat(content, '@{name}', displayNames)
+    expect(content[0].text).toBe('hey @Alice')
+  })
+
+  it('keeps bot name as-is (no display name resolution)', () => {
+    const content: ContentBlock[] = [{ type: 'text', text: '<@mybot> do something' }]
+    const displayNames = new Map([['mybot', 'My Bot Display']])
+    applyMentionFormat(content, '@{name}', displayNames, 'mybot')
+    expect(content[0].text).toBe('@mybot do something')
+  })
+
+  it('handles multiple mentions in one message', () => {
+    const content: ContentBlock[] = [{ type: 'text', text: '<@alice> and <@bob> should talk' }]
+    applyMentionFormat(content, '@{name}')
+    expect(content[0].text).toBe('@alice and @bob should talk')
+  })
+
+  it('skips non-text blocks', () => {
+    const imgBlock = { type: 'image', source: { type: 'base64', data: 'x', media_type: 'image/png' } } as any
+    const content: ContentBlock[] = [imgBlock]
+    applyMentionFormat(content, '@{name}')
+    expect(content[0].type).toBe('image')
+  })
+})
+
+describe('mention_format integration', () => {
+  let builder: ContextBuilder
+
+  beforeEach(() => {
+    msgCounter = 0
+    builder = new ContextBuilder()
+  })
+
+  it('applies mention_format to mentions in context', async () => {
+    const messages = [
+      makeDiscordMessage({
+        id: 'u1',
+        content: 'hey <@testuser>',
+        author: { id: 'user-1', username: 'alice', displayName: 'alice', bot: false },
+      }),
+    ]
+    const config = makeConfig({ mention_format: '@{name}' })
+
+    const result = await builder.buildContext({
+      discordContext: makeDiscordContext(messages),
+      toolCacheWithResults: [],
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config,
+    })
+
+    expect(textOf(result.request.messages[0])).toBe('hey @testuser')
+  })
+
+  it('applies mention_format with display name resolution', async () => {
+    const messages = [
+      makeDiscordMessage({
+        id: 'u1',
+        content: 'hey <@bob.jones>',
+        author: { id: 'user-1', username: 'alice', displayName: 'alice', bot: false },
+      }),
+      makeDiscordMessage({
+        id: 'u2',
+        content: 'hi',
+        author: { id: 'user-2', username: 'bob.jones', displayName: 'Bob', bot: false },
+      }),
+    ]
+    const config = makeConfig({ mention_format: '@{name}', use_display_names: true })
+
+    const result = await builder.buildContext({
+      discordContext: makeDiscordContext(messages),
+      toolCacheWithResults: [],
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config,
+    })
+
+    expect(textOf(result.request.messages[0])).toBe('hey @Bob')
+  })
+
+  it('strips angle brackets for base model compatibility', async () => {
+    const messages = [
+      makeDiscordMessage({
+        id: 'u1',
+        content: 'hey <@someone>',
+        author: { id: 'user-1', username: 'alice', displayName: 'alice', bot: false },
+      }),
+    ]
+    const config = makeConfig({ mention_format: '{name}' })
+
+    const result = await builder.buildContext({
+      discordContext: makeDiscordContext(messages),
+      toolCacheWithResults: [],
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config,
+    })
+
+    expect(textOf(result.request.messages[0])).toBe('hey someone')
   })
 })
 

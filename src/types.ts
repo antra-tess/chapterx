@@ -250,6 +250,12 @@ export interface BotConfig {
   // for participant labels in the LLM context. Default: false (use usernames, matching Chapter2)
   use_display_names?: boolean
 
+  // Mention format template for LLM context. {name} is replaced with the resolved name.
+  // Default: '<@{name}>' (angle-bracket style). Examples: '@{name}', '{name}', '[{name}]'
+  // Applies to both inline mentions and reply tags. Base models often work better
+  // without angle brackets since <@...> can interfere with tokenization.
+  mention_format?: string
+
   // Participant stop sequences
   // When true, auto-generates stop sequences from participant names to prevent
   // the model from "speaking as" other users. Default: false (allows frags/quotes)

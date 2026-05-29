@@ -14,7 +14,7 @@ import type {
   BotConfig,
 } from '../../types.js'
 import { prepareImage, resampleImage, MAX_IMAGE_BASE64_BYTES } from '../image-processing.js'
-import { rewriteMentionsForDisplayNames, stripReplyTags } from './mentions.js'
+import { rewriteMentionsForDisplayNames, applyMentionFormat, stripReplyTags } from './mentions.js'
 import { logger } from '../../utils/logger.js'
 
 /**
@@ -319,8 +319,17 @@ export async function formatMessages(
       }
     }
 
-    // When use_display_names is enabled, rewrite mentions to use display names
-    if (config.use_display_names) {
+    // Rewrite mentions: either with custom format template, or display names fallback
+    if (config.mention_format) {
+      // Custom format template handles both name resolution and formatting
+      applyMentionFormat(
+        content,
+        config.mention_format,
+        config.use_display_names ? usernameToDisplayName : undefined,
+        config.name
+      )
+    } else if (config.use_display_names) {
+      // Legacy path: rewrite to @DisplayName format
       rewriteMentionsForDisplayNames(content, usernameToDisplayName, config.name)
     }
 
