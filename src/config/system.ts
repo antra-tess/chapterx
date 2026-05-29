@@ -351,6 +351,9 @@ export class ConfigSystem {
       // Use display names instead of usernames for participant labels - default false
       use_display_names: config.use_display_names ?? false,
 
+      // Mention format template - default undefined (uses <@name> format)
+      mention_format: config.mention_format,
+
       // Participant stop sequences - default false (allows frags/quotes)
       participant_stop_sequences: config.participant_stop_sequences ?? false,
 
