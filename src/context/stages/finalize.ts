@@ -58,8 +58,11 @@ export function buildStopSequences(
     const msg = participantMessages[i]
     if (!msg) continue
 
-    // Add message author
-    if (msg.participant && !seen.has(msg.participant)) {
+    // Add message author. Skip characters introduced via the `~Name:` prefix
+    // — leaving them out of stop sequences lets the model frag and continue
+    // speaking as the spoofed character. (If the same name also appears in a
+    // real message, we still pick it up from that one.)
+    if (msg.participant && !msg.isCharacterOverride && !seen.has(msg.participant)) {
       seen.add(msg.participant)
       recentParticipants.push(msg.participant)
     }

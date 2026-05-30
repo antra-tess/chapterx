@@ -42,6 +42,7 @@ export interface ParticipantMessage {
   timestamp?: Date
   messageId?: string  // Discord message ID (for cache markers)
   isBot?: boolean  // Whether this message is from a bot (used for merge decisions)
+  isCharacterOverride?: boolean  // If true, participant was set via `~Name:` prefix — excluded from stop sequences so the model can frag
   cacheBreakpoint?: boolean  // If true, cache boundary is placed AFTER this message
   cacheControl?: CacheControl  // @deprecated - use cacheBreakpoint instead
 }
