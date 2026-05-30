@@ -131,6 +131,7 @@ export function extractModelConfig(config: BotConfig): ModelConfig {
     turnEndToken: config.turn_end_token,
     presence_penalty: config.presence_penalty,
     frequency_penalty: config.frequency_penalty,
+    repetition_penalty: config.repetition_penalty,
     prompt_caching: config.prompt_caching,
     cache_ttl: config.cache_ttl,
     participant_stop_sequences: config.participant_stop_sequences,

@@ -135,6 +135,7 @@ export interface ModelConfig {
   turnEndToken?: string  // Optional token appended after each message content (e.g., '<eot>' for Gemini)
   presence_penalty?: number  // Penalty for token presence (0.0-2.0)
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
+  repetition_penalty?: number  // Multiplicative repetition penalty (vLLM/HuggingFace style, typically 1.0-1.2)
   prompt_caching?: boolean  // If true (default), apply cache_control markers for Anthropic prompt caching
   cache_ttl?: '5m' | '1h'  // Anthropic cache TTL - '5m' (default) or '1h' (extended)
   participant_stop_sequences?: boolean  // If true, membrane generates stop sequences from participant names (default: false)
@@ -161,7 +162,8 @@ export interface BotConfig {
   top_p?: number
   presence_penalty?: number  // Penalty for token presence (0.0-2.0)
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
-  
+  repetition_penalty?: number  // Multiplicative repetition penalty (vLLM/HuggingFace style, typically 1.0-1.2)
+
   // Context config
   recency_window_messages?: number  // Max number of messages
   recency_window_characters?: number  // Max number of characters

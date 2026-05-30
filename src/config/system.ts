@@ -272,6 +272,7 @@ export class ConfigSystem {
       top_p: config.top_p,
       presence_penalty: config.presence_penalty,
       frequency_penalty: config.frequency_penalty,
+      repetition_penalty: config.repetition_penalty,
 
       // Context config
       recency_window_messages: config.recency_window_messages,

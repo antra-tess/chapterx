@@ -334,6 +334,7 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     topP: request.config.top_p,
     presencePenalty: request.config.presence_penalty,
     frequencyPenalty: request.config.frequency_penalty,
+    repetitionPenalty: request.config.repetition_penalty,
   };
   
   // Enable extended thinking when prefill_thinking is set
@@ -415,6 +416,7 @@ export function fromMembraneRequest(request: NormalizedRequest, botName: string)
       botName,
       presence_penalty: request.config.presencePenalty,
       frequency_penalty: request.config.frequencyPenalty,
+      repetition_penalty: request.config.repetitionPenalty,
       prefill_thinking: request.config.thinking?.enabled,
     },
     tools: request.tools?.map(fromMembraneToolDefinition),
