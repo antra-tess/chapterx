@@ -170,11 +170,28 @@ export async function formatMessages(
   for (const msg of messages) {
     const content: ContentBlock[] = []
 
+    // Character override prefix: `~Name: rest` makes the message appear as if
+    // sent by `Name`, hiding the real author from the LLM. Lets users seed
+    // additional characters into the transcript without their own message.
+    //
+    // The connector prepends a reply tag for replies (`<reply:@user> `), and
+    // Discord messages can start with mentions (`<@user> `), so the prefix may
+    // not be the literal first character. Skip any such lead-in before looking
+    // for `~Name:`; the lead-in is preserved and only the `~Name:` token is
+    // removed (matching how filterDotMessages handles dotted commands).
+    const leadIn = msg.content.match(/^(?:<reply:@[^>]+>\s*)?(?:<@[^>]+>\s*)*/)?.[0] ?? ''
+    const afterLeadIn = msg.content.slice(leadIn.length)
+    const characterMatch = afterLeadIn.match(/^~([^:\n]+):\s?/)
+    const overrideParticipant = characterMatch ? characterMatch[1]!.trim() : ''
+    const messageText = overrideParticipant
+      ? leadIn + afterLeadIn.slice(characterMatch![0].length)
+      : msg.content
+
     // Add text content
-    if (msg.content.trim()) {
+    if (messageText.trim()) {
       content.push({
         type: 'text',
-        text: msg.content,
+        text: messageText,
       })
     }
 
@@ -300,10 +317,16 @@ export async function formatMessages(
       }
     }
 
-    // For bot's own messages, use config.name for consistent LLM context
+    // For bot's own messages, use config.name for consistent LLM context.
+    // Character override takes precedence over both bot-name normalization and
+    // display-name resolution.
     const isBotMessage = botDiscordUsername && msg.author.username === botDiscordUsername
     const participantName = config.use_display_names ? msg.author.displayName : msg.author.username
-    const participant = isBotMessage ? config.name : participantName
+    const participant = overrideParticipant
+      ? overrideParticipant
+      : isBotMessage
+        ? config.name
+        : participantName
 
     // Normalize mentions and replies to this bot to use config.name
     if (botDiscordUsername && botDiscordUsername !== config.name) {
@@ -347,6 +370,7 @@ export async function formatMessages(
       timestamp: msg.timestamp,
       messageId: msg.id,
       isBot: msg.author.bot,
+      isCharacterOverride: overrideParticipant ? true : undefined,
     })
   }
 

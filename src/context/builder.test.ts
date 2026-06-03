@@ -1696,6 +1696,137 @@ describe('display names mode', () => {
 })
 
 // ============================================================================
+// Integration tests: character override prefix (~Name: ...)
+// ============================================================================
+
+describe('character override prefix', () => {
+  let builder: ContextBuilder
+
+  beforeEach(() => {
+    msgCounter = 0
+    builder = new ContextBuilder()
+  })
+
+  it('replaces participant name with character and strips the prefix', async () => {
+    const messages = [
+      makeDiscordMessage({
+        id: 'u1',
+        content: '~bowie knife99: hello there',
+        author: { id: 'user-1', username: 'armistice', displayName: 'Armistice', bot: false },
+      }),
+    ]
+    const config = makeConfig({ name: 'Claude' })
+
+    const result = await builder.buildContext({
+      discordContext: makeDiscordContext(messages),
+      toolCacheWithResults: [],
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config,
+    })
+
+    expect(result.request.messages[0].participant).toBe('bowie knife99')
+    expect(textOf(result.request.messages[0])).toBe('hello there')
+  })
+
+  it('ignores messages that do not start with ~', async () => {
+    const messages = [
+      makeDiscordMessage({
+        id: 'u1',
+        content: 'just talking about ~character: stuff',
+        author: { id: 'user-1', username: 'armistice', displayName: 'Armistice', bot: false },
+      }),
+    ]
+    const config = makeConfig({ use_display_names: false })
+
+    const result = await builder.buildContext({
+      discordContext: makeDiscordContext(messages),
+      toolCacheWithResults: [],
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config,
+    })
+
+    expect(result.request.messages[0].participant).toBe('armistice')
+    expect(textOf(result.request.messages[0])).toBe('just talking about ~character: stuff')
+  })
+
+  it('applies override when a reply tag precedes the ~ (regression)', async () => {
+    // Replying to the bot makes the connector prepend `<reply:@Bot> `, which
+    // used to defeat the ^~ anchor and leak the tilde + real author.
+    const messages = [
+      makeDiscordMessage({
+        id: 'u1',
+        content: '<reply:@Claude> ~Archivist_Maintainer: hey whats my name',
+        author: { id: 'user-1', username: 'armistice', displayName: 'Armistice', bot: false },
+      }),
+    ]
+    const config = makeConfig({ name: 'Claude', use_display_names: false })
+
+    const result = await builder.buildContext({
+      discordContext: makeDiscordContext(messages),
+      toolCacheWithResults: [],
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config,
+    })
+
+    expect(result.request.messages[0].participant).toBe('Archivist_Maintainer')
+    expect(textOf(result.request.messages[0])).toBe('hey whats my name')
+    expect(textOf(result.request.messages[0])).not.toContain('~')
+  })
+
+  it('applies override when a leading mention precedes the ~ (regression)', async () => {
+    const messages = [
+      makeDiscordMessage({
+        id: 'u1',
+        content: '<@Claude> ~Narrator: scene opens',
+        author: { id: 'user-1', username: 'armistice', displayName: 'Armistice', bot: false },
+      }),
+    ]
+    const config = makeConfig({ name: 'Claude', use_display_names: false })
+
+    const result = await builder.buildContext({
+      discordContext: makeDiscordContext(messages),
+      toolCacheWithResults: [],
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config,
+    })
+
+    expect(result.request.messages[0].participant).toBe('Narrator')
+    expect(textOf(result.request.messages[0])).not.toContain('~Narrator:')
+  })
+
+  it('omits spoofed characters from stop sequences so the model can frag', async () => {
+    const messages = [
+      makeDiscordMessage({
+        id: 'u1',
+        content: 'hi all',
+        author: { id: 'user-1', username: 'armistice', displayName: 'Armistice', bot: false },
+      }),
+      makeDiscordMessage({
+        id: 'u2',
+        content: '~bowie knife99: hello there',
+        author: { id: 'user-1', username: 'armistice', displayName: 'Armistice', bot: false },
+      }),
+    ]
+    const config = makeConfig({ name: 'Claude', use_display_names: false })
+
+    const result = await builder.buildContext({
+      discordContext: makeDiscordContext(messages),
+      toolCacheWithResults: [],
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config,
+    })
+
+    expect(result.request.stop_sequences).toContain('\narmistice:')
+    expect(result.request.stop_sequences).not.toContain('\nbowie knife99:')
+  })
+})
+
+// ============================================================================
 // Unit tests: applyMentionFormat
 // ============================================================================
 
