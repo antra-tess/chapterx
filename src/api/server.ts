@@ -5,6 +5,8 @@
 
 import express, { Request, Response, NextFunction } from 'express'
 import { DiscordConnector } from '../discord/connector.js'
+import { ConfigSystem } from '../config/system.js'
+import { ContextBuilder } from '../context/builder.js'
 import { logger } from '../utils/logger.js'
 
 export interface ApiConfig {
@@ -66,7 +68,10 @@ export class ApiServer {
 
   constructor(
     private config: ApiConfig,
-    private connector: DiscordConnector
+    private connector: DiscordConnector,
+    private configSystem?: ConfigSystem,
+    private contextBuilder?: ContextBuilder,
+    private botName?: string
   ) {
     this.setupMiddleware()
     this.setupRoutes()
@@ -233,6 +238,48 @@ export class ApiServer {
             error: 'Internal Server Error',
             message: error.message || 'Failed to fetch user avatar'
           })
+        }
+      }
+    })
+
+    // Build full LLM context for a channel (get_prompt equivalent)
+    this.app.post('/api/context/build', async (req: Request, res: Response) => {
+      try {
+        if (!this.configSystem || !this.contextBuilder || !this.botName) {
+          res.status(501).json({
+            error: 'Not Available',
+            message: 'Context building requires configSystem, contextBuilder, and botName'
+          })
+          return
+        }
+
+        const { channel, messages: messageCount } = req.body as {
+          channel: string  // Discord channel URL or channel ID
+          messages?: number  // Number of messages to include (default: bot config)
+        }
+
+        if (!channel) {
+          res.status(400).json({
+            error: 'Bad Request',
+            message: 'Missing required parameter: channel',
+            details: 'Provide a Discord channel URL or channel ID'
+          })
+          return
+        }
+
+        const result = await this.buildFullContext(channel, messageCount)
+        res.json(result)
+      } catch (error: any) {
+        logger.error({ error, body: req.body }, 'API error in /api/context/build')
+
+        if (error.message?.includes('Invalid') || error.message?.includes('Missing')) {
+          res.status(400).json({ error: 'Bad Request', message: error.message })
+        } else if (error.message?.includes('not found') || error.message?.includes('Unknown')) {
+          res.status(404).json({ error: 'Not Found', message: error.message })
+        } else if (error.message?.includes('not accessible') || error.message?.includes('Missing Access')) {
+          res.status(403).json({ error: 'Forbidden', message: error.message })
+        } else {
+          res.status(500).json({ error: 'Internal Server Error', message: error.message || 'An unexpected error occurred' })
         }
       }
     })
@@ -548,6 +595,95 @@ export class ApiServer {
   private extractMessageIdFromUrl(url: string): string | null {
     const match = url.match(/\/channels\/\d+\/\d+\/(\d+)/)
     return match ? match[1]! : null
+  }
+
+  /**
+   * Build the full LLM context for a channel, as the bot would see it.
+   * Runs the complete context builder pipeline with an optional message count override.
+   * Character limits and other truncation are disabled so you get the full window.
+   */
+  private async buildFullContext(channel: string, messageCount?: number): Promise<any> {
+    // Parse channel ID from URL or use as-is
+    let channelId: string
+    let guildId: string = ''
+    const urlMatch = channel.match(/\/channels\/(\d+)\/(\d+)/)
+    if (urlMatch) {
+      guildId = urlMatch[1]!
+      channelId = urlMatch[2]!
+    } else if (/^\d+$/.test(channel)) {
+      channelId = channel
+    } else {
+      throw new Error('Invalid channel: provide a Discord channel URL or numeric channel ID')
+    }
+
+    // Load bot config for this channel
+    const config = this.configSystem!.loadConfig({
+      botName: this.botName!,
+      guildId,
+      channelConfigs: [],
+    })
+
+    // Override limits: use provided message count, disable character limits
+    const fetchMessages = messageCount || config.recency_window_messages || 200
+    const fetchDepth = fetchMessages + 100  // Buffer for .history and filtering
+
+    // Fetch context from Discord
+    const discordContext = await this.connector.fetchContext({
+      channelId,
+      depth: fetchDepth,
+      maxImages: config.include_images ? Math.max((config.max_images || 5) * 2, 10) : 0,
+    })
+
+    if (discordContext.messages.length === 0) {
+      throw new Error(`No messages found in channel ${channelId}`)
+    }
+
+    // Build config with overridden limits
+    const overriddenConfig = {
+      ...config,
+      recency_window_messages: fetchMessages,
+      recency_window_characters: undefined,  // No character limit
+      hard_max_characters: undefined,  // No hard limit
+    }
+
+    const botUsername = this.connector.getBotUsername()
+
+    // Run full context builder pipeline
+    const contextResult = await this.contextBuilder!.buildContext({
+      discordContext,
+      toolCacheWithResults: [],  // No tool cache for inspection
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config: overriddenConfig,
+      botDiscordUsername: botUsername || undefined,
+    })
+
+    // Format the output: participant messages with text content
+    const messages = contextResult.request.messages.map(msg => ({
+      participant: msg.participant,
+      content: msg.content
+        .filter(b => b.type === 'text')
+        .map(b => (b as any).text)
+        .join('\n'),
+      hasImages: msg.content.some(b => b.type === 'image'),
+      imageCount: msg.content.filter(b => b.type === 'image').length,
+    }))
+
+    return {
+      messages,
+      metadata: {
+        botName: config.name,
+        channelId,
+        messageCount: messages.length,
+        configuredLimit: config.recency_window_messages,
+        requestedLimit: messageCount || null,
+        model: config.continuation_model,
+        mode: config.mode || 'prefill',
+        systemPrompt: config.system_prompt ? config.system_prompt.substring(0, 200) + (config.system_prompt.length > 200 ? '...' : '') : null,
+        contextPrefix: config.context_prefix ? config.context_prefix.substring(0, 200) + (config.context_prefix.length > 200 ? '...' : '') : null,
+        stopSequences: contextResult.request.stop_sequences,
+      },
+    }
   }
 
   async start(): Promise<void> {

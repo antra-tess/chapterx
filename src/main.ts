@@ -188,7 +188,10 @@ async function main() {
     if (apiBearerToken) {
       apiServer = new ApiServer(
         { port: apiPort, bearerToken: apiBearerToken },
-        connector
+        connector,
+        configSystem,
+        contextBuilder,
+        botName
       )
       await apiServer.start()
     } else {
