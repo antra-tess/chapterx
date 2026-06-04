@@ -515,6 +515,23 @@ export class AgentLoop {
     const mCommandEvent = events.find((e) => e.type === 'message' && (e.data as any)._isMCommand)
     if (mCommandEvent) {
       const message = mCommandEvent.data as any
+      const mContent = (message.content?.trim() || '') as string
+
+      // Handle "m get_context [N]" — dump the full LLM context as a file attachment
+      const getContextMatch = mContent.match(/^m\s+get_context(?:\s+(\d+))?/i)
+      if (getContextMatch) {
+        const requestedMessages = getContextMatch[1] ? parseInt(getContextMatch[1]) : undefined
+        // Delete the command message
+        try { await this.connector.deleteMessage(channelId, message.id) } catch {}
+        // Build and send context dump
+        try {
+          await this.handleGetContext(channelId, guildId, requestedMessages, message.id)
+        } catch (error: any) {
+          logger.error({ error: error.message, channelId }, 'Failed to handle m get_context')
+          await this.connector.sendMessage(channelId, `.error: get_context failed — ${error.message}`)
+        }
+        return
+      }
 
       // Check if this bot supports continuation when the last message is its own.
       // Models that can't handle consecutive assistant turns (e.g. Opus 4.x native)
@@ -3831,6 +3848,102 @@ export class AgentLoop {
     }
 
     return { text, truncatedAt: null }
+  }
+
+  /**
+   * Handle "m get_context [N]" command — build the full LLM context and send
+   * it as a text file attachment. Character and hard limits are disabled so the
+   * caller can inspect the full window.
+   */
+  private async handleGetContext(
+    channelId: string,
+    guildId: string,
+    requestedMessages?: number,
+    triggeringMessageId?: string
+  ): Promise<void> {
+    // Load config
+    const pinnedConfigs = await this.connector.fetchPinnedConfigs(channelId)
+    const inheritedPinnedConfigs = await this.collectPinnedConfigsWithInheritance(channelId, pinnedConfigs)
+    const config = this.configSystem.loadConfig({
+      botName: this.botId,
+      guildId,
+      channelConfigs: inheritedPinnedConfigs,
+    })
+
+    // Use requested message count or bot's configured limit
+    const messageCount = requestedMessages || config.recency_window_messages || 200
+    const fetchDepth = messageCount + 100
+
+    // Fetch context
+    const discordContext = await this.connector.fetchContext({
+      channelId,
+      depth: fetchDepth,
+      maxImages: config.include_images ? Math.max((config.max_images || 5) * 2, 10) : 0,
+    })
+
+    if (discordContext.messages.length === 0) {
+      await this.connector.sendMessage(channelId, '.get_context: no messages found')
+      return
+    }
+
+    // Override limits: no character cap, no hard max
+    const overriddenConfig = {
+      ...config,
+      recency_window_messages: messageCount,
+      recency_window_characters: undefined,
+      hard_max_characters: undefined,
+    }
+
+    const botUsername = this.connector.getBotUsername()
+
+    // Build context through the full pipeline
+    const contextResult = await this.contextBuilder.buildContext({
+      discordContext,
+      toolCacheWithResults: [],
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config: overriddenConfig,
+      botDiscordUsername: botUsername || undefined,
+    })
+
+    // Format as readable text
+    const lines: string[] = []
+    lines.push(`# Context for ${config.name} in #${channelId}`)
+    lines.push(`# Messages: ${contextResult.request.messages.length} (requested: ${messageCount})`)
+    lines.push(`# Model: ${config.continuation_model}`)
+    lines.push(`# Mode: ${config.mode || 'prefill'}`)
+    lines.push(`# Stop sequences: ${JSON.stringify(contextResult.request.stop_sequences)}`)
+    if (config.system_prompt) {
+      lines.push(`\n# === SYSTEM PROMPT ===`)
+      lines.push(config.system_prompt)
+    }
+    if (config.context_prefix) {
+      lines.push(`\n# === CONTEXT PREFIX ===`)
+      lines.push(config.context_prefix)
+    }
+    lines.push(`\n# === MESSAGES ===`)
+
+    for (const msg of contextResult.request.messages) {
+      const textContent = msg.content
+        .filter(b => b.type === 'text')
+        .map(b => (b as any).text)
+        .join('\n')
+      const imageCount = msg.content.filter(b => b.type === 'image').length
+      const imageTag = imageCount > 0 ? ` [${imageCount} image${imageCount > 1 ? 's' : ''}]` : ''
+
+      lines.push(`\n${msg.participant}:${imageTag}`)
+      lines.push(textContent)
+    }
+
+    const output = lines.join('\n')
+
+    // Send as file attachment
+    await this.connector.sendMessageWithAttachment(
+      channelId,
+      `.context dump (${contextResult.request.messages.length} messages)`,
+      { name: `context-${config.name}-${Date.now()}.txt`, content: output },
+      triggeringMessageId
+    )
   }
 }
 
