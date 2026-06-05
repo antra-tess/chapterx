@@ -644,8 +644,8 @@ export class ApiServer {
     const overriddenConfig = {
       ...config,
       recency_window_messages: fetchMessages,
-      recency_window_characters: undefined,  // No character limit
-      hard_max_characters: undefined,  // No hard limit
+      recency_window_characters: Infinity,  // No character limit
+      hard_max_characters: Infinity,  // No hard limit
     }
 
     const botUsername = this.connector.getBotUsername()
