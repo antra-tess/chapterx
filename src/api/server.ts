@@ -634,7 +634,9 @@ export class ApiServer {
       maxImages: config.include_images ? Math.max((config.max_images || 5) * 2, 10) : 0,
     })
 
-    if (discordContext.messages.length === 0) {
+    const discordFetched = discordContext.messages.length
+
+    if (discordFetched === 0) {
       throw new Error(`No messages found in channel ${channelId}`)
     }
 
@@ -675,6 +677,7 @@ export class ApiServer {
         botName: config.name,
         channelId,
         messageCount: messages.length,
+        discordMessagesFetched: discordFetched,
         configuredLimit: config.recency_window_messages,
         requestedLimit: messageCount || null,
         model: config.continuation_model,
