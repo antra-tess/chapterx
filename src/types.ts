@@ -133,6 +133,7 @@ export interface ModelConfig {
   prefill_thinking?: boolean  // If true, enable extended thinking
   debug_thinking?: boolean  // If true, thinking is enabled and content posted as dot-prefixed debug messages
   thinking_budget?: number  // Token budget for extended thinking (default: 10000)
+  thinking_type?: 'enabled' | 'adaptive'  // API thinking type: 'enabled' (explicit budget) or 'adaptive' (model-managed, e.g. Fable 5)
   botName: string  // Name used in LLM context (prefill labels, stop sequences)
   messageDelimiter?: string  // Optional delimiter appended to each message (for completions formatter)
   turnEndToken?: string  // Optional token appended after each message content (e.g., '<eot>' for Gemini)
@@ -159,6 +160,7 @@ export interface BotConfig {
   prefill_thinking?: boolean  // If true, enable extended thinking
   debug_thinking?: boolean  // If true, send thinking content as dot-prefixed debug message
   thinking_budget?: number  // Token budget for extended thinking (default: 10000)
+  thinking_type?: 'enabled' | 'adaptive'  // API thinking type: 'enabled' (explicit budget) or 'adaptive' (model-managed)
   preserve_thinking_context?: boolean  // If true, preserve thinking traces in context (for Opus 4.5)
   continuation_model: string
   temperature: number

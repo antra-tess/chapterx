@@ -8,7 +8,6 @@
 import {
   LLMRequest,
   ContextBuildResult,
-  ParticipantMessage,
   DiscordContext,
   ToolCall,
   BotConfig,

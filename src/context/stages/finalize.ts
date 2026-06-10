@@ -131,6 +131,7 @@ export function extractModelConfig(config: BotConfig): ModelConfig {
     prefill_thinking: config.prefill_thinking,
     debug_thinking: config.debug_thinking,
     thinking_budget: config.thinking_budget,
+    thinking_type: config.thinking_type,
     botName: config.name,
     messageDelimiter: config.message_delimiter,
     turnEndToken: config.turn_end_token,

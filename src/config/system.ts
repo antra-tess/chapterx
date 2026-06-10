@@ -266,6 +266,7 @@ export class ConfigSystem {
       prefill_thinking: config.prefill_thinking || false,
       debug_thinking: config.debug_thinking || false,
       thinking_budget: config.thinking_budget,
+      thinking_type: config.thinking_type,
       preserve_thinking_context: config.preserve_thinking_context || false,
       continuation_model: config.continuation_model || '',
       temperature: config.temperature ?? 1.0,

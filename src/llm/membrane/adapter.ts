@@ -345,6 +345,7 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     config.thinking = {
       enabled: true,
       budgetTokens: request.config.thinking_budget || 10000,  // Default budget for extended thinking
+      type: request.config.thinking_type,  // 'enabled' (default) or 'adaptive' (e.g. Fable 5)
     };
   }
   
