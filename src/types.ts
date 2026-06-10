@@ -131,6 +131,8 @@ export interface ModelConfig {
   max_tokens: number
   top_p?: number  // Optional — only sent to API when explicitly set (avoids Anthropic temp+top_p conflict)
   prefill_thinking?: boolean  // If true, enable extended thinking
+  debug_thinking?: boolean  // If true, thinking is enabled and content posted as dot-prefixed debug messages
+  thinking_budget?: number  // Token budget for extended thinking (default: 10000)
   botName: string  // Name used in LLM context (prefill labels, stop sequences)
   messageDelimiter?: string  // Optional delimiter appended to each message (for completions formatter)
   turnEndToken?: string  // Optional token appended after each message content (e.g., '<eot>' for Gemini)
@@ -156,6 +158,7 @@ export interface BotConfig {
   // Model config
   prefill_thinking?: boolean  // If true, enable extended thinking
   debug_thinking?: boolean  // If true, send thinking content as dot-prefixed debug message
+  thinking_budget?: number  // Token budget for extended thinking (default: 10000)
   preserve_thinking_context?: boolean  // If true, preserve thinking traces in context (for Opus 4.5)
   continuation_model: string
   temperature: number

@@ -337,12 +337,14 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     repetitionPenalty: request.config.repetition_penalty,
   };
   
-  // Enable extended thinking when prefill_thinking is set
+  // Enable extended thinking when prefill_thinking or debug_thinking is set
   // Membrane will use the API's thinking feature and return thinking blocks
-  if (request.config.prefill_thinking) {
+  // debug_thinking needs thinking enabled too — the model must be asked to think
+  // for there to be thinking content to display
+  if (request.config.prefill_thinking || request.config.debug_thinking) {
     config.thinking = {
       enabled: true,
-      budgetTokens: 10000,  // Default budget for extended thinking
+      budgetTokens: request.config.thinking_budget || 10000,  // Default budget for extended thinking
     };
   }
   

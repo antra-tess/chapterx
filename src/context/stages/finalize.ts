@@ -129,6 +129,8 @@ export function extractModelConfig(config: BotConfig): ModelConfig {
     max_tokens: config.max_tokens,
     top_p: config.top_p,
     prefill_thinking: config.prefill_thinking,
+    debug_thinking: config.debug_thinking,
+    thinking_budget: config.thinking_budget,
     botName: config.name,
     messageDelimiter: config.message_delimiter,
     turnEndToken: config.turn_end_token,
