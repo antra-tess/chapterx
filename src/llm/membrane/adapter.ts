@@ -346,6 +346,12 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
       enabled: true,
       budgetTokens: request.config.thinking_budget || 10000,  // Default budget for extended thinking
       type: request.config.thinking_type,  // 'enabled' (default) or 'adaptive' (e.g. Fable 5)
+      // Adaptive-thinking models (Fable 5, Opus 4.7+) default to display:'omitted'
+      // (empty thinking field, signature only). debug_thinking means we want to SEE
+      // the reasoning — request the summarized form explicitly.
+      display: request.config.thinking_type === 'adaptive' && request.config.debug_thinking
+        ? 'summarized'
+        : undefined,
     };
   }
   
