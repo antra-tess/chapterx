@@ -1870,8 +1870,32 @@ export class DiscordConnector {
     const fetched = await channel.messages.fetch(options) as unknown as Collection<string, Message>
 
     if (!this.messageCachePopulated.has(channelId)) {
-      // First population — store as initial cache
+      // First population — only safe if the fetch covers the channel's CURRENT tail.
+      // A `before:` fetch with an old boundary (e.g., thread-parent context fetch
+      // paginating before the thread start message) returns a stale window. Caching
+      // that and marking the channel populated poisons it: later latest-message
+      // requests get served stale history with the gap permanently missing, because
+      // push events only append new messages on top of the stale window.
+      //
+      // Safe cases:
+      //   - No `before` (latest-messages fetch)
+      //   - `before` >= channel.lastMessageId (boundary IS the newest message,
+      //     e.g., activation fetch paginating before the trigger)
+      const boundaryMsg = before ? channel.messages.cache.get(before) : undefined
+      if (before) {
+        const lastId = channel.lastMessageId
+        if (!lastId || before < lastId || !boundaryMsg) {
+          logger.debug({ channelId, before, lastMessageId: lastId, haveBoundary: !!boundaryMsg },
+            'Skipping cache population from before-fetch (stale window or missing boundary message)')
+          return fetched
+        }
+      }
       const msgs = Array.from(fetched.values()).reverse()  // chronological order
+      // Include the boundary message itself (e.g., the trigger that arrived via
+      // gateway) so the cache window is complete up to the newest message
+      if (boundaryMsg) {
+        msgs.push(boundaryMsg)
+      }
       this.messageCache.set(channelId, msgs)
       const index = new Map<string, number>()
       msgs.forEach((m, i) => index.set(m.id, i))
@@ -1879,17 +1903,27 @@ export class DiscordConnector {
       this.messageCachePopulated.add(channelId)
       logger.debug({ channelId, count: msgs.length }, 'Message cache populated from API')
     } else if (before && cache) {
-      // Extend cache backwards with older messages from API
-      const msgs = Array.from(fetched.values()).reverse()
-      const existingIndex = this.messageCacheIndex.get(channelId) ?? new Map<string, number>()
-      const newMsgs = msgs.filter(m => !existingIndex.has(m.id))
-      if (newMsgs.length > 0) {
-        cache.unshift(...newMsgs)
-        // Rebuild index (positions shifted by prepend)
-        const newIndex = new Map<string, number>()
-        cache.forEach((m, i) => { if (m) newIndex.set(m.id, i) })
-        this.messageCacheIndex.set(channelId, newIndex)
-        logger.debug({ channelId, extended: newMsgs.length, total: cache.length }, 'Cache extended backwards')
+      // Extend cache backwards with older messages from API — but only when the
+      // query boundary touches the cache's oldest message (normal pagination).
+      // If `before` is older than the cache window (e.g., thread-parent fetch far
+      // in the past), the fetched batch is DISJOINT from the cache; unshifting it
+      // would create a silent gap in the middle of the cache.
+      const oldestCachedMsg = cache.find((m): m is Message => m !== null)
+      if (oldestCachedMsg && before === oldestCachedMsg.id) {
+        const msgs = Array.from(fetched.values()).reverse()
+        const existingIndex = this.messageCacheIndex.get(channelId) ?? new Map<string, number>()
+        const newMsgs = msgs.filter(m => !existingIndex.has(m.id))
+        if (newMsgs.length > 0) {
+          cache.unshift(...newMsgs)
+          // Rebuild index (positions shifted by prepend)
+          const newIndex = new Map<string, number>()
+          cache.forEach((m, i) => { if (m) newIndex.set(m.id, i) })
+          this.messageCacheIndex.set(channelId, newIndex)
+          logger.debug({ channelId, extended: newMsgs.length, total: cache.length }, 'Cache extended backwards')
+        }
+      } else {
+        logger.debug({ channelId, before, oldestCached: oldestCachedMsg?.id },
+          'Skipping backwards cache extension — query window disjoint from cache')
       }
     }
 
