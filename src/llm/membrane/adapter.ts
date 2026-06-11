@@ -340,8 +340,15 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
   // Enable extended thinking when prefill_thinking or debug_thinking is set
   // Membrane will use the API's thinking feature and return thinking blocks
   // debug_thinking needs thinking enabled too — the model must be asked to think
-  // for there to be thinking content to display
-  if (request.config.prefill_thinking || request.config.debug_thinking) {
+  // for there to be thinking content to display.
+  //
+  // debug_thinking only enables API thinking in chat mode: prefill-mode requests
+  // end with an assistant prefill, which the Anthropic API rejects when extended
+  // thinking is on. Prefill bots get debug_thinking display from the literal
+  // <thinking> text the model writes (the original behavior).
+  const enableApiThinking = request.config.prefill_thinking ||
+    (request.config.debug_thinking && request.config.mode === 'chat')
+  if (enableApiThinking) {
     config.thinking = {
       enabled: true,
       budgetTokens: request.config.thinking_budget || 10000,  // Default budget for extended thinking
