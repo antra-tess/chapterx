@@ -364,6 +364,20 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
       sendJson(req, res, { bots })
       return
     }
+
+    // GET /api/channels - List channels seen in the index (id, name, trace count)
+    if (path === '/api/channels') {
+      const counts = new Map<string, number>()
+      for (const entry of getIndexCache()) {
+        if (!entry.channelId) continue
+        counts.set(entry.channelId, (counts.get(entry.channelId) || 0) + 1)
+      }
+      const channels = Array.from(counts.entries())
+        .map(([id, count]) => ({ id, name: getChannelName(id), count }))
+        .sort((a, b) => b.count - a.count)
+      sendJson(req, res, { channels })
+      return
+    }
     
     // GET /api/search?q=<messageId or URL>&bot=<botName>
     if (path.startsWith('/api/search')) {
@@ -1177,6 +1191,10 @@ const HTML = `<!DOCTYPE html>
         <select id="botSelect" onchange="onBotChange()">
           <option value="">All Bots</option>
         </select>
+        <label>Channel:</label>
+        <select id="channelSelect" onchange="onChannelChange()">
+          <option value="">All Channels</option>
+        </select>
         <button id="failedToggle" class="filter-btn" onclick="toggleFailed()">Errors Only</button>
       </div>
     </div>
@@ -1221,6 +1239,7 @@ const HTML = `<!DOCTYPE html>
     let currentTrace = null;
     let authToken = localStorage.getItem('trace_viewer_token') || '';
     let currentBot = '';
+    let currentChannel = '';
     let currentPage = 0;
     let pageSize = 50;
     let totalTraces = 0;
@@ -1281,11 +1300,13 @@ const HTML = `<!DOCTYPE html>
       // Restore state from URL params before loading data
       const params = new URLSearchParams(window.location.search);
       const urlBot = params.get('bot');
+      const urlChannel = params.get('channel');
       const urlPage = parseInt(params.get('page') || '0', 10);
       if (urlPage > 0) currentPage = urlPage;
       if (params.get('failed') === 'true') failedOnly = true;
 
       await loadBots();
+      await loadChannels();
 
       // Restore bot selector from URL after bots are loaded
       if (urlBot) {
@@ -1293,6 +1314,15 @@ const HTML = `<!DOCTYPE html>
         if (Array.from(select.options).some(o => o.value === urlBot)) {
           select.value = urlBot;
           currentBot = urlBot;
+        }
+      }
+
+      // Restore channel selector from URL after channels are loaded
+      if (urlChannel) {
+        const select = document.getElementById('channelSelect');
+        if (Array.from(select.options).some(o => o.value === urlChannel)) {
+          select.value = urlChannel;
+          currentChannel = urlChannel;
         }
       }
 
@@ -1328,7 +1358,7 @@ const HTML = `<!DOCTYPE html>
       const res = await apiFetch('/api/bots');
       const data = await res.json();
       const select = document.getElementById('botSelect');
-      
+
       for (const bot of data.bots) {
         const option = document.createElement('option');
         option.value = bot;
@@ -1336,9 +1366,29 @@ const HTML = `<!DOCTYPE html>
         select.appendChild(option);
       }
     }
-    
+
+    async function loadChannels() {
+      const res = await apiFetch('/api/channels');
+      const data = await res.json();
+      const select = document.getElementById('channelSelect');
+
+      for (const ch of data.channels || []) {
+        const option = document.createElement('option');
+        option.value = ch.id;
+        option.textContent = (ch.name || ch.id) + ' (' + ch.count + ')';
+        select.appendChild(option);
+      }
+    }
+
     function onBotChange() {
       currentBot = document.getElementById('botSelect').value;
+      currentPage = 0;
+      syncUrlState();
+      loadTraces();
+    }
+
+    function onChannelChange() {
+      currentChannel = document.getElementById('channelSelect').value;
       currentPage = 0;
       syncUrlState();
       loadTraces();
@@ -1355,6 +1405,7 @@ const HTML = `<!DOCTYPE html>
     function syncUrlState() {
       const params = new URLSearchParams();
       if (currentBot) params.set('bot', currentBot);
+      if (currentChannel) params.set('channel', currentChannel);
       if (currentPage > 0) params.set('page', String(currentPage));
       if (failedOnly) params.set('failed', 'true');
       const qs = params.toString();
@@ -1384,6 +1435,7 @@ const HTML = `<!DOCTYPE html>
       const offset = currentPage * pageSize;
       let url = '/api/traces?limit=' + pageSize + '&offset=' + offset;
       if (currentBot) url += '&bot=' + encodeURIComponent(currentBot);
+      if (currentChannel) url += '&channel=' + encodeURIComponent(currentChannel);
       if (failedOnly) url += '&failed=true';
 
       const res = await apiFetch(url);
