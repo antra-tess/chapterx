@@ -2788,6 +2788,9 @@ export class AgentLoop {
           stopReason: (result?.stopReason || 'end_turn') as any,
           usage: result?.usage || { inputTokens: 0, outputTokens: 0 },
           model: result?.model || '',
+          // Preserve the raw provider response — refusal reactions read
+          // stop_details.category from it to pick a category-specific emoji
+          raw: result?.raw ?? null,
         },
         toolCallIds: allToolCallIds,
         preambleMessageIds: [],
