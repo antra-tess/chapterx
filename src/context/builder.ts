@@ -14,6 +14,7 @@ import {
 } from '../types.js'
 import { Activation } from '../activation/index.js'
 import { logger } from '../utils/logger.js'
+import { attachThinkingBlocks, type ThinkingBlock } from '../agent/thinking-cache.js'
 import {
   determineCacheMarker,
   applyChapterXCacheMarker,
@@ -60,6 +61,8 @@ export interface BuildContextParams {
   botDiscordUsername?: string
   activations?: Activation[]
   pluginInjections?: ContextInjection[]
+  /** Persisted native thinking blocks keyed by the bot message ID they anchor to */
+  thinkingByMessageId?: Map<string, ThinkingBlock[]>
 }
 
 export interface ContextBuildResultWithTrace extends ContextBuildResult {
@@ -68,7 +71,7 @@ export interface ContextBuildResultWithTrace extends ContextBuildResult {
 
 export class ContextBuilder {
   async buildContext(params: BuildContextParams): Promise<ContextBuildResultWithTrace> {
-    const { discordContext, toolCacheWithResults, lastCacheMarker, messagesSinceRoll, config, botDiscordUsername, activations, pluginInjections } = params
+    const { discordContext, toolCacheWithResults, lastCacheMarker, messagesSinceRoll, config, botDiscordUsername, activations, pluginInjections, thinkingByMessageId } = params
     const originalMessageCount = discordContext.messages.length
 
     let messages = discordContext.messages
@@ -163,6 +166,17 @@ export class ContextBuilder {
     // 6. Inject plugin context injections
     if (pluginInjections && pluginInjections.length > 0) {
       insertPluginInjections(participantMessages, pluginInjections, messages)
+    }
+
+    // 6b. Re-attach persisted native thinking blocks (with signatures) to the
+    // bot's past messages — before merging, so anchors resolve by messageId.
+    // Restores reasoning continuity for models whose thinking lives in the
+    // encrypted signature (e.g., Fable 5 with display:'omitted').
+    if (thinkingByMessageId && thinkingByMessageId.size > 0) {
+      const attached = attachThinkingBlocks(participantMessages, thinkingByMessageId)
+      if (attached > 0) {
+        logger.debug({ attached, cached: thinkingByMessageId.size }, 'Re-attached thinking blocks to past bot turns')
+      }
     }
 
     // 7. Merge consecutive messages from the bot (not users)

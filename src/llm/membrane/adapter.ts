@@ -177,12 +177,23 @@ export function toMembraneContentBlock(block: ContentBlock): MembraneContentBloc
       return {
         type: 'tool_result',
         toolUseId: block.toolUseId,
-        content: typeof block.content === 'string' 
-          ? block.content 
+        content: typeof block.content === 'string'
+          ? block.content
           : block.content.map(toMembraneContentBlock),
         isError: block.isError,
       };
-      
+
+    case 'thinking':
+      // Round-trip verbatim — signature must reach the API unchanged
+      return {
+        type: 'thinking',
+        thinking: block.thinking,
+        ...(block.signature ? { signature: block.signature } : {}),
+      } as MembraneContentBlock;
+
+    case 'redacted_thinking':
+      return { ...block } as unknown as MembraneContentBlock;
+
     default:
       // Pass through unknown block types
       return block as unknown as MembraneContentBlock;
@@ -258,13 +269,21 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
       };
     }
 
-    case 'thinking':
-      // Convert thinking block to text (chapterx doesn't have native thinking type)
+    case 'thinking': {
+      // Preserve as a structured thinking block (with signature) so it can be
+      // persisted and round-tripped for reasoning continuity. Consumers that
+      // want display text read block.thinking directly.
+      const tb = block as { thinking?: string; signature?: string };
       return {
-        type: 'text',
-        text: `<thinking>${(block as any).thinking}</thinking>`,
+        type: 'thinking',
+        thinking: tb.thinking ?? '',
+        ...(tb.signature ? { signature: tb.signature } : {}),
       };
-      
+    }
+
+    case 'redacted_thinking':
+      return { ...(block as unknown as Record<string, unknown>) } as unknown as ContentBlock;
+
     default:
       // Pass through unknown block types
       return block as unknown as ContentBlock;

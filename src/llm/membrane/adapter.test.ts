@@ -497,16 +497,45 @@ describe('Tool Definition Conversion', () => {
 // ============================================================================
 
 describe('Edge Cases: Thinking Block Conversion', () => {
-  it('should convert membrane thinking block to text with tags', () => {
+  it('should preserve membrane thinking block as structured block with signature', () => {
     const thinkingBlock = {
       type: 'thinking' as const,
       thinking: 'Let me think about this problem step by step...',
+      signature: 'sig_abc123',
     };
-    
-    const result = fromMembraneContentBlock(thinkingBlock);
-    
-    expect(result.type).toBe('text');
-    expect((result as any).text).toBe('<thinking>Let me think about this problem step by step...</thinking>');
+
+    const result = fromMembraneContentBlock(thinkingBlock as any);
+
+    expect(result.type).toBe('thinking');
+    expect((result as any).thinking).toBe('Let me think about this problem step by step...');
+    expect((result as any).signature).toBe('sig_abc123');
+  });
+
+  it('should preserve signature-only thinking blocks (display omitted)', () => {
+    const thinkingBlock = {
+      type: 'thinking' as const,
+      thinking: '',
+      signature: 'sig_encrypted_reasoning',
+    };
+
+    const result = fromMembraneContentBlock(thinkingBlock as any);
+
+    expect(result.type).toBe('thinking');
+    expect((result as any).thinking).toBe('');
+    expect((result as any).signature).toBe('sig_encrypted_reasoning');
+  });
+
+  it('should round-trip thinking blocks back to membrane format verbatim', () => {
+    const block = {
+      type: 'thinking' as const,
+      thinking: 'reasoning text',
+      signature: 'sig_xyz',
+    };
+
+    const membrane = toMembraneContentBlock(block as any);
+    expect((membrane as any).type).toBe('thinking');
+    expect((membrane as any).thinking).toBe('reasoning text');
+    expect((membrane as any).signature).toBe('sig_xyz');
   });
   
   it('should handle thinking blocks in response conversion', () => {
@@ -530,8 +559,8 @@ describe('Edge Cases: Thinking Block Conversion', () => {
     const result = fromMembraneResponse(input);
     
     expect(result.content).toHaveLength(2);
-    expect(result.content[0].type).toBe('text');
-    expect((result.content[0] as any).text).toBe('<thinking>Analyzing the request...</thinking>');
+    expect(result.content[0].type).toBe('thinking');
+    expect((result.content[0] as any).thinking).toBe('Analyzing the request...');
     expect(result.content[1].type).toBe('text');
     expect((result.content[1] as any).text).toBe('Here is my answer.');
   });

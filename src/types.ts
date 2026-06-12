@@ -48,17 +48,36 @@ export interface ParticipantMessage {
 }
 
 /**
- * Content blocks - supports text, images, and tool use
+ * Content blocks - supports text, images, tool use, and thinking
  */
-export type ContentBlock = 
+export type ContentBlock =
   | TextContent
   | ImageContent
   | ToolUseContent
   | ToolResultContent
+  | ThinkingContent
+  | RedactedThinkingContent
 
 export interface TextContent {
   type: 'text'
   text: string
+}
+
+/**
+ * Native extended-thinking block. The signature carries the API's encrypted
+ * full reasoning (validated and, on display:'omitted' models, decrypted
+ * server-side when passed back). Must round-trip verbatim — including blocks
+ * whose thinking field is empty (signature-only).
+ */
+export interface ThinkingContent {
+  type: 'thinking'
+  thinking: string
+  signature?: string
+}
+
+export interface RedactedThinkingContent {
+  type: 'redacted_thinking'
+  data?: string
 }
 
 export interface ImageContent {

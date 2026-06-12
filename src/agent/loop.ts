@@ -32,6 +32,7 @@ import { TTSRelayClient, type InterruptionEvent } from '../tts/index.js'
 import { parseSteerMessage, loadCatalog, resolveDirective, toProviderParams, formatReadout, listAvailableLabels, resolveVendorForModel, fetchProbeReadout, fetchProxyReadout } from '../steering/index.js'
 import type { ChannelSteering } from '../steering/index.js'
 import { SleepState } from './sleep.js'
+import { loadThinkingBlocks, persistThinkingBlocks, type ThinkingBlock } from './thinking-cache.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
 type Membrane = any
@@ -1714,12 +1715,20 @@ export class AgentLoop {
       startProfile('toolCacheReload')
       const existingMessageIds = new Set(discordContext.messages.map(m => m.id))
       const filteredToolCache = await this.toolSystem.loadCacheWithResults(
-        this.botId, 
-        channelId, 
+        this.botId,
+        channelId,
         existingMessageIds
       )
       const toolCacheForContext = filteredToolCache
       endProfile('toolCacheReload')
+
+      // 4b3. Load persisted thinking blocks (native extended thinking with
+      // signatures) for reasoning continuity — re-attached to the bot's past
+      // turns during context build. Entries anchored to deleted messages are
+      // filtered out by existingMessageIds.
+      const thinkingByMessageId = config.preserve_thinking_context
+        ? loadThinkingBlocks(this.cacheDir, this.botId, channelId, existingMessageIds)
+        : undefined
       
       // 4b2. Extract cached MCP images and add to visible images
       // These are images from previous tool executions that were persisted
@@ -1897,6 +1906,7 @@ export class AgentLoop {
         botDiscordUsername: this.connector.getBotUsername(),  // Bot's actual Discord username for chat mode
         activations: activationsForContext,
         pluginInjections,
+        thinkingByMessageId,
       }
 
       const contextResult = await this.contextBuilder.buildContext(buildParams)
@@ -2702,10 +2712,26 @@ export class AgentLoop {
       const generatedImageBlocks: ContentBlock[] = (result?.content || [])
         .filter((c: any) => c.type === 'image')
 
+      // Capture native thinking blocks (with signatures) for persistence +
+      // display. Includes signature-only blocks (display:'omitted') — those
+      // carry the encrypted reasoning and must round-trip verbatim.
+      const nativeThinkingBlocks: ThinkingBlock[] = (result?.content || [])
+        .filter((c: any): c is ThinkingBlock => c.type === 'thinking' || c.type === 'redacted_thinking')
+
       // Strip thinking blocks and tool XML
-      const { stripped, content: thinkingContent } = this.stripThinkingBlocks(
+      const { stripped, content: textThinkingContent } = this.stripThinkingBlocks(
         this.toolSystem.stripToolXml(completionText)
       )
+
+      // Thinking for debug display: structured blocks (native thinking) plus
+      // any literal <thinking> text the model wrote (legacy/prefill style)
+      const thinkingContent = [
+        ...nativeThinkingBlocks
+          .filter((b): b is ThinkingBlock & { type: 'thinking' } => b.type === 'thinking')
+          .map(b => b.thinking)
+          .filter(t => t && t.trim()),
+        ...textThinkingContent,
+      ]
 
       // Post debug thinking if enabled
       if (config.debug_thinking && thinkingContent.length > 0) {
@@ -2780,6 +2806,12 @@ export class AgentLoop {
       const nativeContentBlocks: ContentBlock[] = [{ type: 'text', text: displayText }]
       if (generatedImageBlocks.length > 0) {
         nativeContentBlocks.push(...generatedImageBlocks)
+      }
+
+      // Persist native thinking blocks anchored to the sent messages so they
+      // can be re-attached to this turn in future context builds
+      if (config.preserve_thinking_context && nativeThinkingBlocks.length > 0 && allSentMessageIds.length > 0) {
+        persistThinkingBlocks(this.cacheDir, this.botId, channelId, allSentMessageIds, nativeThinkingBlocks)
       }
 
       return {
