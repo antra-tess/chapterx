@@ -132,7 +132,12 @@ function getIndexCache(): IndexEntry[] {
       }
     }
 
-    allEntries.push(...entries)
+    // Plain loop — spread (push(...entries)) passes every entry as a function
+    // argument and throws "Maximum call stack size exceeded" once the index
+    // grows past the engine's argument limit (~100k+ entries)
+    for (const entry of entries) {
+      allEntries.push(entry)
+    }
   }
 
   // Sort by timestamp descending (newest first)
