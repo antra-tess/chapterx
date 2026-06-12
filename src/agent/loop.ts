@@ -3048,12 +3048,13 @@ export class AgentLoop {
             llmRequest,
             discordMessages,
             stopReason: completion.stopReason,
+            raw: completion.raw,
             generatedImageBlocks,
           })
         }
         // Inside function_calls - the stop sequence was in a parameter, continue
-        logger.debug({ 
-          stopSequence: completion.raw?.stop_sequence 
+        logger.debug({
+          stopSequence: completion.raw?.stop_sequence
         }, 'Stopped on participant name inside function_calls, continuing to parse')
       }
       
@@ -3083,6 +3084,7 @@ export class AgentLoop {
           llmRequest,
           discordMessages,
           stopReason: completion.stopReason,
+          raw: completion.raw,
           generatedImageBlocks,
         })
       }
@@ -3340,6 +3342,7 @@ export class AgentLoop {
     discordMessages?: DiscordMessage[];
     suffix?: string;  // e.g., '[Max tool depth reached]'
     stopReason?: string;
+    raw?: unknown;  // Raw provider response from the final LLM call (carries stop_details for refusal categories)
     generatedImageBlocks?: ContentBlock[];  // Image blocks from image generation models
   }): Promise<{
     completion: any;
@@ -3497,6 +3500,9 @@ export class AgentLoop {
         stopReason: (stopReason || 'end_turn') as any,
         usage: { inputTokens: 0, outputTokens: 0 },
         model: '',
+        // Preserve the raw provider response — refusal reactions read
+        // stop_details.category from it to pick a category-specific emoji
+        raw: params.raw ?? null,
       },
       toolCallIds: allToolCallIds,
       preambleMessageIds: allPreambleMessageIds,
