@@ -44,115 +44,151 @@ const channelNameCache = new Map<string, string>()
 type IndexEntry = TraceIndex & { filename: string, botName?: string, logsDir?: string }
 
 let indexCache: IndexEntry[] | null = null
-let indexMtimes: Map<string, number> = new Map()
+let indexOffsets: Map<string, number> = new Map()  // consumed byte offset per index file
 
+// In-memory retention: entries older than this many days are not loaded.
+// 0 = keep everything. Trace files on disk are untouched either way.
+const INDEX_RETENTION_DAYS = parseInt(process.env.INDEX_RETENTION_DAYS || '30', 10)
+
+/** Numeric timestamp, computed once per entry (Date parsing per sort comparison is slow). */
+function entryTs(e: IndexEntry & { _ts?: number }): number {
+  let ts = (e as { _ts?: number })._ts
+  if (ts === undefined) {
+    ts = e.timestamp ? new Date(e.timestamp as unknown as string).getTime() : 0
+    ;(e as { _ts?: number })._ts = ts
+  }
+  return ts
+}
+
+/**
+ * Read index entries from byte offset `fromOffset` to EOF.
+ * Only complete lines (ending in newline) are consumed — an in-flight partial
+ * line from a concurrent writer is left pending for the next read. A final
+ * line without trailing newline is accepted only if it parses as valid JSON.
+ */
+function readIndexLines(
+  indexFile: string,
+  logsDir: string,
+  fromOffset: number,
+  retentionCutoff: number
+): { entries: IndexEntry[]; consumed: number } {
+  const entries: IndexEntry[] = []
+  const fd = openSync(indexFile, 'r')
+  let pos = fromOffset
+  let consumed = fromOffset
+  try {
+    const CHUNK_SIZE = 4 * 1024 * 1024 // 4MB chunks (avoids V8 string size limit)
+    const buf = Buffer.alloc(CHUNK_SIZE)
+    let leftover = ''
+    let bytesRead: number
+
+    while ((bytesRead = readSync(fd, buf, 0, CHUNK_SIZE, pos)) > 0) {
+      pos += bytesRead
+      const chunk = leftover + buf.toString('utf-8', 0, bytesRead)
+      const lines = chunk.split('\n')
+      leftover = lines.pop() || ''
+
+      for (const line of lines) {
+        if (!line) continue
+        try {
+          const entry = JSON.parse(line) as IndexEntry
+          entry.logsDir = logsDir
+          if (entryTs(entry) >= retentionCutoff) {
+            entries.push(entry)
+          }
+        } catch {
+          // Skip malformed lines
+        }
+      }
+    }
+
+    consumed = pos - Buffer.byteLength(leftover, 'utf-8')
+
+    if (leftover) {
+      try {
+        const entry = JSON.parse(leftover) as IndexEntry
+        entry.logsDir = logsDir
+        if (entryTs(entry) >= retentionCutoff) {
+          entries.push(entry)
+        }
+        consumed = pos
+      } catch {
+        // Partial line from a concurrent append — leave pending
+      }
+    }
+  } finally {
+    closeSync(fd)
+  }
+  return { entries, consumed }
+}
+
+/**
+ * Incremental index cache.
+ *
+ * The old implementation re-parsed every index file in full whenever any
+ * mtime changed — and index files are appended on every bot activation, so
+ * effectively every request paid a full multi-hundred-MB reload + sort.
+ * Now we track a consumed byte offset per file and only read the appended
+ * tail; new entries (chronologically newest) are sorted as a small batch and
+ * prepended to the cache. Full reload only on first load or file truncation.
+ */
 function getIndexCache(): IndexEntry[] {
-  // Check if any index files have changed
-  let needsReload = indexCache === null
+  const retentionCutoff = INDEX_RETENTION_DAYS > 0
+    ? Date.now() - INDEX_RETENTION_DAYS * 24 * 3600 * 1000
+    : 0
 
+  // Detect truncation/rotation → full reload
   for (const traceDir of TRACE_DIRS) {
     const indexFile = join(traceDir, 'index.jsonl')
     if (!existsSync(indexFile)) continue
-
-    const stat = statSync(indexFile)
-    const cachedMtime = indexMtimes.get(indexFile) || 0
-    if (stat.mtimeMs !== cachedMtime) {
-      needsReload = true
+    if ((indexOffsets.get(indexFile) ?? 0) > statSync(indexFile).size) {
+      console.log(`[cache] ${indexFile} shrank — full reload`)
+      indexOffsets = new Map()
+      indexCache = null
       break
     }
   }
 
-  if (!needsReload && indexCache !== null) {
-    return indexCache
-  }
-
-  // Cache miss - reload from all directories
-  console.log(`[cache] Reloading indexes from ${TRACE_DIRS.length} directories`)
-  const start = Date.now()
-
-  const allEntries: IndexEntry[] = []
+  const isInitial = indexCache === null
+  const fresh: IndexEntry[] = []
 
   for (let i = 0; i < TRACE_DIRS.length; i++) {
     const traceDir = TRACE_DIRS[i]!
     const logsDir = LOGS_DIRS[i]!
     const indexFile = join(traceDir, 'index.jsonl')
-
     if (!existsSync(indexFile)) continue
 
-    const stat = statSync(indexFile)
-    indexMtimes.set(indexFile, stat.mtimeMs)
+    const offset = indexOffsets.get(indexFile) ?? 0
+    if (statSync(indexFile).size <= offset) continue  // no new bytes
 
-    // Stream-read line by line to avoid V8 string size limit (~512MB)
-    // on large index files. readFileSync would fail with
-    // "Cannot create a string longer than 0x1fffffe8 characters"
-    const entries: IndexEntry[] = []
-    const fd = openSync(indexFile, 'r')
-    try {
-      const CHUNK_SIZE = 4 * 1024 * 1024 // 4MB chunks
-      const buf = Buffer.alloc(CHUNK_SIZE)
-      let leftover = ''
-      let bytesRead: number
+    const start = Date.now()
+    const { entries, consumed } = readIndexLines(indexFile, logsDir, offset, retentionCutoff)
+    indexOffsets.set(indexFile, consumed)
 
-      while ((bytesRead = readSync(fd, buf, 0, CHUNK_SIZE, null)) > 0) {
-        const chunk = leftover + buf.toString('utf-8', 0, bytesRead)
-        const lines = chunk.split('\n')
-        // Last element may be incomplete — save for next iteration
-        leftover = lines.pop() || ''
-
-        for (const line of lines) {
-          if (!line) continue
-          try {
-            const entry = JSON.parse(line) as IndexEntry
-            entry.logsDir = logsDir
-            entries.push(entry)
-          } catch {
-            // Skip malformed lines
-          }
-        }
-      }
-
-      // Process any remaining leftover
-      if (leftover) {
-        try {
-          const entry = JSON.parse(leftover) as IndexEntry
-          entry.logsDir = logsDir
-          entries.push(entry)
-        } catch {
-          // Skip malformed trailing line
-        }
-      }
-    } finally {
-      closeSync(fd)
-    }
-
-    // Update channel name cache
     for (const entry of entries) {
       if (entry.channelName && entry.channelId) {
         channelNameCache.set(entry.channelId, entry.channelName)
       }
+      fresh.push(entry)
     }
 
-    // Plain loop — spread (push(...entries)) passes every entry as a function
-    // argument and throws "Maximum call stack size exceeded" once the index
-    // grows past the engine's argument limit (~100k+ entries)
-    for (const entry of entries) {
-      allEntries.push(entry)
+    if (offset === 0) {
+      console.log(`[cache] Initial load: ${entries.length} entries from ${indexFile} in ${Date.now() - start}ms`)
     }
   }
 
-  // Sort by timestamp descending (newest first)
-  // timestamp is Date but becomes string after JSON parse
-  allEntries.sort((a, b) => {
-    const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0
-    const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0
-    return timeB - timeA
-  })
+  if (isInitial) {
+    // Initial load — single full sort with precomputed numeric timestamps
+    fresh.sort((a, b) => entryTs(b) - entryTs(a))
+    indexCache = fresh
+  } else if (fresh.length > 0) {
+    // Incremental — appended entries are the newest; sort the small batch
+    // descending and prepend to the (already-sorted) cache
+    fresh.sort((a, b) => entryTs(b) - entryTs(a))
+    indexCache = fresh.concat(indexCache!)
+  }
 
-  indexCache = allEntries
-
-  console.log(`[cache] Loaded ${allEntries.length} total index entries in ${Date.now() - start}ms`)
-
-  return allEntries
+  return indexCache!
 }
 
 // ============================================================================
