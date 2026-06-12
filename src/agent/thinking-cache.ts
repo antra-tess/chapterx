@@ -83,8 +83,7 @@ export function loadThinkingBlocks(
   cacheDir: string,
   botId: string,
   channelId: string,
-  existingMessageIds?: Set<string>,
-  currentModel?: string
+  existingMessageIds?: Set<string>
 ): Map<string, ThinkingBlock[]> {
   const result = new Map<string, ThinkingBlock[]>()
   const dirPath = channelDir(cacheDir, botId, channelId)
@@ -109,13 +108,9 @@ export function loadThinkingBlocks(
           filtered++
           continue
         }
-        // Thinking blocks are bound to the model that produced them — strip
-        // them when the bot's model changed (other models ignore the blocks
-        // but they still cost input tokens, per Anthropic docs)
-        if (currentModel && entry.model && entry.model !== currentModel) {
-          filtered++
-          continue
-        }
+        // Note: entries record the producing model (metadata only). Blocks are
+        // model-bound per Anthropic docs, but continuation models don't change
+        // in practice — no load-time filtering on model.
         // Last write wins per anchor (re-generations replace earlier blocks)
         result.set(anchor, entry.blocks)
       }
