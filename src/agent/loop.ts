@@ -46,6 +46,25 @@ interface ContentSegment {
   suffix?: string   // trailing invisible (only for last segment)
 }
 
+/**
+ * Reaction emoji per refusal category (from the API's stop_details).
+ * Unknown/uncategorized refusals fall back to 🛑.
+ */
+const REFUSAL_CATEGORY_EMOJI: Record<string, string> = {
+  bio: '☣️',
+  chem: '🧪',
+  nuclear: '☢️',
+  cyber: '💻',
+  reasoning_extraction: '🧠',
+}
+const REFUSAL_DEFAULT_EMOJI = '🛑'
+
+/** Extract the refusal category from a completion's raw provider response. */
+function refusalCategory(completion: { raw?: unknown }): string | undefined {
+  const raw = completion.raw as { stop_details?: { category?: string | null } } | null | undefined
+  return raw?.stop_details?.category ?? undefined
+}
+
 export class AgentLoop {
   private running = false
   private botUserId?: string
@@ -2122,17 +2141,19 @@ export class AgentLoop {
         isPhantom: sentMessageIds.length === 0,
       }, 'Collected sent message IDs')
 
-      // Handle refusal reactions
+      // Handle refusal reactions — emoji reflects the refusal category when known
       if (wasRefused) {
+        const category = refusalCategory(completion)
+        const emoji = (category && REFUSAL_CATEGORY_EMOJI[category]) || REFUSAL_DEFAULT_EMOJI
         if (sentMessageIds.length > 0) {
           for (const msgId of sentMessageIds) {
-            await this.connector.addReaction(channelId, msgId, '🛑')
+            await this.connector.addReaction(channelId, msgId, emoji)
           }
-          logger.info({ sentMessageIds }, 'Added refusal reaction to sent messages')
+          logger.info({ sentMessageIds, category, emoji }, 'Added refusal reaction to sent messages')
         } else if (triggeringMessageId) {
           // Phantom refusal - react to triggering message
-          await this.connector.addReaction(channelId, triggeringMessageId, '🛑')
-          logger.info({ triggeringMessageId }, 'Added refusal reaction to triggering message (phantom)')
+          await this.connector.addReaction(channelId, triggeringMessageId, emoji)
+          logger.info({ triggeringMessageId, category, emoji }, 'Added refusal reaction to triggering message (phantom)')
         }
       }
       
