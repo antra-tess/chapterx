@@ -26,6 +26,9 @@ export interface ThinkingCacheEntry {
   botMessageIds: string[]
   /** Thinking blocks exactly as received from the API (verbatim round-trip) */
   blocks: ThinkingBlock[]
+  /** Model that produced the blocks — blocks are model-bound and must be
+   *  stripped when the bot's model changes (per Anthropic docs) */
+  model?: string
   timestamp: string
 }
 
@@ -42,7 +45,8 @@ export function persistThinkingBlocks(
   botId: string,
   channelId: string,
   botMessageIds: string[],
-  blocks: ThinkingBlock[]
+  blocks: ThinkingBlock[],
+  model?: string
 ): void {
   if (blocks.length === 0 || botMessageIds.length === 0) return
 
@@ -57,6 +61,7 @@ export function persistThinkingBlocks(
     const entry: ThinkingCacheEntry = {
       botMessageIds,
       blocks,
+      ...(model ? { model } : {}),
       timestamp: new Date().toISOString(),
     }
     appendFileSync(filePath, JSON.stringify(entry) + '\n')
@@ -78,7 +83,8 @@ export function loadThinkingBlocks(
   cacheDir: string,
   botId: string,
   channelId: string,
-  existingMessageIds?: Set<string>
+  existingMessageIds?: Set<string>,
+  currentModel?: string
 ): Map<string, ThinkingBlock[]> {
   const result = new Map<string, ThinkingBlock[]>()
   const dirPath = channelDir(cacheDir, botId, channelId)
@@ -100,6 +106,13 @@ export function loadThinkingBlocks(
         const anchor = entry.botMessageIds?.[0]
         if (!anchor || !Array.isArray(entry.blocks) || entry.blocks.length === 0) continue
         if (existingMessageIds && !existingMessageIds.has(anchor)) {
+          filtered++
+          continue
+        }
+        // Thinking blocks are bound to the model that produced them — strip
+        // them when the bot's model changed (other models ignore the blocks
+        // but they still cost input tokens, per Anthropic docs)
+        if (currentModel && entry.model && entry.model !== currentModel) {
           filtered++
           continue
         }

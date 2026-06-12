@@ -181,6 +181,7 @@ export interface BotConfig {
   thinking_budget?: number  // Token budget for extended thinking (default: 10000)
   thinking_type?: 'enabled' | 'adaptive'  // API thinking type: 'enabled' (explicit budget) or 'adaptive' (model-managed)
   preserve_thinking_context?: boolean  // If true, preserve thinking traces in context (for Opus 4.5)
+  preserve_thinking_blocks?: boolean  // Persist + round-trip native thinking blocks (signatures) for reasoning continuity. Default: true
   continuation_model: string
   temperature: number
   max_tokens: number

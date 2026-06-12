@@ -1725,9 +1725,11 @@ export class AgentLoop {
       // 4b3. Load persisted thinking blocks (native extended thinking with
       // signatures) for reasoning continuity — re-attached to the bot's past
       // turns during context build. Entries anchored to deleted messages are
-      // filtered out by existingMessageIds.
-      const thinkingByMessageId = config.preserve_thinking_context
-        ? loadThinkingBlocks(this.cacheDir, this.botId, channelId, existingMessageIds)
+      // filtered by existingMessageIds; entries from a different model are
+      // stripped (thinking blocks are model-bound). Default-on (opt out via
+      // preserve_thinking_blocks: false).
+      const thinkingByMessageId = config.preserve_thinking_blocks !== false
+        ? loadThinkingBlocks(this.cacheDir, this.botId, channelId, existingMessageIds, config.continuation_model)
         : undefined
       
       // 4b2. Extract cached MCP images and add to visible images
@@ -2809,9 +2811,10 @@ export class AgentLoop {
       }
 
       // Persist native thinking blocks anchored to the sent messages so they
-      // can be re-attached to this turn in future context builds
-      if (config.preserve_thinking_context && nativeThinkingBlocks.length > 0 && allSentMessageIds.length > 0) {
-        persistThinkingBlocks(this.cacheDir, this.botId, channelId, allSentMessageIds, nativeThinkingBlocks)
+      // can be re-attached to this turn in future context builds.
+      // Default-on (opt out via preserve_thinking_blocks: false).
+      if (config.preserve_thinking_blocks !== false && nativeThinkingBlocks.length > 0 && allSentMessageIds.length > 0) {
+        persistThinkingBlocks(this.cacheDir, this.botId, channelId, allSentMessageIds, nativeThinkingBlocks, config.continuation_model)
       }
 
       return {

@@ -268,6 +268,7 @@ export class ConfigSystem {
       thinking_budget: config.thinking_budget,
       thinking_type: config.thinking_type,
       preserve_thinking_context: config.preserve_thinking_context || false,
+      preserve_thinking_blocks: config.preserve_thinking_blocks !== false,  // Default: true (opt-out)
       continuation_model: config.continuation_model || '',
       temperature: config.temperature ?? 1.0,
       max_tokens: config.max_tokens || 4096,
