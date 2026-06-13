@@ -9,7 +9,9 @@ In production, this is the **Bridge bot** at `borgs.animalabs.ai:3306` — the o
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
 | `/health` | GET | No | Health check |
-| `/api/messages/export` | POST | Yes | Export conversation history (follows `.history` commands) |
+| `/api/channels` | GET | Yes | List channels the bot has access to, with last-activity timestamps |
+| `/api/channels/:channelId/latest` | GET | Yes | Get the latest N raw messages for a channel |
+| `/api/messages/export` | POST | Yes | Export conversation history with a boundary message URL (follows `.history`) |
 | `/api/context/build` | POST | Yes | Build live LLM context for a channel (full prompt pipeline) |
 | `/api/users/:userId` | GET | Yes | Get user info (username, display name, roles, avatar) |
 | `/api/users/:userId/avatar` | GET | Yes | Get user avatar CDN URL |
@@ -64,6 +66,124 @@ No authentication required.
 **Example:**
 ```bash
 curl http://localhost:3000/health
+```
+
+---
+
+### List Channels
+```http
+GET /api/channels?guildId=GUILD_ID&since=ISO_TIMESTAMP
+```
+
+List every text channel (and thread) the bot has access to, with last-activity timestamps derived from Discord snowflakes — no message fetches required, so this is fast even with hundreds of channels.
+
+**Authentication:** Bearer token required
+
+**Query parameters:**
+- `guildId` (optional): Filter to a single guild
+- `since` (optional): ISO 8601 timestamp — only include channels with activity since this time
+
+**Response:**
+```json
+{
+  "channels": [
+    {
+      "id": "1398036481146355803",
+      "name": "meme-factory",
+      "guildId": "1391260973872185424",
+      "guildName": "Cyborgism",
+      "type": 0,
+      "isThread": false,
+      "parentId": "1391260974278422571",
+      "lastMessageId": "1515013700112617475",
+      "lastActivityAt": "2026-06-13T01:23:42.118Z"
+    },
+    {
+      "id": "1420468671452676211",
+      "name": "basin",
+      "guildId": "1391260973872185424",
+      "guildName": "Cyborgism",
+      "type": 0,
+      "isThread": false,
+      "parentId": "1391260974278422571",
+      "lastMessageId": "1515013214521794048",
+      "lastActivityAt": "2026-06-13T01:21:46.327Z"
+    }
+  ],
+  "metadata": {
+    "count": 482,
+    "guildCount": 12,
+    "guildIdFilter": null,
+    "since": null
+  }
+}
+```
+
+**Notes:**
+- Channels are sorted by `lastMessageId` descending (newest activity first); channels with no messages sink to the bottom.
+- `type` is the discord.js `ChannelType` enum value (0 = text, 5 = announcement, 11 = public thread, etc.).
+- Voice and category channels are skipped.
+- `lastActivityAt` is derived from the snowflake (no API call) — accurate to the millisecond the message was created.
+
+**Example:**
+```bash
+# All channels
+curl "http://localhost:3306/api/channels" \
+  -H "Authorization: Bearer $(cat api_token)"
+
+# Channels in one guild, active in the last hour
+curl "http://localhost:3306/api/channels?guildId=1391260973872185424&since=$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)" \
+  -H "Authorization: Bearer $(cat api_token)"
+```
+
+---
+
+### Get Latest Messages
+```http
+GET /api/channels/:channelId/latest?messages=N&maxImages=N&ignoreHistory=BOOL
+```
+
+Get the latest N raw messages for a channel, in the same shape as `/api/messages/export` (full metadata, base64 attachments, reactions, reply references). Unlike export, no boundary message URL is required — this just returns the tail.
+
+**Authentication:** Bearer token required
+
+**Path parameters:**
+- `channelId` (required): Discord channel ID (numeric)
+
+**Query parameters:**
+- `messages` (optional): Number of messages to return. Default 50, max 500.
+- `maxImages` (optional): Maximum number of image attachments to download and base64-encode. Default 50, 0 to skip.
+- `ignoreHistory` (optional): Skip `.history` command processing. Default `true` (raw export). Set `false` to follow `.history` redirects, matching bot inference behavior.
+
+**Response:** Same shape as `/api/messages/export`, with channel-specific metadata:
+```json
+{
+  "messages": [ /* ...same as export... */ ],
+  "metadata": {
+    "channelId": "1398036481146355803",
+    "firstMessageId": "1515013214521794048",
+    "lastMessageId": "1515013700112617475",
+    "totalCount": 50,
+    "requestedCount": 50,
+    "ignoreHistory": true
+  }
+}
+```
+
+**Errors:**
+- 400 — `channelId` is not numeric
+- 403 — bot lacks permission to view the channel
+- 404 — channel not found, bot not a guild member, or channel empty
+
+**Example:**
+```bash
+# Latest 50 (default) in meme-factory
+curl "http://localhost:3306/api/channels/1398036481146355803/latest" \
+  -H "Authorization: Bearer $(cat api_token)"
+
+# Latest 200, no images
+curl "http://localhost:3306/api/channels/1398036481146355803/latest?messages=200&maxImages=0" \
+  -H "Authorization: Bearer $(cat api_token)"
 ```
 
 ---
