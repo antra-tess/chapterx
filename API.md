@@ -1,6 +1,8 @@
 # Chapter3 REST API
 
-The bot includes an optional REST API for programmatic access to Discord conversation history and user information.
+The bot includes an optional REST API for programmatic access to Discord conversation history, user information, and live LLM context.
+
+In production, this is the **Bridge bot** at `borgs.animalabs.ai:3306` — the only chapterx bot launched with `API_BEARER_TOKEN` and `API_PORT` env vars. The infra bot's `/get_prompt` and `/get_context` slash commands proxy to it via `CHAPTERX_API_URL` / `CHAPTERX_API_TOKEN`.
 
 ## Quick Reference
 
@@ -8,6 +10,7 @@ The bot includes an optional REST API for programmatic access to Discord convers
 |----------|--------|------|-------------|
 | `/health` | GET | No | Health check |
 | `/api/messages/export` | POST | Yes | Export conversation history (follows `.history` commands) |
+| `/api/context/build` | POST | Yes | Build live LLM context for a channel (full prompt pipeline) |
 | `/api/users/:userId` | GET | Yes | Get user info (username, display name, roles, avatar) |
 | `/api/users/:userId/avatar` | GET | Yes | Get user avatar CDN URL |
 
@@ -29,7 +32,17 @@ export API_PORT=3000  # Optional, defaults to 3000
 npm run dev
 ```
 
-The API server will start alongside the bot and log: `"API server started" { port: 3000 }`
+The API server will start alongside the bot and log: `"API server started" { port: 3000 }`. If `API_BEARER_TOKEN` is not set, the API is disabled (`"API server disabled (no API_BEARER_TOKEN set)"`).
+
+### Production: Bridge
+
+In production, the Bridge bot is the canonical API-enabled chapterx bot. Its `borgs-admin` start command is:
+
+```bash
+API_BEARER_TOKEN=<bridge-token> API_PORT=3306 EMS_PATH=/opt/chapter2/ems BOT_NAME=Bridge npx tsx src/main.ts
+```
+
+The infra bot (LuxiaSL/infra) calls Bridge for `/get_prompt` and `/get_context` via `CHAPTERX_API_URL=http://localhost:3306` + `CHAPTERX_API_TOKEN`. Direct access from outside borgs requires the same bearer token.
 
 ## Endpoints
 
@@ -130,6 +143,100 @@ Export Discord conversation history with full metadata. Automatically processes 
   }
 }
 ```
+
+---
+
+### Build LLM Context
+```http
+POST /api/context/build
+```
+
+Build the full live LLM context for a channel by running the bot's complete context-builder pipeline (config + steering + plugin injections + tool cache + message merging + recency window + cache markers + stop sequences). Equivalent to a "what would the bot's prompt look like *right now*?" inspection — the same construction used for an actual activation, minus the LLM call.
+
+Bot config takes effect: pinned channel configs, guild overrides, system prompt, mode, model, and stop sequences all match what the bot would use to respond. Character limits are disabled so you can request large windows; the configured `recency_window_messages` becomes the default if `messages` is omitted.
+
+**Authentication:** Bearer token required
+
+**Request Body:**
+```json
+{
+  "channel": "https://discord.com/channels/GUILD_ID/CHANNEL_ID",
+  "messages": 500
+}
+```
+
+**Parameters:**
+- `channel` (required): Discord channel URL or numeric channel ID
+- `messages` (optional): Number of messages to include. Defaults to the bot's configured `recency_window_messages` (typically 200). `recency_window_characters` and `hard_max_characters` are forced to `Infinity` so this is the only effective cap.
+
+**Response:**
+```json
+{
+  "messages": [
+    {
+      "participant": "Alice",
+      "content": "Hello world!",
+      "hasImages": false,
+      "imageCount": 0
+    },
+    {
+      "participant": "Claude",
+      "content": "Hi Alice!",
+      "hasImages": false,
+      "imageCount": 0
+    }
+  ],
+  "metadata": {
+    "botName": "Claude Fable",
+    "channelId": "1398036481146355803",
+    "messageCount": 487,
+    "discordMessagesFetched": 600,
+    "configuredLimit": 500,
+    "requestedLimit": 500,
+    "model": "claude-fable-5",
+    "mode": "chat",
+    "systemPrompt": "You are Claude Fable 5. You are connected to Discord...",
+    "contextPrefix": null,
+    "stopSequences": [
+      "\nAlice:",
+      "\nClaude Fable:",
+      "<<HUMAN_CONVERSATION_END>>"
+    ]
+  }
+}
+```
+
+**Response fields:**
+- `messages[].participant` — name as it appears in the LLM prompt (after display-name resolution, character overrides, etc.)
+- `messages[].content` — text content joined with newlines (images noted separately)
+- `messages[].hasImages` / `imageCount` — image attachments not included in `content`
+- `metadata.discordMessagesFetched` — raw count returned by Discord (always ≥ `messageCount` since merging/filtering reduces)
+- `metadata.configuredLimit` — what the bot's YAML config says (independent of the `messages` parameter)
+- `metadata.requestedLimit` — the `messages` value from the request, or `null` if defaulted
+- `metadata.systemPrompt` / `contextPrefix` — first 200 chars only, with ellipsis if longer
+- `metadata.stopSequences` — exact stop sequences this request would send to the LLM
+
+**Errors:**
+- 400 — missing `channel`, invalid URL/ID format
+- 403 — bot lacks access to channel
+- 404 — channel not found, or empty channel
+- 501 — API server lacks the context builder (Bridge is configured for it; other API-enabled bots may not be)
+
+**Example:**
+```bash
+curl -X POST http://localhost:3306/api/context/build \
+  -H "Authorization: Bearer $(cat api_token)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel": "https://discord.com/channels/1391260973872185424/1398036481146355803",
+    "messages": 500
+  }'
+```
+
+**Notes:**
+- Returns the prompt as Bridge would assemble it. Bots with different system prompts or steering still produce different prompts at activation time — use the bot whose context you want.
+- No LLM call is made; this is read-only.
+- Tool cache is empty in the returned context (the bot's actual activations interleave tool history; this endpoint is for prompt inspection, not replay).
 
 ---
 
@@ -260,8 +367,8 @@ curl "http://localhost:3000/api/users/1030846477418909696/avatar?size=512" \
 
 ## Use Cases
 
-1. **Research Commons Integration** - Export Discord conversations for web archive with full user metadata
-2. **Prompt Generation** - Similar to old `/get_prompt` command
+1. **Live prompt inspection** - `/api/context/build` returns what the bot would send to the LLM right now, without making the call. Backs `/get_prompt` and `/get_context` slash commands.
+2. **Research Commons Integration** - Export Discord conversations for web archive with full user metadata
 3. **Data Analysis** - Extract conversation data with reactions, attachments, and user info
 4. **Backup/Archive** - Programmatic conversation backups with complete metadata
 5. **User Directory** - Build user profiles with server-specific names, roles, and avatars
@@ -278,6 +385,12 @@ curl "http://localhost:3000/api/users/1030846477418909696/avatar?size=512" \
 - ✅ **Cross-channel/server** - Works with any Discord URL
 - ✅ **Recency limits** - Message count or character limits (default: 50 messages)
 - ✅ **Optimized fetching** - Only fetches what's needed based on limits
+
+### Live Context Build
+- ✅ **Full pipeline** - Runs the actual bot context builder (config, steering, plugins, merging, recency, cache markers, stop sequences)
+- ✅ **Per-bot config** - Pinned configs, system prompt, mode, model all match the running bot
+- ✅ **No character cap** - `recency_window_characters` / `hard_max_characters` forced to `Infinity`; `messages` is the only cap
+- ✅ **Read-only** - No LLM call made
 
 ### User Information
 - ✅ **Global user info** - Username, discriminator, bot flag
