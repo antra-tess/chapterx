@@ -14,6 +14,7 @@ import {
   DiscordMessage,
   CachedImage,
   CachedDocument,
+  CachedAudio,
   DiscordError,
 } from '../types.js'
 import { logger } from '../utils/logger.js'
@@ -42,6 +43,17 @@ export interface TrackedPin {
 }
 
 const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
+// Cap raw audio so the base64-inflated payload stays under Gemini's ~20 MB
+// inline-data request ceiling (12 MB raw → ~16 MB base64, leaving headroom).
+const MAX_AUDIO_BYTES = 12 * 1024 * 1024
+
+// Map a Discord-reported audio content type to a MIME string Gemini accepts.
+// Discord labels MP3 as "audio/mpeg"; Gemini's inline-data MIME for MP3 is "audio/mp3".
+function normalizeAudioMime(contentType: string): string {
+  const base = contentType.split(';')[0]!.trim().toLowerCase()
+  if (base === 'audio/mpeg' || base === 'audio/mpg') return 'audio/mp3'
+  return base
+}
 
 /** Extract a Unix timestamp (ms) from a Discord snowflake ID */
 function snowflakeToTimestamp(id: string): number {
@@ -57,6 +69,7 @@ export interface FetchContextParams {
   authorized_roles?: string[]
   pinnedConfigs?: string[]  // Optional: Pre-fetched pinned configs (skips fetchPinned call)
   maxImages?: number  // Optional: Cap image fetching to avoid RAM bloat (default: unlimited)
+  maxAudio?: number  // Optional: Cap audio fetching (default: 0 — only audio-capable bots fetch audio)
   ignoreHistory?: boolean  // Optional: Skip .history command processing (raw fetch)
 }
 
@@ -64,6 +77,7 @@ export class DiscordConnector {
   private client: Client
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private imageCache = new Map<string, CachedImage>()
+  private audioCache = new Map<string, CachedAudio>()  // URL -> cached audio (in-memory, per session)
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
   private urlMapPath: string  // Path to URL map file
 
@@ -514,7 +528,7 @@ export class DiscordConnector {
    * Fetch context from Discord (messages, configs, images)
    */
   async fetchContext(params: FetchContextParams): Promise<DiscordContext> {
-    const { channelId, depth, targetMessageId, firstMessageId, authorized_roles, maxImages, ignoreHistory } = params
+    const { channelId, depth, targetMessageId, firstMessageId, authorized_roles, maxImages, maxAudio, ignoreHistory } = params
 
     // Profiling helper
     const timings: Record<string, number> = {}
@@ -773,11 +787,14 @@ export class DiscordConnector {
       // Download/cache images and fetch text attachments
       const images: CachedImage[] = []
       const documents: CachedDocument[] = []
+      const audios: CachedAudio[] = []
       let newImagesDownloaded = 0
-      logger.debug({ messageCount: messages.length, maxImages }, 'Checking messages for attachments')
-      
+      logger.debug({ messageCount: messages.length, maxImages, maxAudio }, 'Checking messages for attachments')
+
       // Track whether we've hit the image cap to avoid unnecessary processing
       const imageLimitReached = () => maxImages !== undefined && images.length >= maxImages
+      // Only audio-capable bots pass maxAudio > 0; others never fetch audio.
+      const audioLimitReached = () => audios.length >= (maxAudio ?? 0)
       
       // Iterate newest-first so image cap keeps recent images (context builder wants recent ones)
       // Messages array is chronological (oldest-first), so we reverse for image fetching
@@ -798,6 +815,20 @@ export class DiscordConnector {
               if (!wasInCache) {
                 newImagesDownloaded++
               }
+            }
+          } else if (attachment.contentType?.startsWith('audio/')) {
+            if (audioLimitReached()) {
+              continue
+            }
+            // Reject oversized audio up front (Discord reports size) so we never
+            // buffer a huge upload into memory just to discard it.
+            if (attachment.size && attachment.size > MAX_AUDIO_BYTES) {
+              logger.warn({ size: attachment.size, url: attachment.url }, 'Skipping oversized audio attachment (pre-fetch)')
+              continue
+            }
+            const cached = await this.cacheAudio(attachment.url, attachment.contentType, msg.id)
+            if (cached) {
+              audios.push(cached)
             }
           } else if (this.isTextAttachment(attachment)) {
             const doc = await this.fetchTextAttachment(attachment, msg.id)
@@ -846,6 +877,7 @@ export class DiscordConnector {
         pinnedConfigs,
         images,
         documents,
+        audios,
         guildId: channel.guildId,
         inheritanceInfo: Object.keys(inheritanceInfo).length > 0 ? inheritanceInfo : undefined,
       }
@@ -2736,6 +2768,44 @@ export class DiscordConnector {
       }
     } catch (error) {
       logger.warn({ error, url: attachment.url }, 'Failed to download text attachment')
+      return null
+    }
+  }
+
+  /**
+   * Download and cache an audio attachment (in-memory, per session). Audio is
+   * sent inline (base64) to audio-capable models like Gemini, so it is not
+   * processed/transcoded — just fetched, size-capped, and MIME-normalized.
+   */
+  private async cacheAudio(url: string, contentType: string, messageId: string): Promise<CachedAudio | null> {
+    const existing = this.audioCache.get(url)
+    if (existing) return existing
+
+    try {
+      const response = await fetch(url)
+      if (!response.ok) {
+        logger.warn({ status: response.status, url }, 'Failed to fetch audio attachment')
+        return null
+      }
+      const buffer = Buffer.from(await response.arrayBuffer())
+      if (buffer.length > MAX_AUDIO_BYTES) {
+        logger.warn({ size: buffer.length, url }, 'Skipping oversized audio attachment')
+        return null
+      }
+
+      const hash = createHash('sha256').update(buffer).digest('hex')
+      const cached: CachedAudio = {
+        url,
+        messageId,
+        data: buffer,
+        mediaType: normalizeAudioMime(contentType),
+        hash,
+      }
+      this.audioCache.set(url, cached)
+      logger.debug({ url, mediaType: cached.mediaType, bytes: buffer.length }, 'Cached audio attachment')
+      return cached
+    } catch (error) {
+      logger.warn({ error, url }, 'Failed to download audio attachment')
       return null
     }
   }

@@ -164,7 +164,18 @@ export function toMembraneContentBlock(block: ContentBlock): MembraneContentBloc
       }
       return imgResult;
     }
-      
+
+    case 'audio':
+      return {
+        type: 'audio',
+        source: {
+          type: 'base64',
+          data: block.source.data,
+          mediaType: block.source.media_type,
+        },
+        ...(block.duration !== undefined ? { duration: block.duration } : {}),
+      } as MembraneContentBlock;
+
     case 'tool_use':
       return {
         type: 'tool_use',

@@ -563,7 +563,7 @@ export class MembraneProvider {
       for (const msg of clone.messages) {
         if (msg.content && Array.isArray(msg.content)) {
           for (const block of msg.content) {
-            if (block.type === 'image' && block.source?.type === 'base64') {
+            if ((block.type === 'image' || block.type === 'audio') && block.source?.type === 'base64') {
               block.source.data = `[BASE64_DATA_${block.source.data?.length || 0}_BYTES]`;
             }
           }

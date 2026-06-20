@@ -296,6 +296,10 @@ export class ConfigSystem {
       generate_images: config.generate_images,
       provider_params: config.provider_params,
 
+      // Audio config (off unless explicitly enabled for audio-capable models)
+      include_audio: config.include_audio ?? false,
+      max_audio: config.max_audio ?? 1,
+
       // Text attachment config
       include_text_attachments: config.include_text_attachments ?? true,
       max_text_attachment_kb: config.max_text_attachment_kb || 100,  // 100KB default

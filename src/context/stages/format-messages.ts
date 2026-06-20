@@ -11,6 +11,7 @@ import type {
   ContentBlock,
   CachedImage,
   CachedDocument,
+  CachedAudio,
   BotConfig,
 } from '../../types.js'
 import { prepareImage, resampleImage, MAX_IMAGE_BASE64_BYTES } from '../image-processing.js'
@@ -29,12 +30,18 @@ export async function formatMessages(
   documents: CachedDocument[],
   config: BotConfig,
   botDiscordUsername?: string,
-  cacheMarkerMessageId?: string | null
+  cacheMarkerMessageId?: string | null,
+  audios: CachedAudio[] = []
 ): Promise<ParticipantMessage[]> {
   const participantMessages: ParticipantMessage[] = []
 
   // Create image lookup
   const imageMap = new Map(images.map((img) => [img.url, img]))
+
+  // Create audio lookup; gate emission by max_audio (oldest dropped first).
+  const audioMap = new Map(audios.map((a) => [a.url, a]))
+  let audioEmitted = 0
+  const maxAudio = config.max_audio ?? 1
 
   // Create document lookup by messageId
   const documentsByMessageId = new Map<string, CachedDocument[]>()
@@ -47,6 +54,11 @@ export async function formatMessages(
 
   const max_images = config.max_images || 5
   const maxTotalBase64Bytes = 15 * 1024 * 1024  // 15 MB total base64 data for images
+  // Combined images+audio inline budget, kept under Gemini's ~20 MB inline-data
+  // request ceiling. Function-scoped so audio can bound itself against the
+  // already-selected image total. `totalBase64Size` accumulates both.
+  const maxInlineBase64Bytes = 18 * 1024 * 1024
+  let totalBase64Size = 0
 
   // Find cache marker position for image selection anchoring
   const cacheMarkerIndex = cacheMarkerMessageId
@@ -73,7 +85,6 @@ export async function formatMessages(
   if (config.include_images) {
     let prefixImageCount = 0
     let ephemeralImageCount = 0
-    let totalBase64Size = 0
 
     // TIER 1: Images in cached prefix (only if cache_images is enabled)
     if (cacheImages) {
@@ -284,6 +295,46 @@ export async function formatMessages(
             }, 'Added image to content')
           }
         }
+      }
+    }
+
+    // Add audio content for audio-capable models (sent inline as base64)
+    if (config.include_audio && audioEmitted < maxAudio) {
+      for (const attachment of msg.attachments) {
+        if (audioEmitted >= maxAudio) break
+        if (!attachment.contentType?.startsWith('audio/')) continue
+        const cached = audioMap.get(attachment.url)
+        if (!cached) continue
+
+        // Bound the combined images+audio inline payload (Gemini ~20 MB ceiling).
+        const audioBase64Bytes = Math.ceil(cached.data.length * 4 / 3)
+        if (totalBase64Size + audioBase64Bytes > maxInlineBase64Bytes) {
+          logger.warn({
+            messageId: msg.id,
+            url: attachment.url,
+            audioMB: (audioBase64Bytes / 1024 / 1024).toFixed(2),
+            usedMB: (totalBase64Size / 1024 / 1024).toFixed(2),
+            capMB: (maxInlineBase64Bytes / 1024 / 1024).toFixed(2),
+          }, 'Skipping audio: would exceed combined inline media budget')
+          continue
+        }
+
+        content.push({
+          type: 'audio',
+          source: {
+            type: 'base64',
+            data: cached.data.toString('base64'),
+            media_type: cached.mediaType,
+          },
+        } as ContentBlock)
+        totalBase64Size += audioBase64Bytes
+        audioEmitted++
+        logger.debug({
+          messageId: msg.id,
+          url: attachment.url,
+          mediaType: cached.mediaType,
+          sizeMB: (cached.data.length / 1024 / 1024).toFixed(2),
+        }, 'Added audio to content')
       }
     }
 
