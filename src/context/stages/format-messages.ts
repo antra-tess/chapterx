@@ -302,7 +302,9 @@ export async function formatMessages(
     if (config.include_audio && audioEmitted < maxAudio) {
       for (const attachment of msg.attachments) {
         if (audioEmitted >= maxAudio) break
-        if (!attachment.contentType?.startsWith('audio/')) continue
+        // Presence in audioMap is the authoritative signal — the connector
+        // already detected audio by content_type OR filename extension (Discord's
+        // content_type is optional, so we must not re-gate on it here).
         const cached = audioMap.get(attachment.url)
         if (!cached) continue
 
