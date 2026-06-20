@@ -552,6 +552,7 @@ export interface CachedAudio {
   data: Buffer
   mediaType: string  // normalized, e.g. 'audio/mp3', 'audio/wav', 'audio/ogg'
   hash: string
+  duration?: number  // seconds, when Discord provides it (e.g. voice messages)
 }
 
 // ============================================================================

@@ -47,12 +47,46 @@ const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachm
 // inline-data request ceiling (12 MB raw → ~16 MB base64, leaving headroom).
 const MAX_AUDIO_BYTES = 12 * 1024 * 1024
 
+// Filename-extension → audio MIME (Gemini-accepted set), used when Discord omits
+// content_type — it is OPTIONAL on the attachment object, so we can't rely on it
+// alone (mirrors the extension fallback used for text attachments).
+const AUDIO_EXTENSION_MIME: Record<string, string> = {
+  '.mp3': 'audio/mp3',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.flac': 'audio/flac',
+  '.aac': 'audio/aac',
+  '.aiff': 'audio/aiff',
+  '.aif': 'audio/aiff',
+}
+
 // Map a Discord-reported audio content type to a MIME string Gemini accepts.
 // Discord labels MP3 as "audio/mpeg"; Gemini's inline-data MIME for MP3 is "audio/mp3".
 function normalizeAudioMime(contentType: string): string {
   const base = contentType.split(';')[0]!.trim().toLowerCase()
   if (base === 'audio/mpeg' || base === 'audio/mpg') return 'audio/mp3'
   return base
+}
+
+/** True if the attachment is audio — by content_type OR, when Discord omits it,
+ *  by a known audio file extension. */
+function isAudioAttachment(att: Attachment): boolean {
+  if (att.contentType?.startsWith('audio/')) return true
+  const name = att.name?.toLowerCase() ?? ''
+  return Object.keys(AUDIO_EXTENSION_MIME).some((ext) => name.endsWith(ext))
+}
+
+/** Resolve a Gemini-accepted audio MIME from content_type, falling back to the
+ *  filename extension. Returns null if the type can't be determined. */
+function audioMimeFor(att: Attachment): string | null {
+  if (att.contentType?.startsWith('audio/')) return normalizeAudioMime(att.contentType)
+  const name = att.name?.toLowerCase() ?? ''
+  for (const [ext, mime] of Object.entries(AUDIO_EXTENSION_MIME)) {
+    if (name.endsWith(ext)) return mime
+  }
+  return null
 }
 
 /** Extract a Unix timestamp (ms) from a Discord snowflake ID */
@@ -816,7 +850,7 @@ export class DiscordConnector {
                 newImagesDownloaded++
               }
             }
-          } else if (attachment.contentType?.startsWith('audio/')) {
+          } else if (isAudioAttachment(attachment)) {
             if (audioLimitReached()) {
               continue
             }
@@ -826,7 +860,14 @@ export class DiscordConnector {
               logger.warn({ size: attachment.size, url: attachment.url }, 'Skipping oversized audio attachment (pre-fetch)')
               continue
             }
-            const cached = await this.cacheAudio(attachment.url, attachment.contentType, msg.id)
+            // content_type is optional on Discord attachments — resolve the MIME
+            // from it or the filename extension; skip if undeterminable.
+            const mediaType = audioMimeFor(attachment)
+            if (!mediaType) {
+              logger.debug({ url: attachment.url, name: attachment.name }, 'Audio attachment with undeterminable type, skipping')
+              continue
+            }
+            const cached = await this.cacheAudio(attachment.url, mediaType, msg.id, attachment.duration ?? undefined)
             if (cached) {
               audios.push(cached)
             }
@@ -2777,7 +2818,7 @@ export class DiscordConnector {
    * sent inline (base64) to audio-capable models like Gemini, so it is not
    * processed/transcoded — just fetched, size-capped, and MIME-normalized.
    */
-  private async cacheAudio(url: string, contentType: string, messageId: string): Promise<CachedAudio | null> {
+  private async cacheAudio(url: string, mediaType: string, messageId: string, duration?: number): Promise<CachedAudio | null> {
     const existing = this.audioCache.get(url)
     if (existing) return existing
 
@@ -2798,11 +2839,12 @@ export class DiscordConnector {
         url,
         messageId,
         data: buffer,
-        mediaType: normalizeAudioMime(contentType),
+        mediaType,
         hash,
+        ...(duration !== undefined ? { duration } : {}),
       }
       this.audioCache.set(url, cached)
-      logger.debug({ url, mediaType: cached.mediaType, bytes: buffer.length }, 'Cached audio attachment')
+      logger.debug({ url, mediaType, bytes: buffer.length }, 'Cached audio attachment')
       return cached
     } catch (error) {
       logger.warn({ error, url }, 'Failed to download audio attachment')

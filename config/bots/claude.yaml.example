@@ -28,6 +28,13 @@ authorized_roles: []  # Roles authorized for .history commands (empty = all allo
 include_images: true
 max_images: 5
 
+# Audio configuration (OFF by default; enable only for audio-capable models)
+# Routes Discord audio attachments (mp3/wav/ogg/flac/...) to the model as inline
+# audio. Most models cannot process audio — enable this only for ones that can
+# (e.g. Gemini 3.5 Flash). Audio is sent inline (base64), so it is size-capped.
+# include_audio: true   # default: false
+# max_audio: 1          # max audio files per context (default: 1; 0 disables)
+
 # Tool configuration
 tools_enabled: true
 tool_output_visible: false  # Show tool calls in Discord

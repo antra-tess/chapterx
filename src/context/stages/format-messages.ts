@@ -326,6 +326,7 @@ export async function formatMessages(
             data: cached.data.toString('base64'),
             media_type: cached.mediaType,
           },
+          ...(cached.duration !== undefined ? { duration: cached.duration } : {}),
         } as ContentBlock)
         totalBase64Size += audioBase64Bytes
         audioEmitted++
