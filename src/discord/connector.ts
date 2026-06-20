@@ -1147,6 +1147,12 @@ export class DiscordConnector {
   /** Send a single pre-sized chunk, replying to a target if given (falling back
    *  to a plain send if the target was deleted). Returns the sent message ID. */
   private async sendChunk(channel: TextChannel, content: string, replyToMessageId?: string): Promise<string> {
+    // Splitting targets 1800 chars; a chunk over Discord's 2000 hard limit means
+    // the markdown splitter hit its pathological escape (closers alone exceed the
+    // budget). Surface it rather than let the send 400 silently.
+    if (content.length > 2000) {
+      logger.warn({ channelId: channel.id, length: content.length }, 'Chunk exceeds Discord message limit')
+    }
     if (replyToMessageId) {
       try {
         const sent = await channel.send({
