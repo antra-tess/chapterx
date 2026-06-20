@@ -18,6 +18,7 @@ import {
 } from '../types.js'
 import { logger } from '../utils/logger.js'
 import { retryDiscord } from '../utils/retry.js'
+import { splitPreservingMarkdown, type MarkdownCarry } from '../utils/discord-markdown.js'
 import {
   fetchChannelMessages,
   type FetchDeps,
@@ -58,6 +59,14 @@ export interface FetchContextParams {
   pinnedConfigs?: string[]  // Optional: Pre-fetched pinned configs (skips fetchPinned call)
   maxImages?: number  // Optional: Cap image fetching to avoid RAM bloat (default: unlimited)
   ignoreHistory?: boolean  // Optional: Skip .history command processing (raw fetch)
+}
+
+/** A sent Discord message plus the synthetic markdown bridge strings injected
+ *  into it (so the caller can record them for later context stripping). */
+export interface SentMessageChunk {
+  id: string
+  bridgeOpen?: string
+  bridgeClose?: string
 }
 
 export class DiscordConnector {
@@ -1082,37 +1091,87 @@ export class DiscordConnector {
       // Split message if too long
       const chunks = this.splitMessage(resolvedContent, 1800)
       const messageIds: string[] = []
-
       for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i]!
-        const options: any = {}
-        
-        // First chunk replies to the triggering message
-        if (i === 0 && replyToMessageId) {
-          try {
-            options.reply = { messageReference: replyToMessageId }
-            options.allowedMentions = { repliedUser: false }
-            const sent = await channel.send({ content: chunk, ...options })
-            messageIds.push(sent.id)
-          } catch (error: any) {
-            // If reply fails (message deleted), send without reply
-            if (error.code === 10008 || error.message?.includes('Unknown message')) {
-              logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
-              const sent = await channel.send({ content: chunk })
-              messageIds.push(sent.id)
-            } else {
-              throw error
-            }
-          }
-        } else {
-          const sent = await channel.send({ content: chunk, ...options })
-          messageIds.push(sent.id)
-        }
+        messageIds.push(await this.sendChunk(channel, chunks[i]!, i === 0 ? replyToMessageId : undefined))
       }
 
       logger.debug({ channelId, chunks: chunks.length, messageIds, replyTo: replyToMessageId }, 'Sent message')
       return messageIds
     }, this.options.maxBackoffMs)
+  }
+
+  /**
+   * Send a response segment as one or more Discord messages, splitting it
+   * markdown-aware AFTER mention/emoji resolution — so resolution can never push
+   * a chunk past the limit and trigger an unrecorded re-split. Returns one
+   * record per sent message (with the synthetic bridge strings injected into it)
+   * plus the open-construct carry after the last message. `startCarry` continues
+   * a construct inherited from a previous send. Used by AgentLoop.sendSegments.
+   */
+  async sendSegmentChunks(
+    channelId: string,
+    content: string,
+    replyToMessageId: string | undefined,
+    startCarry: MarkdownCarry,
+  ): Promise<{ chunks: SentMessageChunk[]; endCarry: MarkdownCarry }> {
+    const { channel, chunks, endCarry } = await retryDiscord(async () => {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+
+      if (!channel || !channel.isTextBased()) {
+        throw new DiscordError(`Channel ${channelId} not found`)
+      }
+
+      let resolvedContent = await this.resolveMentions(content, channelId)
+      if (channel.guild) {
+        resolvedContent = this.resolveEmojis(resolvedContent, channel.guild)
+      }
+
+      const { chunks, endCarry } = splitPreservingMarkdown(resolvedContent, 1800, startCarry)
+      return { channel, chunks, endCarry }
+    }, this.options.maxBackoffMs)
+
+    const sent: SentMessageChunk[] = []
+    for (let i = 0; i < chunks.length; i++) {
+      const piece = chunks[i]!
+      const id = await retryDiscord(
+        () => this.sendChunk(channel, piece.text, i === 0 ? replyToMessageId : undefined),
+        this.options.maxBackoffMs,
+      )
+      sent.push({ id, bridgeOpen: piece.bridgeOpen, bridgeClose: piece.bridgeClose })
+    }
+
+    logger.debug({ channelId, chunks: sent.length, replyTo: replyToMessageId }, 'Sent markdown segment')
+    return { chunks: sent, endCarry }
+  }
+
+  /** Send a single pre-sized chunk, replying to a target if given (falling back
+   *  to a plain send if the target was deleted). Returns the sent message ID. */
+  private async sendChunk(channel: TextChannel, content: string, replyToMessageId?: string): Promise<string> {
+    // Splitting targets 1800 chars; a chunk over Discord's 2000 hard limit means
+    // the markdown splitter hit its pathological escape (closers alone exceed the
+    // budget). Surface it rather than let the send 400 silently.
+    if (content.length > 2000) {
+      logger.warn({ channelId: channel.id, length: content.length }, 'Chunk exceeds Discord message limit')
+    }
+    if (replyToMessageId) {
+      try {
+        const sent = await channel.send({
+          content,
+          reply: { messageReference: replyToMessageId },
+          allowedMentions: { repliedUser: false },
+        })
+        return sent.id
+      } catch (error: any) {
+        if (error.code === 10008 || error.message?.includes('Unknown message')) {
+          logger.warn({ replyToMessageId, channelId: channel.id }, 'Reply target deleted, sending without reply')
+          const sent = await channel.send({ content })
+          return sent.id
+        }
+        throw error
+      }
+    }
+    const sent = await channel.send({ content })
+    return sent.id
   }
 
   /**
@@ -2740,41 +2799,13 @@ export class DiscordConnector {
     }
   }
 
+  /**
+   * Split a message into Discord-sized chunks without breaking markdown.
+   * A per-message safety net: splitPreservingMarkdown closes any fence/inline
+   * code left open in the final chunk, so each chunk renders on its own.
+   * Cross-message continuity is the caller's job (AgentLoop.sendSegments).
+   */
   private splitMessage(content: string, maxLength: number): string[] {
-    if (content.length <= maxLength) {
-      return [content]
-    }
-
-    const chunks: string[] = []
-    let currentChunk = ''
-
-    const lines = content.split('\n')
-
-    for (const line of lines) {
-      if (currentChunk.length + line.length + 1 > maxLength) {
-        if (currentChunk) {
-          chunks.push(currentChunk)
-          currentChunk = ''
-        }
-
-        // If single line is too long, split it
-        if (line.length > maxLength) {
-          for (let i = 0; i < line.length; i += maxLength) {
-            chunks.push(line.substring(i, i + maxLength))
-          }
-        } else {
-          currentChunk = line
-        }
-      } else {
-        currentChunk += (currentChunk ? '\n' : '') + line
-      }
-    }
-
-    if (currentChunk) {
-      chunks.push(currentChunk)
-    }
-
-    return chunks
+    return splitPreservingMarkdown(content, maxLength).chunks.map((c) => c.text)
   }
 }
-
