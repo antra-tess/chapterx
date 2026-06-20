@@ -922,6 +922,54 @@ describe('injectActivationCompletions', () => {
     expect(textOf(messages[1])).toBe('<thinking>hmm</thinking>hello')
   })
 
+  it('strips exact markdown bridge strings from messageContexts', () => {
+    const messages: ParticipantMessage[] = [
+      makeParticipantMessage({ participant: 'TestBot', content: [{ type: 'text', text: '```python\nprint(1)\n```' }], messageId: 'b1' }),
+    ]
+    const activations: Activation[] = [
+      makeActivation({
+        messageContexts: {
+          'b1': { prefix: '', bridgeOpen: '```python\n', bridgeClose: '\n```' },
+        },
+      }),
+    ]
+    injectActivationCompletions(messages, activations, 'TestBot')
+
+    expect(textOf(messages[0])).toBe('print(1)')
+  })
+
+  it('strips fence bridgeOpen when Discord normalized custom emoji in the info string', () => {
+    const messages: ParticipantMessage[] = [
+      makeParticipantMessage({ participant: 'TestBot', content: [{ type: 'text', text: '```:big:\nbody' }], messageId: 'b1' }),
+    ]
+    const activations: Activation[] = [
+      makeActivation({
+        messageContexts: {
+          'b1': { prefix: '', bridgeOpen: '```<:big:123456789012345678>\n' },
+        },
+      }),
+    ]
+    injectActivationCompletions(messages, activations, 'TestBot')
+
+    expect(textOf(messages[0])).toBe('body')
+  })
+
+  it('strips fence bridgeOpen when Discord normalized a mention in the info string', () => {
+    const messages: ParticipantMessage[] = [
+      makeParticipantMessage({ participant: 'TestBot', content: [{ type: 'text', text: '```<@alice>\nbody' }], messageId: 'b1' }),
+    ]
+    const activations: Activation[] = [
+      makeActivation({
+        messageContexts: {
+          'b1': { prefix: '', bridgeOpen: '```<@123456789012345678>\n' },
+        },
+      }),
+    ]
+    injectActivationCompletions(messages, activations, 'TestBot')
+
+    expect(textOf(messages[0])).toBe('body')
+  })
+
   it('falls back to legacy completion map', () => {
     const messages: ParticipantMessage[] = [
       makeParticipantMessage({ participant: 'TestBot', content: [{ type: 'text', text: 'short' }], messageId: 'b1' }),
