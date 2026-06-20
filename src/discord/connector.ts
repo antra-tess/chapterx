@@ -46,6 +46,10 @@ const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachm
 // Cap raw audio so the base64-inflated payload stays under Gemini's ~20 MB
 // inline-data request ceiling (12 MB raw → ~16 MB base64, leaving headroom).
 const MAX_AUDIO_BYTES = 12 * 1024 * 1024
+// Bound the in-memory audio cache (it has no disk backing, unlike images, and
+// audio is rarely re-sent so the hit rate is low). LRU-evict oldest entries
+// past this budget — enough to dedup audio still in the rolling context window.
+const AUDIO_CACHE_MAX_BYTES = 64 * 1024 * 1024
 
 // Filename-extension → audio MIME (Gemini-accepted set), used when Discord omits
 // content_type — it is OPTIONAL on the attachment object, so we can't rely on it
@@ -886,7 +890,7 @@ export class DiscordConnector {
       }
       endProfile('attachmentProcessing')
       
-      logger.debug({ totalImages: images.length, totalDocuments: documents.length }, 'Attachment processing complete')
+      logger.debug({ totalImages: images.length, totalDocuments: documents.length, totalAudios: audios.length }, 'Attachment processing complete')
 
       // Build inheritance info for plugin state
       const inheritanceInfo: DiscordContext['inheritanceInfo'] = {}
@@ -910,6 +914,7 @@ export class DiscordConnector {
         messageCount: discordMessages.length,
         imageCount: images.length,
         documentCount: documents.length,
+        audioCount: audios.length,
         pinnedCount: pinnedConfigs.length,
       }, '⏱️  PROFILING: fetchContext breakdown (ms)')
 
@@ -2820,7 +2825,12 @@ export class DiscordConnector {
    */
   private async cacheAudio(url: string, mediaType: string, messageId: string, duration?: number): Promise<CachedAudio | null> {
     const existing = this.audioCache.get(url)
-    if (existing) return existing
+    if (existing) {
+      // Refresh recency (Map keeps insertion order → re-insert moves to newest).
+      this.audioCache.delete(url)
+      this.audioCache.set(url, existing)
+      return existing
+    }
 
     try {
       const response = await fetch(url)
@@ -2844,11 +2854,24 @@ export class DiscordConnector {
         ...(duration !== undefined ? { duration } : {}),
       }
       this.audioCache.set(url, cached)
+      this.evictAudioCache()
       logger.debug({ url, mediaType, bytes: buffer.length }, 'Cached audio attachment')
       return cached
     } catch (error) {
       logger.warn({ error, url }, 'Failed to download audio attachment')
       return null
+    }
+  }
+
+  /** LRU-evict oldest audio cache entries once the total exceeds the byte budget. */
+  private evictAudioCache(): void {
+    let total = 0
+    for (const a of this.audioCache.values()) total += a.data.length
+    if (total <= AUDIO_CACHE_MAX_BYTES) return
+    for (const [key, a] of this.audioCache) {
+      if (total <= AUDIO_CACHE_MAX_BYTES) break
+      this.audioCache.delete(key)  // oldest first (insertion order)
+      total -= a.data.length
     }
   }
 
