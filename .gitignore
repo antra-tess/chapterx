@@ -52,3 +52,7 @@ config/bots/Archimedes.yaml
 tools/strangesonnet45/config/bots/strangesonnet45.yaml
 config/bots/strangesonnet45.yaml
 tools/strangesonnet45/*
+# portal local test instance + scratch
+.k27-tmp/
+portal-creds.json
+verify.mjs

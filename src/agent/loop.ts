@@ -6,7 +6,7 @@
 import { EventQueue } from './event-queue.js'
 import { DeferredQueue, isTransientError } from './deferred-queue.js'
 import { ChannelStateManager } from './state-manager.js'
-import { DiscordConnector } from '../discord/connector.js'
+import type { IConnector } from '../connector/types.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { ToolSystem } from '../tools/system.js'
@@ -96,7 +96,7 @@ export class AgentLoop {
   constructor(
     private botId: string,
     private queue: EventQueue,
-    private connector: DiscordConnector,
+    private connector: IConnector,
     private stateManager: ChannelStateManager,
     private configSystem: ConfigSystem,
     private contextBuilder: ContextBuilder,

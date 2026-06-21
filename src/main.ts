@@ -5,10 +5,13 @@
 
 import { readFileSync } from 'fs'
 import { join } from 'path'
+import { parse as parseYaml } from 'yaml'
 import { EventQueue } from './agent/event-queue.js'
 import { AgentLoop } from './agent/loop.js'
 import { ChannelStateManager } from './agent/state-manager.js'
 import { DiscordConnector } from './discord/connector.js'
+import { PortalConnector } from './connector/portal/portal-connector.js'
+import type { IConnector } from './connector/types.js'
 import { ConfigSystem } from './config/system.js'
 import { ContextBuilder } from './context/builder.js'
 import { ToolSystem } from './tools/system.js'
@@ -57,19 +60,40 @@ async function main() {
     const toolsPath = process.env.TOOLS_PATH || './tools'
     const cachePath = process.env.CACHE_PATH || './cache'
 
-    // Read Discord token from file
-    let discordToken: string
-    
-    try {
-      discordToken = readFileSync(tokenFilePath, 'utf-8').trim()
-      logger.info({ tokenFile: tokenFilePath }, 'Discord token loaded from file')
-    } catch (error) {
-      logger.error({ error, tokenFile: tokenFilePath }, 'Failed to read discord_token file')
-      throw new Error(`Could not read token file: ${tokenFilePath}. Please create it with your bot token.`)
+    // ── Connector bootstrap settings (config-driven, env overrides) ──
+    // Read straight from the bot's config.yaml so the whole portal setup lives in
+    // one place (EMS: <EMS_PATH>/<BOT_NAME>/config.yaml). Env vars still win for
+    // ad-hoc overrides. BOT_NAME is required for config-driven portal mode.
+    let botBootstrap: Record<string, any> = {}
+    if (botNameOverride) {
+      const botCfgPath = emsPath
+        ? join(emsPath, botNameOverride, 'config.yaml')
+        : join(configPath, 'bots', `${botNameOverride}.yaml`)
+      try {
+        botBootstrap = parseYaml(readFileSync(botCfgPath, 'utf-8')) || {}
+      } catch {
+        logger.warn({ botCfgPath }, 'Could not pre-read bot config for connector settings')
+      }
     }
 
-    if (!discordToken) {
-      throw new Error('discord_token file is empty')
+    // Backend selection: 'portal' routes through the shared relay; default is the
+    // bot's own discord.js gateway.
+    const backend =
+      (process.env.CONNECTOR_BACKEND || botBootstrap.connector_backend) === 'portal' ? 'portal' : 'discord'
+
+    // Read Discord token from file (discord backend only).
+    let discordToken = ''
+    if (backend === 'discord') {
+      try {
+        discordToken = readFileSync(tokenFilePath, 'utf-8').trim()
+        logger.info({ tokenFile: tokenFilePath }, 'Discord token loaded from file')
+      } catch (error) {
+        logger.error({ error, tokenFile: tokenFilePath }, 'Failed to read discord_token file')
+        throw new Error(`Could not read token file: ${tokenFilePath}. Please create it with your bot token.`)
+      }
+      if (!discordToken) {
+        throw new Error('discord_token file is empty')
+      }
     }
 
     logger.info({ configPath, toolsPath, cachePath, emsMode: !!emsPath }, 'Configuration loaded')
@@ -99,12 +123,51 @@ async function main() {
     // Note: MCP servers are initialized on first bot activation
     // They are configured in bot config and can be overridden per-guild/channel
 
-    // Initialize Discord connector
-    const connector = new DiscordConnector(queue, {
-      token: discordToken,
-      cacheDir: cachePath + '/images',
-      maxBackoffMs: 32000,
-    })
+    // Initialize the connector for the selected backend.
+    let connector: IConnector
+    if (backend === 'portal') {
+      const portalUrl = process.env.PORTAL_URL || botBootstrap.portal_url
+      if (!portalUrl) throw new Error('portal backend requires portal_url (config) or PORTAL_URL (env)')
+      let personaId = process.env.PORTAL_PERSONA
+      let portalToken = process.env.PORTAL_TOKEN
+      if (!personaId || !portalToken) {
+        // Enroll ONCE and reuse the persona forever. The creds file must live on a
+        // path that survives restarts/redeploys — in EMS mode default to the
+        // (persistent) bot dir, not the (re-deployable) code/cache dir.
+        const credsPath =
+          process.env.PORTAL_CREDS_PATH ||
+          botBootstrap.portal_creds_path ||
+          (emsPath && botNameOverride
+            ? join(emsPath, botNameOverride, 'portal-creds.json')
+            : join(cachePath, 'portal-creds.json'))
+        const { loadOrEnrollCreds } = await import('@animalabs/portal-client')
+        const creds = await loadOrEnrollCreds({
+          url: portalUrl,
+          credsPath,
+          invite: process.env.PORTAL_INVITE || botBootstrap.portal_invite,
+          desiredName: botNameOverride,
+        })
+        personaId = creds.personaId
+        portalToken = creds.token
+        logger.info({ credsPath, personaId }, 'Portal persona credentials ready (enroll-once)')
+      }
+      // No explicit channel subscriptions: channel access is role/permission-based,
+      // tracked relay-side.
+      logger.info({ portalUrl, personaId }, 'Using portal backend')
+      connector = new PortalConnector(queue, {
+        url: portalUrl,
+        token: portalToken,
+        personaId,
+        cacheDir: cachePath + '/images',
+        maxBackoffMs: 32000,
+      })
+    } else {
+      connector = new DiscordConnector(queue, {
+        token: discordToken,
+        cacheDir: cachePath + '/images',
+        maxBackoffMs: 32000,
+      })
+    }
 
     await connector.start()
 

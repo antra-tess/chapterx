@@ -22,24 +22,10 @@ import {
   fetchChannelMessages,
   type FetchDeps,
 } from './context-fetch.js'
+import type { IConnector, ConnectorOptions, TrackedPin, FetchContextParams } from '../connector/types.js'
 
-export interface ConnectorOptions {
-  token: string
-  cacheDir: string
-  maxBackoffMs: number
-}
-
-/**
- * A pinned message tracked via gateway events.
- * Holds the minimal set of fields needed to resolve .config / .steer / .sleep
- * without calling the Discord /pins endpoint after the initial bootstrap.
- */
-export interface TrackedPin {
-  id: string
-  content: string
-  authorId: string
-  authorBot: boolean
-}
+// Re-exported from connector/types.ts for back-compat with existing imports.
+export type { ConnectorOptions, TrackedPin, FetchContextParams }
 
 const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
 
@@ -49,18 +35,7 @@ function snowflakeToTimestamp(id: string): number {
   return Number(BigInt(id) >> 22n) + DISCORD_EPOCH
 }
 
-export interface FetchContextParams {
-  channelId: string
-  depth: number  // Max messages
-  targetMessageId?: string  // Optional: Fetch backward from this message ID (for API range queries)
-  firstMessageId?: string  // Optional: Stop when this message is encountered
-  authorized_roles?: string[]
-  pinnedConfigs?: string[]  // Optional: Pre-fetched pinned configs (skips fetchPinned call)
-  maxImages?: number  // Optional: Cap image fetching to avoid RAM bloat (default: unlimited)
-  ignoreHistory?: boolean  // Optional: Skip .history command processing (raw fetch)
-}
-
-export class DiscordConnector {
+export class DiscordConnector implements IConnector {
   private client: Client
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private imageCache = new Map<string, CachedImage>()

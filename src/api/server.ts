@@ -4,7 +4,7 @@
  */
 
 import express, { Request, Response, NextFunction } from 'express'
-import { DiscordConnector } from '../discord/connector.js'
+import type { IConnector } from '../connector/types.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder } from '../context/builder.js'
 import { logger } from '../utils/logger.js'
@@ -68,7 +68,7 @@ export class ApiServer {
 
   constructor(
     private config: ApiConfig,
-    private connector: DiscordConnector,
+    private connector: IConnector,
     private configSystem?: ConfigSystem,
     private contextBuilder?: ContextBuilder,
     private botName?: string
@@ -259,6 +259,10 @@ export class ApiServer {
         }
 
         const client = (this.connector as any).client
+        if (!client) {
+          res.status(501).json({ error: 'Not Implemented', message: 'channel listing requires the discord backend' })
+          return
+        }
         const guilds = guildIdFilter
           ? [client.guilds.cache.get(guildIdFilter)].filter(Boolean)
           : Array.from(client.guilds.cache.values())
@@ -578,7 +582,8 @@ export class ApiServer {
 
   private async getUserInfo(userId: string, guildId?: string): Promise<any> {
     const client = (this.connector as any).client
-    
+    if (!client) throw new Error('user lookup requires the discord backend (portal mode)')
+
     // Fetch user from Discord
     let user
     try {
@@ -629,7 +634,8 @@ export class ApiServer {
 
   private async getUserAvatar(userId: string, size: number = 128): Promise<string | null> {
     const client = (this.connector as any).client
-    
+    if (!client) throw new Error('avatar lookup requires the discord backend (portal mode)')
+
     try {
       const user = await client.users.fetch(userId)
       if (!user) {
