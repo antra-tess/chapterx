@@ -1371,7 +1371,9 @@ describe('buildContext (integration)', () => {
         content: 'hey <@BotUser> what do you think?',
       }),
     ]
-    const config = makeConfig({ name: 'Claude' })
+    // Pin display-name flags off so this exercises the angle-bracket normalization
+    // path specifically (bots now default to display names, which renders @Name).
+    const config = makeConfig({ name: 'Claude', use_display_names: false })
 
     const result = await builder.buildContext({
       discordContext: makeDiscordContext(messages),
