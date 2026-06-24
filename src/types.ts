@@ -278,6 +278,12 @@ export interface BotConfig {
   // for participant labels in the LLM context. Default: false (use usernames, matching Chapter2)
   use_display_names?: boolean
 
+  // Per-participant display-name control. When set, these override use_display_names
+  // for the given participant class. Defaults (when unset): bots → display names,
+  // humans → usernames. use_display_names (above) remains the fallback for both.
+  use_display_names_bots?: boolean
+  use_display_names_humans?: boolean
+
   // Mention format template for LLM context. {name} is replaced with the resolved name.
   // Default: '<@{name}>' (angle-bracket style). Examples: '@{name}', '{name}', '[{name}]'
   // Applies to both inline mentions and reply tags. Base models often work better

@@ -156,11 +156,19 @@ export async function formatMessages(
     }, 'Image selection complete')
   }
 
-  // Build username -> display name map for mention rewriting
+  // Per-participant display-name policy (bots vs humans), falling back to the legacy
+  // use_display_names flag, then the documented defaults (bots → display, humans → username).
+  const botsUseDisplay = config.use_display_names_bots ?? config.use_display_names ?? true
+  const humansUseDisplay = config.use_display_names_humans ?? config.use_display_names ?? false
+  const anyDisplayNames = botsUseDisplay || humansUseDisplay
+
+  // Build username -> display name map for mention rewriting (only for participant
+  // classes that actually render display names, so mentions match their labels).
   const usernameToDisplayName = new Map<string, string>()
-  if (config.use_display_names) {
+  if (anyDisplayNames) {
     for (const msg of messages) {
-      if (msg.author.username !== msg.author.displayName) {
+      const useForThis = msg.author.bot ? botsUseDisplay : humansUseDisplay
+      if (useForThis && msg.author.username !== msg.author.displayName) {
         usernameToDisplayName.set(msg.author.username, msg.author.displayName)
       }
     }
@@ -321,7 +329,9 @@ export async function formatMessages(
     // Character override takes precedence over both bot-name normalization and
     // display-name resolution.
     const isBotMessage = botDiscordUsername && msg.author.username === botDiscordUsername
-    const participantName = config.use_display_names ? msg.author.displayName : msg.author.username
+    const participantName = (msg.author.bot ? botsUseDisplay : humansUseDisplay)
+      ? msg.author.displayName
+      : msg.author.username
     const participant = overrideParticipant
       ? overrideParticipant
       : isBotMessage
@@ -348,10 +358,10 @@ export async function formatMessages(
       applyMentionFormat(
         content,
         config.mention_format,
-        config.use_display_names ? usernameToDisplayName : undefined,
+        anyDisplayNames ? usernameToDisplayName : undefined,
         config.name
       )
-    } else if (config.use_display_names) {
+    } else if (anyDisplayNames) {
       // Legacy path: rewrite to @DisplayName format
       rewriteMentionsForDisplayNames(content, usernameToDisplayName, config.name)
     }

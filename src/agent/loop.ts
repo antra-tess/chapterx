@@ -1385,16 +1385,10 @@ export class AgentLoop {
         return true
       }
 
-      // 3. Check for reply to bot's message (but ignore replies from other bots without mention)
-      if (message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)) {
-        // If the replying user is a bot, only activate if they explicitly mentioned us
-        if (message.author?.bot) {
-          logger.debug({ messageId: message.id, author: message.author?.username }, 'Ignoring bot reply without mention')
-          continue
-        }
-        logger.debug({ messageId: message.id }, 'Activated by reply')
-        return true
-      }
+      // 3. Replies do NOT auto-activate (hard rule).
+      // A reply with "ping on reply" enabled includes the bot in message.mentions and is
+      // already handled by the mention check above. A reply with the ping toggled off must
+      // not wake the bot — fall through to the remaining triggers (random / name / etc.).
 
       // 4. Random chance activation
       if (!loadConfig()) return false
@@ -2566,7 +2560,7 @@ export class AgentLoop {
                 discordMessages,
                 this.connector.getBotUsername() || config.name,
                 llmRequest.stop_sequences,
-                config.use_display_names
+                config
               )
               if (truncResult.truncatedAt) {
                 logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncating native pre-tool text at participant')
@@ -2763,7 +2757,7 @@ export class AgentLoop {
           discordMessages,
           this.connector.getBotUsername() || config.name,
           llmRequest.stop_sequences,
-          config.use_display_names
+          config
         )
         if (truncResult.truncatedAt) {
           logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated native output at participant')
@@ -3145,7 +3139,7 @@ export class AgentLoop {
           discordMessages,
           this.connector.getBotUsername() || config.name,
           llmRequest.stop_sequences,
-          config.use_display_names
+          config
         )
         if (truncResult.truncatedAt?.startsWith('start_hallucination:')) {
           // Response started with another participant - complete hallucination
@@ -3409,7 +3403,7 @@ export class AgentLoop {
         discordMessages,
         this.connector.getBotUsername() || config.name,
         llmRequest.stop_sequences,
-        config.use_display_names
+        config
       )
       if (truncResult.truncatedAt) {
         logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated inline output at participant')
@@ -3858,13 +3852,16 @@ export class AgentLoop {
     messages: DiscordMessage[],
     botName: string,
     additionalStopSequences?: string[],
-    useDisplayNames?: boolean
+    config?: BotConfig
   ): { text: string; truncatedAt: string | null } {
-    // Collect ALL unique participant names from the conversation
-    // When use_display_names is enabled, use display names to match what the LLM sees in context
+    // Collect ALL unique participant names from the conversation.
+    // Use the same per-participant naming the LLM sees in context (bots vs humans),
+    // so hallucinated turns are caught regardless of which class renders display names.
+    const botsUseDisplay = config?.use_display_names_bots ?? config?.use_display_names ?? true
+    const humansUseDisplay = config?.use_display_names_humans ?? config?.use_display_names ?? false
     const participants = new Set<string>()
     for (const msg of messages) {
-      const name = useDisplayNames ? msg.author?.displayName : msg.author?.username
+      const name = (msg.author?.bot ? botsUseDisplay : humansUseDisplay) ? msg.author?.displayName : msg.author?.username
       if (name && name !== botName) {
         participants.add(name)
       }

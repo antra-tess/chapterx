@@ -355,6 +355,11 @@ export class ConfigSystem {
       // Use display names instead of usernames for participant labels - default false
       use_display_names: config.use_display_names ?? false,
 
+      // Per-participant display-name flags. Fall back to use_display_names, then the
+      // documented defaults: bots → display names (true), humans → usernames (false).
+      use_display_names_bots: config.use_display_names_bots ?? config.use_display_names ?? true,
+      use_display_names_humans: config.use_display_names_humans ?? config.use_display_names ?? false,
+
       // Mention format template - default undefined (uses <@name> format)
       mention_format: config.mention_format,
 
