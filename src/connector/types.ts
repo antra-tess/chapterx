@@ -27,6 +27,18 @@ export interface TrackedPin {
   content: string
   authorId: string
   authorBot: boolean
+  /** Relay-resolved persona ids addressed by this pin (portal backend only). */
+  mentionedPersonaIds?: string[]
+  /** Discord/relay role ids mentioned in this pin (for `<@&roleId>` targeting). */
+  mentionedRoleIds?: string[]
+}
+
+/** A pinned `.steer` message with its resolved mention context. */
+export interface PinnedSteer {
+  content: string
+  authorId: string
+  mentionedPersonaIds?: string[]
+  mentionedRoleIds?: string[]
 }
 
 export interface FetchContextParams {
@@ -95,11 +107,13 @@ export interface IConnector {
 
   // ── Pins (async fetch + sync cache) ──
   fetchPinnedConfigs(channelId: string): Promise<string[]>
-  fetchPinnedSteerMessages(channelId: string): Promise<Array<{ content: string; authorId: string }>>
+  fetchPinnedSteerMessages(channelId: string): Promise<PinnedSteer[]>
   fetchPinnedSleeps(channelId: string): Promise<TrackedPin[]>
   getCachedPinnedConfigs(channelId: string): string[] | null
-  getCachedPinnedSteers(channelId: string): Array<{ content: string; authorId: string }> | null
+  getCachedPinnedSteers(channelId: string): PinnedSteer[] | null
   getCachedPinnedSleeps(channelId: string): TrackedPin[] | null
+  /** The bot's own role ids in a channel's guild (account bots; null if uncached/portal). */
+  getOwnRoleIds(channelId: string): string[] | null
 
   // ── Send ──
   sendMessage(channelId: string, content: string, replyToMessageId?: string): Promise<string[]>

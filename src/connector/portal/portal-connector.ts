@@ -12,20 +12,30 @@ import type { PortalMessage, PortalEvent } from '@animalabs/portal-protocol'
 import { EventQueue } from '../../agent/event-queue.js'
 import type { DiscordContext } from '../../types.js'
 import { logger } from '../../utils/logger.js'
-import type { IConnector, FetchContextParams, TrackedPin } from '../types.js'
+import type { IConnector, FetchContextParams, TrackedPin, PinnedSteer } from '../types.js'
 import { splitContent } from '../util/split.js'
 import { queueEventFromPortal, authorOfMessage, type AdapterCtx } from './adapters.js'
 import { AttachmentCache } from '../util/attachment-cache.js'
 import { buildPortalContext, type ContextDeps } from './context.js'
 import type { PortalChannelRef } from './history.js'
 import { extractConfigs, extractSteers, extractSleeps } from '../util/pin-extract.js'
+import type { BotIdentity } from '../../agent/pin-target.js'
 
 const ROLE_CACHE_TTL_MS = 5 * 60 * 1000
 
 /** PortalMessage → TrackedPin (raw content; snowflake id for stable sort). */
 function portalMessageToTrackedPin(pm: PortalMessage): TrackedPin {
   const a = authorOfMessage(pm)
-  return { id: pm.nativeId, content: pm.content, authorId: a.id, authorBot: a.bot }
+  return {
+    id: pm.nativeId,
+    content: pm.content,
+    authorId: a.id,
+    authorBot: a.bot,
+    // The relay resolves role mentions to persona ids; carry both so pinned
+    // .config/.sleep/.steer can be matched by persona/role mention.
+    mentionedPersonaIds: pm.mentions?.personas ? [...pm.mentions.personas] : undefined,
+    mentionedRoleIds: pm.mentions?.roles ? [...pm.mentions.roles] : undefined,
+  }
 }
 
 /** chatperx emits `<@username>`; the relay's outgoing-mention resolver matches
@@ -387,10 +397,28 @@ export class PortalConnector implements IConnector {
     return pins ?? []
   }
 
-  async fetchPinnedConfigs(channelId: string): Promise<string[]> {
-    return extractConfigs(await this.ensurePins(channelId))
+  /** Identity the relay-routed persona resolves pin targets against: its persona
+   *  id (relay-resolved role mentions) and display name. botId / config name are
+   *  matched downstream in config parsing. */
+  private pinMatchContext(): { identity: BotIdentity } {
+    return {
+      identity: {
+        botId: '',
+        discordUsername: this.getBotUsername() ?? undefined,
+        discordUserId: this.getBotUserId() ?? undefined,
+      },
+    }
   }
-  async fetchPinnedSteerMessages(channelId: string): Promise<Array<{ content: string; authorId: string }>> {
+
+  /** Portal personas have no own guild roles; targeting is via persona mention. */
+  getOwnRoleIds(_channelId: string): string[] | null {
+    return null
+  }
+
+  async fetchPinnedConfigs(channelId: string): Promise<string[]> {
+    return extractConfigs(await this.ensurePins(channelId), this.pinMatchContext())
+  }
+  async fetchPinnedSteerMessages(channelId: string): Promise<PinnedSteer[]> {
     return extractSteers(await this.ensurePins(channelId))
   }
   async fetchPinnedSleeps(channelId: string): Promise<TrackedPin[]> {
@@ -398,9 +426,9 @@ export class PortalConnector implements IConnector {
   }
   getCachedPinnedConfigs(channelId: string): string[] | null {
     const pins = this.pinnedByChannel.get(channelId)
-    return pins ? extractConfigs(pins) : null
+    return pins ? extractConfigs(pins, this.pinMatchContext()) : null
   }
-  getCachedPinnedSteers(channelId: string): Array<{ content: string; authorId: string }> | null {
+  getCachedPinnedSteers(channelId: string): PinnedSteer[] | null {
     const pins = this.pinnedByChannel.get(channelId)
     return pins ? extractSteers(pins) : null
   }

@@ -4,6 +4,7 @@
  */
 
 import { Attachment, Client, Collection, GatewayIntentBits, Message, Partials, PermissionFlagsBits, OAuth2Scopes, TextChannel } from 'discord.js'
+import { pinAddressesBot } from '../agent/pin-target.js'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -22,10 +23,20 @@ import {
   fetchChannelMessages,
   type FetchDeps,
 } from './context-fetch.js'
-import type { IConnector, ConnectorOptions, TrackedPin, FetchContextParams } from '../connector/types.js'
+import type { IConnector, ConnectorOptions, TrackedPin, FetchContextParams, PinnedSteer } from '../connector/types.js'
 
 // Re-exported from connector/types.ts for back-compat with existing imports.
-export type { ConnectorOptions, TrackedPin, FetchContextParams }
+export type { ConnectorOptions, TrackedPin, FetchContextParams, PinnedSteer }
+
+/** Extract mentioned role ids from a discord.js-ish message `mentions` object. */
+function extractMentionedRoleIds(
+  mentions?: { roles?: { values(): IterableIterator<{ id: string }> } } | null,
+): string[] | undefined {
+  const roles = mentions?.roles
+  if (!roles) return undefined
+  const ids = Array.from(roles.values(), (r) => r.id)
+  return ids.length ? ids : undefined
+}
 
 const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
 
@@ -111,13 +122,17 @@ export class DiscordConnector implements IConnector {
     return m
   }
 
-  private trackPin(channelId: string, message: Pick<Message, 'id' | 'content'> & { author?: { id?: string; bot?: boolean } | null }): void {
+  private trackPin(channelId: string, message: Pick<Message, 'id' | 'content'> & {
+    author?: { id?: string; bot?: boolean } | null
+    mentions?: { roles?: { values(): IterableIterator<{ id: string }> } } | null
+  }): void {
     const pins = this.getOrCreateChannelPinMap(channelId)
     pins.set(message.id, {
       id: message.id,
       content: message.content ?? '',
       authorId: message.author?.id ?? '',
       authorBot: message.author?.bot ?? false,
+      mentionedRoleIds: extractMentionedRoleIds(message.mentions),
     })
     this.schedulePinCachePersist(channelId)
   }
@@ -199,6 +214,7 @@ export class DiscordConnector implements IConnector {
           content: msg.content ?? '',
           authorId: msg.author?.id ?? '',
           authorBot: msg.author?.bot ?? false,
+          mentionedRoleIds: extractMentionedRoleIds(msg.mentions),
         })
       }
       this.schedulePinCachePersist(channelId)
@@ -215,17 +231,22 @@ export class DiscordConnector implements IConnector {
    * extractConfigs(Message[]). Sort order matches the legacy path
    * (ascending message ID, so newer pins override older in merge).
    */
-  private extractConfigsFromTrackedPins(pins: Map<string, TrackedPin>): string[] {
+  private extractConfigsFromTrackedPins(pins: Map<string, TrackedPin>, channelId: string): string[] {
     const sorted = [...pins.values()].sort((a, b) => a.id.localeCompare(b.id))
-    return this.extractConfigs(sorted)
+    return this.extractConfigs(sorted, channelId)
   }
 
-  private extractSteersFromTrackedPins(pins: Map<string, TrackedPin>): Array<{ content: string; authorId: string }> {
+  private extractSteersFromTrackedPins(pins: Map<string, TrackedPin>): PinnedSteer[] {
     const sorted = [...pins.values()].sort((a, b) => a.id.localeCompare(b.id))
-    const out: Array<{ content: string; authorId: string }> = []
+    const out: PinnedSteer[] = []
     for (const pin of sorted) {
       if (pin.content.startsWith('.steer') && !pin.authorBot) {
-        out.push({ content: pin.content, authorId: pin.authorId })
+        out.push({
+          content: pin.content,
+          authorId: pin.authorId,
+          mentionedPersonaIds: pin.mentionedPersonaIds,
+          mentionedRoleIds: pin.mentionedRoleIds,
+        })
       }
     }
     return out
@@ -416,7 +437,7 @@ export class DiscordConnector implements IConnector {
       pins = this.pinnedByChannel.get(channelId)
     }
     if (!pins) return []
-    return this.extractConfigsFromTrackedPins(pins)
+    return this.extractConfigsFromTrackedPins(pins, channelId)
   }
 
   /**
@@ -424,7 +445,7 @@ export class DiscordConnector implements IConnector {
    * Returns array of { content, authorId } for each pinned .steer message.
    * Falls back to disk cache if API call fails (e.g. Cloudflare 429).
    */
-  async fetchPinnedSteerMessages(channelId: string): Promise<Array<{ content: string; authorId: string }>> {
+  async fetchPinnedSteerMessages(channelId: string): Promise<PinnedSteer[]> {
     let pins = this.pinnedByChannel.get(channelId)
     if (!pins) {
       await this.bootstrapChannelPins(channelId)
@@ -1991,14 +2012,14 @@ export class DiscordConnector implements IConnector {
   getCachedPinnedConfigs(channelId: string): string[] | null {
     const pins = this.pinnedByChannel.get(channelId)
     if (!pins) return null
-    return this.extractConfigsFromTrackedPins(pins)
+    return this.extractConfigsFromTrackedPins(pins, channelId)
   }
 
   /**
    * Synchronous view over the tracked-pin cache for steer lookups.
    * Returns null on cold miss.
    */
-  getCachedPinnedSteers(channelId: string): Array<{ content: string; authorId: string }> | null {
+  getCachedPinnedSteers(channelId: string): PinnedSteer[] | null {
     const pins = this.pinnedByChannel.get(channelId)
     if (!pins) return null
     return this.extractSteersFromTrackedPins(pins)
@@ -2012,6 +2033,18 @@ export class DiscordConnector implements IConnector {
     const pins = this.pinnedByChannel.get(channelId)
     if (!pins) return null
     return this.extractSleepsFromTrackedPins(pins)
+  }
+
+  /**
+   * The bot's own role ids in a channel's guild (cache-only, synchronous).
+   * Used for `<@&roleId>` mention-targeting of pinned commands. Returns null
+   * when the guild / own-member isn't cached.
+   */
+  getOwnRoleIds(channelId: string): string[] | null {
+    const channel: any = this.client.channels.cache.get(channelId)
+    const me = channel?.guild?.members?.me
+    if (!me) return null
+    return Array.from(me.roles.cache.values()).map((r: any) => r.id)
   }
 
   /**
@@ -2432,28 +2465,53 @@ export class DiscordConnector implements IConnector {
     return { messages: empty, failed: true }
   }
 
-  private extractConfigs(messages: Array<{ content: string }>): string[] {
+  private extractConfigs(
+    pins: Array<Pick<TrackedPin, 'content' | 'mentionedPersonaIds' | 'mentionedRoleIds'>>,
+    channelId: string,
+  ): string[] {
     const configs: string[] = []
 
-    for (const msg of messages) {
+    // Identity this connector can resolve a target against: the bot's own
+    // Discord account fields + persona id + its roles in this channel's guild.
+    // (botId / config name are matched downstream in parseChannelConfig.)
+    const ident = this.getBotDiscordIdentity()
+    const identity = {
+      botId: '',
+      discordUsername: ident.username,
+      discordGlobalName: ident.globalName,
+      discordUserId: ident.userId ?? this.getBotUserId() ?? undefined,
+    }
+    const ownRoleIds = this.getOwnRoleIds(channelId) ?? undefined
+
+    for (const pin of pins) {
       // Look for .config messages
       // Format: .config [target]
       //         ---
       //         yaml content
-      if (msg.content.startsWith('.config')) {
-        const lines = msg.content.split('\n')
+      if (pin.content.startsWith('.config')) {
+        const lines = pin.content.split('\n')
         if (lines.length > 2 && lines[1] === '---') {
           // Extract target from first line (space-separated after .config)
           const firstLine = lines[0]!
           const target = firstLine.slice('.config'.length).trim() || undefined
-          
+
           const yaml = lines.slice(2).join('\n')
-          
-          // Prepend target to YAML if present
-          if (target) {
+
+          // If this bot is addressed by a resolved mention (role/persona) or by
+          // a Discord identity the connector knows (username / global name /
+          // user id), strip the target so parseChannelConfig applies it as a
+          // bare config. Otherwise keep the target text for parseChannelConfig
+          // to match against botId / config name (or correctly skip).
+          const addressesMe = pinAddressesBot(
+            { targetText: target, mentionedPersonaIds: pin.mentionedPersonaIds, mentionedRoleIds: pin.mentionedRoleIds },
+            identity,
+            ownRoleIds,
+          )
+
+          if (target && !addressesMe) {
             configs.push(`target: ${target}\n${yaml}`)
           } else {
-          configs.push(yaml)
+            configs.push(yaml)
           }
         }
       }
