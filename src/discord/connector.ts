@@ -46,6 +46,14 @@ export interface TrackedPin {
   mentionedRoleIds?: string[]
 }
 
+/** A pinned `.steer` message with its resolved mention context. */
+export interface PinnedSteer {
+  content: string
+  authorId: string
+  mentionedPersonaIds?: string[]
+  mentionedRoleIds?: string[]
+}
+
 /** Extract mentioned role ids from a discord.js-ish message `mentions` object. */
 function extractMentionedRoleIds(
   mentions?: { roles?: { values(): IterableIterator<{ id: string }> } } | null,
@@ -265,12 +273,17 @@ export class DiscordConnector {
     return this.extractConfigs(sorted, channelId)
   }
 
-  private extractSteersFromTrackedPins(pins: Map<string, TrackedPin>): Array<{ content: string; authorId: string }> {
+  private extractSteersFromTrackedPins(pins: Map<string, TrackedPin>): PinnedSteer[] {
     const sorted = [...pins.values()].sort((a, b) => a.id.localeCompare(b.id))
-    const out: Array<{ content: string; authorId: string }> = []
+    const out: PinnedSteer[] = []
     for (const pin of sorted) {
       if (pin.content.startsWith('.steer') && !pin.authorBot) {
-        out.push({ content: pin.content, authorId: pin.authorId })
+        out.push({
+          content: pin.content,
+          authorId: pin.authorId,
+          mentionedPersonaIds: pin.mentionedPersonaIds,
+          mentionedRoleIds: pin.mentionedRoleIds,
+        })
       }
     }
     return out
@@ -469,7 +482,7 @@ export class DiscordConnector {
    * Returns array of { content, authorId } for each pinned .steer message.
    * Falls back to disk cache if API call fails (e.g. Cloudflare 429).
    */
-  async fetchPinnedSteerMessages(channelId: string): Promise<Array<{ content: string; authorId: string }>> {
+  async fetchPinnedSteerMessages(channelId: string): Promise<PinnedSteer[]> {
     let pins = this.pinnedByChannel.get(channelId)
     if (!pins) {
       await this.bootstrapChannelPins(channelId)
@@ -2043,7 +2056,7 @@ export class DiscordConnector {
    * Synchronous view over the tracked-pin cache for steer lookups.
    * Returns null on cold miss.
    */
-  getCachedPinnedSteers(channelId: string): Array<{ content: string; authorId: string }> | null {
+  getCachedPinnedSteers(channelId: string): PinnedSteer[] | null {
     const pins = this.pinnedByChannel.get(channelId)
     if (!pins) return null
     return this.extractSteersFromTrackedPins(pins)
