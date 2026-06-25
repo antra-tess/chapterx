@@ -4,6 +4,7 @@
  */
 
 import { Attachment, Client, Collection, GatewayIntentBits, Message, Partials, PermissionFlagsBits, OAuth2Scopes, TextChannel } from 'discord.js'
+import { pinAddressesBot } from '../agent/pin-target.js'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -259,9 +260,9 @@ export class DiscordConnector {
    * extractConfigs(Message[]). Sort order matches the legacy path
    * (ascending message ID, so newer pins override older in merge).
    */
-  private extractConfigsFromTrackedPins(pins: Map<string, TrackedPin>): string[] {
+  private extractConfigsFromTrackedPins(pins: Map<string, TrackedPin>, channelId: string): string[] {
     const sorted = [...pins.values()].sort((a, b) => a.id.localeCompare(b.id))
-    return this.extractConfigs(sorted)
+    return this.extractConfigs(sorted, channelId)
   }
 
   private extractSteersFromTrackedPins(pins: Map<string, TrackedPin>): Array<{ content: string; authorId: string }> {
@@ -460,7 +461,7 @@ export class DiscordConnector {
       pins = this.pinnedByChannel.get(channelId)
     }
     if (!pins) return []
-    return this.extractConfigsFromTrackedPins(pins)
+    return this.extractConfigsFromTrackedPins(pins, channelId)
   }
 
   /**
@@ -2035,7 +2036,7 @@ export class DiscordConnector {
   getCachedPinnedConfigs(channelId: string): string[] | null {
     const pins = this.pinnedByChannel.get(channelId)
     if (!pins) return null
-    return this.extractConfigsFromTrackedPins(pins)
+    return this.extractConfigsFromTrackedPins(pins, channelId)
   }
 
   /**
@@ -2488,28 +2489,53 @@ export class DiscordConnector {
     return { messages: empty, failed: true }
   }
 
-  private extractConfigs(messages: Array<{ content: string }>): string[] {
+  private extractConfigs(
+    pins: Array<Pick<TrackedPin, 'content' | 'mentionedPersonaIds' | 'mentionedRoleIds'>>,
+    channelId: string,
+  ): string[] {
     const configs: string[] = []
 
-    for (const msg of messages) {
+    // Identity this connector can resolve a target against: the bot's own
+    // Discord account fields + persona id + its roles in this channel's guild.
+    // (botId / config name are matched downstream in parseChannelConfig.)
+    const ident = this.getBotDiscordIdentity()
+    const identity = {
+      botId: '',
+      discordUsername: ident.username,
+      discordGlobalName: ident.globalName,
+      discordUserId: ident.userId ?? this.getBotUserId() ?? undefined,
+    }
+    const ownRoleIds = this.getOwnRoleIds(channelId) ?? undefined
+
+    for (const pin of pins) {
       // Look for .config messages
       // Format: .config [target]
       //         ---
       //         yaml content
-      if (msg.content.startsWith('.config')) {
-        const lines = msg.content.split('\n')
+      if (pin.content.startsWith('.config')) {
+        const lines = pin.content.split('\n')
         if (lines.length > 2 && lines[1] === '---') {
           // Extract target from first line (space-separated after .config)
           const firstLine = lines[0]!
           const target = firstLine.slice('.config'.length).trim() || undefined
-          
+
           const yaml = lines.slice(2).join('\n')
-          
-          // Prepend target to YAML if present
-          if (target) {
+
+          // If this bot is addressed by a resolved mention (role/persona) or by
+          // a Discord identity the connector knows (username / global name /
+          // user id), strip the target so parseChannelConfig applies it as a
+          // bare config. Otherwise keep the target text for parseChannelConfig
+          // to match against botId / config name (or correctly skip).
+          const addressesMe = pinAddressesBot(
+            { targetText: target, mentionedPersonaIds: pin.mentionedPersonaIds, mentionedRoleIds: pin.mentionedRoleIds },
+            identity,
+            ownRoleIds,
+          )
+
+          if (target && !addressesMe) {
             configs.push(`target: ${target}\n${yaml}`)
           } else {
-          configs.push(yaml)
+            configs.push(yaml)
           }
         }
       }

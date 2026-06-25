@@ -40,6 +40,7 @@ function fakeMsg(opts: {
   authorId?: string
   authorBot?: boolean
   partial?: boolean
+  roleMentions?: string[]
 }): Message {
   return {
     id: opts.id,
@@ -53,6 +54,9 @@ function fakeMsg(opts: {
       bot: opts.authorBot ?? false,
       username: 'user',
     },
+    mentions: opts.roleMentions
+      ? { roles: new Map(opts.roleMentions.map((id) => [id, { id }])) }
+      : undefined,
   } as unknown as Message
 }
 
@@ -204,6 +208,48 @@ describe('fetchPinnedConfigs', () => {
     spy.mockClear()
     await h.connector.fetchPinnedConfigs(CH)
     expect(spy).not.toHaveBeenCalled()
+  })
+})
+
+describe('fetchPinnedConfigs: identity & mention targeting', () => {
+  let h: Harness
+  beforeEach(() => {
+    h = makeHarness()
+    ;(h.connector as any).bootstrapChannelPins = vi.fn(async () => {
+      (h.connector as any).pinnedByChannel.set(CH, new Map())
+    })
+    // Give the connector a Discord identity to resolve targets against.
+    h.client.user = { id: BOT, username: 'glm5.2', globalName: 'GLM 5.2' }
+  })
+  afterEach(() => h.cleanup())
+
+  const pin = (id: string, content: string, roleMentions?: string[]) =>
+    h.client.emit(
+      'messageUpdate',
+      fakeMsg({ id, content, pinned: false }),
+      fakeMsg({ id, content, pinned: true, roleMentions }),
+    )
+
+  it('strips the target when it matches the bot’s own username (→ applies as bare)', async () => {
+    pin('1', '.config @glm5.2\n---\nx: 1')
+    expect(await h.connector.fetchPinnedConfigs(CH)).toEqual(['x: 1'])
+  })
+
+  it('keeps the target when it addresses a different bot', async () => {
+    pin('1', '.config someoneElse\n---\nx: 1')
+    expect(await h.connector.fetchPinnedConfigs(CH)).toEqual(['target: someoneElse\nx: 1'])
+  })
+
+  it('strips the target on a role mention the bot holds (→ applies as bare)', async () => {
+    ;(h.connector as any).getOwnRoleIds = () => ['555']
+    pin('1', '.config <@&555>\n---\nx: 1', ['555'])
+    expect(await h.connector.fetchPinnedConfigs(CH)).toEqual(['x: 1'])
+  })
+
+  it('keeps the target on a role mention the bot does not hold', async () => {
+    ;(h.connector as any).getOwnRoleIds = () => ['777']
+    pin('1', '.config <@&555>\n---\nx: 1', ['555'])
+    expect(await h.connector.fetchPinnedConfigs(CH)).toEqual(['target: <@&555>\nx: 1'])
   })
 })
 
