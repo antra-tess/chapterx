@@ -138,6 +138,9 @@ export class PortalConnector implements IConnector {
   getBotUserId(): string | undefined {
     return this.personaId
   }
+  isPortal(): boolean {
+    return true
+  }
   getBotUsername(): string | undefined {
     return this.displayName || undefined
   }

@@ -874,7 +874,10 @@ export class AgentLoop {
       userId: triggeringUser.id,
       serverId: guildId,
       channelId: channelId,
-      botId: this.botUserId || '',
+      // Portal personas have no Discord user id; key cost by the EMS bot name
+      // (this.botId) so admin cost commands (which resolve a portal role to the
+      // EMS name) target the same key. Account bots stay keyed by Discord user id.
+      botId: this.connector.isPortal() ? this.botId : (this.botUserId || ''),
       messageId: triggeringMessageId || '',
       triggerType: triggerReason as SomaTriggerType,
       userRoles: triggeringUser.roles || [],

@@ -82,6 +82,8 @@ export interface IConnector {
 
   // ── Identity ──
   getBotUserId(): string | undefined
+  /** True for the portal-relay backend (no own Discord account). */
+  isPortal(): boolean
   getBotUsername(): string | undefined
   getBotDiscordIdentity(): { userId?: string; username?: string; globalName?: string }
   generateInviteUrl(options?: {

@@ -331,6 +331,10 @@ export class DiscordConnector implements IConnector {
     return this.client.user?.id
   }
 
+  isPortal(): boolean {
+    return false
+  }
+
   /**
    * Get bot's Discord username
    */
