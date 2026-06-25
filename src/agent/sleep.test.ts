@@ -43,12 +43,32 @@ function sleep(
 }
 
 class FakeConnector implements SleepConnectorLike {
-  constructor(public pins: Map<string, TrackedPin[]> = new Map()) {}
+  constructor(
+    public pins: Map<string, TrackedPin[]> = new Map(),
+    public ownRoles: Map<string, string[]> = new Map(),
+  ) {}
   getCachedPinnedSleeps(channelId: string): TrackedPin[] | null {
     return this.pins.get(channelId) ?? null
   }
+  getOwnRoleIds(channelId: string): string[] | null {
+    return this.ownRoles.get(channelId) ?? null
+  }
   set(channelId: string, arr: TrackedPin[]) { this.pins.set(channelId, arr) }
+  setRoles(channelId: string, roles: string[]) { this.ownRoles.set(channelId, roles) }
 }
+
+describe('parseSleepMessage: mention targeting', () => {
+  const body = 'started_at: 2026-04-16T20:30:00Z\nduration_seconds: 600'
+  it('matches a resolved persona mention (portal), even though the text target is a role mention', () => {
+    expect(parseSleepMessage(`.sleep <@&555>\n---\n${body}`, { botId: BOT, discordUserId: 'persona1' }, { mentionedPersonaIds: ['persona1'] })).not.toBeNull()
+  })
+  it('matches the bot’s own role membership (account)', () => {
+    expect(parseSleepMessage(`.sleep <@&555>\n---\n${body}`, { botId: BOT }, { mentionedRoleIds: ['555'] }, ['555'])).not.toBeNull()
+  })
+  it('does not match a role mention the bot does not hold', () => {
+    expect(parseSleepMessage(`.sleep <@&555>\n---\n${body}`, { botId: BOT }, { mentionedRoleIds: ['555'] }, ['777'])).toBeNull()
+  })
+})
 
 // ────────────────────────────────────────────────────────────────────────────
 // parseSleepMessage

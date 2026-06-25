@@ -23,6 +23,9 @@
 import * as YAML from 'yaml'
 import { logger } from '../utils/logger.js'
 import type { TrackedPin } from '../discord/connector.js'
+import { pinAddressesBot, type BotIdentity } from './pin-target.js'
+
+export type { BotIdentity } from './pin-target.js'
 
 export interface ParsedSleep {
   startedAt: number            // epoch ms
@@ -31,28 +34,10 @@ export interface ParsedSleep {
   reason?: string
 }
 
-/**
- * All identity forms a `.sleep` target may address this bot by. Any non-empty
- * field is a valid match; case-insensitive. The parser tries each in turn, so
- * admins can write `.sleep opus47` (dir name), `.sleep Opus4.7` (config name),
- * `.sleep Opus 4.7` (Discord global name, with spaces), `.sleep @opus4.7`
- * (Discord username), or `.sleep <@123…>` (user-ID mention) and all resolve.
- */
-export interface BotIdentity {
-  /** EMS directory / internal bot id — e.g. `opus47`. */
-  botId: string
-  /** Config `name:` field — e.g. `Opus4.7`. */
-  configName?: string
-  /** Discord account username — e.g. `opus4.7`. */
-  discordUsername?: string
-  /** Discord account global display name — e.g. `Opus 4.7` (with spaces). */
-  discordGlobalName?: string
-  /** Discord user ID snowflake — matches `<@id>` mentions. */
-  discordUserId?: string
-}
-
 export interface SleepConnectorLike {
   getCachedPinnedSleeps(channelId: string): TrackedPin[] | null
+  /** The bot's own guild role ids for this channel (account bots; null if uncached). */
+  getOwnRoleIds(channelId: string): string[] | null
 }
 
 /**
@@ -64,6 +49,8 @@ export interface SleepConnectorLike {
 export function parseSleepMessage(
   content: string,
   identity: BotIdentity,
+  mentions?: { mentionedPersonaIds?: readonly string[]; mentionedRoleIds?: readonly string[] },
+  ownRoleIds?: readonly string[],
 ): ParsedSleep | null {
   if (!content.startsWith('.sleep')) return null
 
@@ -73,25 +60,19 @@ export function parseSleepMessage(
 
   // Extract target from the first line (whatever follows `.sleep`).
   const rawTarget = lines[0]!.slice('.sleep'.length).trim()
-  const target = rawTarget.length > 0 ? rawTarget : undefined
 
-  if (target) {
-    // Strip Discord mention syntax (`<@123>` / `<@!123>` / `@Name`).
-    const stripped = target
-      .replace(/^<@!?([^>]+)>$/, '$1')
-      .replace(/^@/, '')
-      .toLowerCase()
-    const candidates = [
-      identity.botId,
-      identity.configName,
-      identity.discordUsername,
-      identity.discordGlobalName,
-      identity.discordUserId,
-    ]
-    const matched = candidates.some(
-      (c) => !!c && stripped === c.toLowerCase(),
-    )
-    if (!matched) return null
+  // Does this `.sleep` address us? Text identity OR a resolved role/persona
+  // mention (so `.sleep @portal-glm52` / `.sleep <@&roleId>` resolve too).
+  if (!pinAddressesBot(
+    {
+      targetText: rawTarget.length > 0 ? rawTarget : undefined,
+      mentionedPersonaIds: mentions?.mentionedPersonaIds,
+      mentionedRoleIds: mentions?.mentionedRoleIds,
+    },
+    identity,
+    ownRoleIds,
+  )) {
+    return null
   }
 
   // Parse the YAML body.
@@ -202,9 +183,10 @@ export class SleepState {
   sleepPinsForBot(channelId: string): string[] {
     const pins = this.connector.getCachedPinnedSleeps(channelId) ?? []
     const identity = this.getBotIdentity()
+    const ownRoleIds = this.connector.getOwnRoleIds(channelId) ?? undefined
     const out: string[] = []
     for (const pin of pins) {
-      if (parseSleepMessage(pin.content, identity)) {
+      if (parseSleepMessage(pin.content, identity, pin, ownRoleIds)) {
         out.push(pin.id)
       }
     }
@@ -218,8 +200,9 @@ export class SleepState {
   isSleeping(channelId: string, now: number): boolean {
     const pins = this.connector.getCachedPinnedSleeps(channelId) ?? []
     const identity = this.getBotIdentity()
+    const ownRoleIds = this.connector.getOwnRoleIds(channelId) ?? undefined
     for (const pin of pins) {
-      const parsed = parseSleepMessage(pin.content, identity)
+      const parsed = parseSleepMessage(pin.content, identity, pin, ownRoleIds)
       if (!parsed) continue
       if (isSleepActive(parsed, this.getCount(channelId, pin.id), now)) return true
     }

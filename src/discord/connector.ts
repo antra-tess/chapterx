@@ -39,6 +39,20 @@ export interface TrackedPin {
   content: string
   authorId: string
   authorBot: boolean
+  /** Relay-resolved persona ids addressed by this pin (portal backend only). */
+  mentionedPersonaIds?: string[]
+  /** Discord role ids mentioned in this pin (for `<@&roleId>` targeting). */
+  mentionedRoleIds?: string[]
+}
+
+/** Extract mentioned role ids from a discord.js-ish message `mentions` object. */
+function extractMentionedRoleIds(
+  mentions?: { roles?: { values(): IterableIterator<{ id: string }> } } | null,
+): string[] | undefined {
+  const roles = mentions?.roles
+  if (!roles) return undefined
+  const ids = Array.from(roles.values(), (r) => r.id)
+  return ids.length ? ids : undefined
 }
 
 const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
@@ -136,13 +150,17 @@ export class DiscordConnector {
     return m
   }
 
-  private trackPin(channelId: string, message: Pick<Message, 'id' | 'content'> & { author?: { id?: string; bot?: boolean } | null }): void {
+  private trackPin(channelId: string, message: Pick<Message, 'id' | 'content'> & {
+    author?: { id?: string; bot?: boolean } | null
+    mentions?: { roles?: { values(): IterableIterator<{ id: string }> } } | null
+  }): void {
     const pins = this.getOrCreateChannelPinMap(channelId)
     pins.set(message.id, {
       id: message.id,
       content: message.content ?? '',
       authorId: message.author?.id ?? '',
       authorBot: message.author?.bot ?? false,
+      mentionedRoleIds: extractMentionedRoleIds(message.mentions),
     })
     this.schedulePinCachePersist(channelId)
   }
@@ -224,6 +242,7 @@ export class DiscordConnector {
           content: msg.content ?? '',
           authorId: msg.author?.id ?? '',
           authorBot: msg.author?.bot ?? false,
+          mentionedRoleIds: extractMentionedRoleIds(msg.mentions),
         })
       }
       this.schedulePinCachePersist(channelId)
@@ -2037,6 +2056,18 @@ export class DiscordConnector {
     const pins = this.pinnedByChannel.get(channelId)
     if (!pins) return null
     return this.extractSleepsFromTrackedPins(pins)
+  }
+
+  /**
+   * The bot's own role ids in a channel's guild (cache-only, synchronous).
+   * Used for `<@&roleId>` mention-targeting of pinned commands. Returns null
+   * when the guild / own-member isn't cached.
+   */
+  getOwnRoleIds(channelId: string): string[] | null {
+    const channel: any = this.client.channels.cache.get(channelId)
+    const me = channel?.guild?.members?.me
+    if (!me) return null
+    return Array.from(me.roles.cache.values()).map((r: any) => r.id)
   }
 
   /**
