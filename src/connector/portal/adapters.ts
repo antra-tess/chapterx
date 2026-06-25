@@ -108,6 +108,12 @@ export function queueEventFromPortal(e: PortalEvent, ctx: AdapterCtx): Event | n
     }
     case 'reaction_add': {
       const channelId = e.threadId ?? e.channelId
+      const reactorId = e.reaction.by[0]?.id
+      // Can't attribute a reaction with no known reactor — drop it. Emitting
+      // userId:undefined would bypass the loop's skip-own-reaction check
+      // (userId === botUserId is false for undefined), letting the bot react to
+      // its own reaction / process an unattributable trigger.
+      if (!reactorId) return null
       return {
         type: 'reaction',
         channelId,
@@ -115,7 +121,7 @@ export function queueEventFromPortal(e: PortalEvent, ctx: AdapterCtx): Event | n
         data: {
           messageId: e.messageId,
           emoji: e.reaction.emoji,
-          userId: e.reaction.by[0]?.id,
+          userId: reactorId,
           messageAuthorId: ctx.authorOf(e.messageId),
         },
         timestamp: new Date(),

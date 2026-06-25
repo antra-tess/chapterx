@@ -145,6 +145,16 @@ describe('queueEventFromPortal', () => {
     expect(ev.data.messageAuthorId).toBe('u1')
   })
 
+  it('reaction_add with no known reactor → null (unattributable)', () => {
+    const e: PortalEvent = {
+      type: 'reaction_add',
+      channelId: 'chan',
+      messageId: 'rm_chan_100',
+      reaction: { emoji: '✅', count: 1, kind: 'native', by: [] },
+    }
+    expect(queueEventFromPortal(e, ctx)).toBeNull()
+  })
+
   it('reaction_remove / typing / structural events → null', () => {
     expect(queueEventFromPortal({ type: 'reaction_remove', channelId: 'c', messageId: 'm', emoji: 'x', actor: { kind: 'user', id: 'u', name: 'n' } }, ctx)).toBeNull()
     expect(queueEventFromPortal({ type: 'typing', channelId: 'c', author: { kind: 'system' } }, ctx)).toBeNull()

@@ -176,7 +176,7 @@ async function main() {
     const botUsername = connector.getBotUsername()
     
     if (!botUserId || !botUsername) {
-      throw new Error('Failed to get bot identity from Discord')
+      throw new Error(`Failed to get bot identity from ${backend === 'portal' ? 'portal relay' : 'Discord'}`)
     }
 
     // Use BOT_NAME override (for EMS mode) or Discord username for config loading

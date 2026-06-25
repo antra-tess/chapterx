@@ -155,9 +155,17 @@ export class PortalConnector implements IConnector {
 
   async sendMessage(channelId: string, content: string, replyToMessageId?: string): Promise<string[]> {
     const ids: string[] = []
-    for (const chunk of splitContent(normalizeOutgoingMentions(content))) {
+    const chunks = splitContent(normalizeOutgoingMentions(content))
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]!
       // The relay resolves a thread id passed as channelId into parent+thread.
-      const { messageId } = await this.client.sendMessage({ channelId, content: chunk, replyToId: replyToMessageId })
+      // Only the first chunk replies to the trigger (matches DiscordConnector);
+      // forwarding replyToId on every chunk piles replies on the original message.
+      const { messageId } = await this.client.sendMessage({
+        channelId,
+        content: chunk,
+        replyToId: i === 0 ? replyToMessageId : undefined,
+      })
       ids.push(messageId)
     }
     return ids
