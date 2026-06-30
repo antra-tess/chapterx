@@ -37,6 +37,25 @@ const TRACE_DIRS = LOGS_DIRS.map(d => join(d, 'traces'))
 // Channel name cache (loaded from traces)
 const channelNameCache = new Map<string, string>()
 
+/**
+ * Normalize a message id to its Discord snowflake for search matching.
+ *
+ * Account bots key trace messages by the native Discord snowflake; portal bots
+ * key them by a relay id (`rm_<container>_<snowflake>`). A user searching from a
+ * Discord message link only ever has the bare snowflake, so without this the
+ * exact-match search below silently misses every portal message. Stripping both
+ * the stored id and the query to their snowflake lets either form match. For a
+ * bare snowflake (no `rm_` prefix) this is a no-op, so account bots are
+ * unaffected.
+ */
+function snowflakeOf(id: string): string {
+  if (id.startsWith('rm_')) {
+    const us = id.lastIndexOf('_')
+    if (us > 2) return id.slice(us + 1)
+  }
+  return id
+}
+
 // ============================================================================
 // Index Cache
 // ============================================================================
@@ -391,7 +410,10 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
       if (urlMatch) {
         messageId = urlMatch[1]!
       }
-      
+      // Match on the snowflake so a bare-snowflake query (all a Discord link
+      // yields) also resolves portal traces keyed by relay id.
+      const q = snowflakeOf(messageId)
+
       const index = loadIndex(botFilter)
       const results: Array<{
         traceId: string
@@ -405,7 +427,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
       }> = []
       
       for (const entry of index) {
-        if (entry.triggeringMessageId === messageId) {
+        if (entry.triggeringMessageId && snowflakeOf(entry.triggeringMessageId) === q) {
           const trace = loadTrace(entry.traceId)
           results.push({
             traceId: entry.traceId,
@@ -416,9 +438,9 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
             botName: entry.botName,
             channelName: getChannelName(entry.channelId),
           })
-        } else if (entry.contextMessageIds?.includes(messageId)) {
+        } else if (entry.contextMessageIds?.some(id => snowflakeOf(id) === q)) {
           const trace = loadTrace(entry.traceId)
-          const msg = trace?.contextBuild?.messages.find(m => m.discordMessageId === messageId)
+          const msg = trace?.contextBuild?.messages.find(m => snowflakeOf(m.discordMessageId) === q)
           results.push({
             traceId: entry.traceId,
             timestamp: String(entry.timestamp),
@@ -428,7 +450,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse, path: string): voi
             botName: entry.botName,
             channelName: getChannelName(entry.channelId),
           })
-        } else if (entry.sentMessageIds?.includes(messageId)) {
+        } else if (entry.sentMessageIds?.some(id => snowflakeOf(id) === q)) {
           results.push({
             traceId: entry.traceId,
             timestamp: String(entry.timestamp),
