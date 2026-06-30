@@ -166,4 +166,25 @@ describe('queueEventFromPortal', () => {
     const ev = queueEventFromPortal(e, ctx)!
     expect(ev.channelId).toBe('thr')
   })
+
+  it('propagates relay address reasons onto inbound._address (reply-ping signal)', () => {
+    // A reply-ping to a webhook persona never lands in mentions, so the loop's
+    // portal reply-activation depends on this 'reply' reason being carried through.
+    const e: PortalEvent = {
+      type: 'message_create',
+      message: pm({ replyToId: 'rm_chan_50' }),
+      addressedToMe: true,
+      reasons: ['reply'],
+    }
+    const ev = queueEventFromPortal(e, ctx)!
+    expect(ev.data._address).toEqual({ addressedToMe: true, reasons: ['reply'] })
+    expect(ev.data._address.reasons.includes('reply')).toBe(true)
+  })
+
+  it('ambient (unaddressed) message carries empty reasons', () => {
+    const e: PortalEvent = { type: 'message_create', message: pm(), addressedToMe: false, reasons: ['subscription'] }
+    const ev = queueEventFromPortal(e, ctx)!
+    expect(ev.data._address.addressedToMe).toBe(false)
+    expect(ev.data._address.reasons.includes('reply')).toBe(false)
+  })
 })

@@ -40,9 +40,16 @@ export function authorOfMessage(pm: PortalMessage): {
 /**
  * PortalMessage → the discord.js-`Message`-compatible object the loop reads off
  * `event.data`. `mentions.has(id)` translates a persona role-mention into a
- * "bot mentioned" signal (botUserId === personaId).
+ * "bot mentioned" signal (botUserId === personaId). `address` carries the relay's
+ * per-recipient addressing reasons (role_mention / reply / subscription); a
+ * reply-ping can only be detected via `reasons`, since webhook personas never
+ * appear in `mentions`.
  */
-export function inboundFromPortal(pm: PortalMessage, _botPersonaId: string): InboundMessage {
+export function inboundFromPortal(
+  pm: PortalMessage,
+  _botPersonaId: string,
+  address?: { addressedToMe: boolean; reasons: string[] },
+): InboundMessage {
   const author = authorOfMessage(pm)
   const mentionedIds = new Set<string>([...pm.mentions.personas, ...pm.mentions.users])
   const users = new Map<string, unknown>(pm.mentions.users.map((id) => [id, { id }]))
@@ -54,6 +61,7 @@ export function inboundFromPortal(pm: PortalMessage, _botPersonaId: string): Inb
     author,
     system: pm.author.kind === 'system',
     reference: pm.replyToId ? { messageId: pm.replyToId } : undefined,
+    _address: address,
     mentions: {
       has: (id: string) => mentionedIds.has(id),
       users,
@@ -76,7 +84,10 @@ export function inboundFromPortal(pm: PortalMessage, _botPersonaId: string): Inb
 export function queueEventFromPortal(e: PortalEvent, ctx: AdapterCtx): Event | null {
   switch (e.type) {
     case 'message_create': {
-      const inbound = inboundFromPortal(e.message, ctx.botPersonaId)
+      const inbound = inboundFromPortal(e.message, ctx.botPersonaId, {
+        addressedToMe: e.addressedToMe,
+        reasons: e.reasons,
+      })
       return {
         type: 'message',
         channelId: inbound.channelId,
@@ -87,7 +98,10 @@ export function queueEventFromPortal(e: PortalEvent, ctx: AdapterCtx): Event | n
       }
     }
     case 'message_update': {
-      const inbound = inboundFromPortal(e.message, ctx.botPersonaId)
+      const inbound = inboundFromPortal(e.message, ctx.botPersonaId, {
+        addressedToMe: e.addressedToMe,
+        reasons: e.reasons,
+      })
       return {
         type: 'edit',
         channelId: inbound.channelId,

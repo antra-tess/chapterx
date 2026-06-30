@@ -71,6 +71,15 @@ export interface InboundMessage {
   mentions: { has(id: string): boolean; users?: Map<string, unknown> }
   reactions?: { cache: { some(fn: (r: unknown) => boolean): boolean } }
   member?: { roles: { cache: Map<string, { name: string }> } }
+  /**
+   * Per-recipient addressing annotation from the portal relay (portal backend
+   * only; absent for the discord.js backend). Lets the loop distinguish a direct
+   * address (`role_mention` / `reply`) from ambient `subscription` traffic when
+   * the persona has no native Discord identity to appear in `mentions`. In
+   * particular, a reply-ping to a webhook persona never lands in `mentions`
+   * (webhooks can't carry a native reply), so `reasons` carries the only signal.
+   */
+  _address?: { addressedToMe: boolean; reasons: string[] }
   /** Escape hatch: the source PortalMessage, for adapters that need raw fields. */
   _portal?: unknown
 }
