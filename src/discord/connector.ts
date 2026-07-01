@@ -23,36 +23,10 @@ import {
   fetchChannelMessages,
   type FetchDeps,
 } from './context-fetch.js'
+import type { IConnector, ConnectorOptions, TrackedPin, FetchContextParams, PinnedSteer } from '../connector/types.js'
 
-export interface ConnectorOptions {
-  token: string
-  cacheDir: string
-  maxBackoffMs: number
-}
-
-/**
- * A pinned message tracked via gateway events.
- * Holds the minimal set of fields needed to resolve .config / .steer / .sleep
- * without calling the Discord /pins endpoint after the initial bootstrap.
- */
-export interface TrackedPin {
-  id: string
-  content: string
-  authorId: string
-  authorBot: boolean
-  /** Relay-resolved persona ids addressed by this pin (portal backend only). */
-  mentionedPersonaIds?: string[]
-  /** Discord role ids mentioned in this pin (for `<@&roleId>` targeting). */
-  mentionedRoleIds?: string[]
-}
-
-/** A pinned `.steer` message with its resolved mention context. */
-export interface PinnedSteer {
-  content: string
-  authorId: string
-  mentionedPersonaIds?: string[]
-  mentionedRoleIds?: string[]
-}
+// Re-exported from connector/types.ts for back-compat with existing imports.
+export type { ConnectorOptions, TrackedPin, FetchContextParams, PinnedSteer }
 
 /** Extract mentioned role ids from a discord.js-ish message `mentions` object. */
 function extractMentionedRoleIds(
@@ -72,18 +46,7 @@ function snowflakeToTimestamp(id: string): number {
   return Number(BigInt(id) >> 22n) + DISCORD_EPOCH
 }
 
-export interface FetchContextParams {
-  channelId: string
-  depth: number  // Max messages
-  targetMessageId?: string  // Optional: Fetch backward from this message ID (for API range queries)
-  firstMessageId?: string  // Optional: Stop when this message is encountered
-  authorized_roles?: string[]
-  pinnedConfigs?: string[]  // Optional: Pre-fetched pinned configs (skips fetchPinned call)
-  maxImages?: number  // Optional: Cap image fetching to avoid RAM bloat (default: unlimited)
-  ignoreHistory?: boolean  // Optional: Skip .history command processing (raw fetch)
-}
-
-export class DiscordConnector {
+export class DiscordConnector implements IConnector {
   private client: Client
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private imageCache = new Map<string, CachedImage>()
@@ -366,6 +329,10 @@ export class DiscordConnector {
    */
   getBotUserId(): string | undefined {
     return this.client.user?.id
+  }
+
+  isPortal(): boolean {
+    return false
   }
 
   /**

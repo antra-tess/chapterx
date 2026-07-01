@@ -6,7 +6,7 @@
 import { EventQueue } from './event-queue.js'
 import { DeferredQueue, isTransientError } from './deferred-queue.js'
 import { ChannelStateManager } from './state-manager.js'
-import { DiscordConnector, type PinnedSteer } from '../discord/connector.js'
+import type { IConnector, PinnedSteer } from '../connector/types.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { ToolSystem } from '../tools/system.js'
@@ -97,7 +97,7 @@ export class AgentLoop {
   constructor(
     private botId: string,
     private queue: EventQueue,
-    private connector: DiscordConnector,
+    private connector: IConnector,
     private stateManager: ChannelStateManager,
     private configSystem: ConfigSystem,
     private contextBuilder: ContextBuilder,
@@ -793,7 +793,12 @@ export class AgentLoop {
 
         if ((event.data as any)._isMCommand) {
           reason = 'm_command'
-        } else if (message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)) {
+        } else if (
+          (message.reference?.messageId && this.botMessageIds.has(message.reference.messageId)) ||
+          // Portal: the relay's 'reply' address reason is authoritative across restarts
+          // (botMessageIds only knows this session's sends).
+          message._address?.reasons?.includes('reply')
+        ) {
           reason = 'reply'
         } else if (this.botUserId && message.mentions?.has(this.botUserId)) {
           reason = 'mention'
@@ -874,7 +879,10 @@ export class AgentLoop {
       userId: triggeringUser.id,
       serverId: guildId,
       channelId: channelId,
-      botId: this.botUserId || '',
+      // Portal personas have no Discord user id; key cost by the EMS bot name
+      // (this.botId) so admin cost commands (which resolve a portal role to the
+      // EMS name) target the same key. Account bots stay keyed by Discord user id.
+      botId: this.connector.isPortal() ? this.botId : (this.botUserId || ''),
       messageId: triggeringMessageId || '',
       triggerType: triggerReason as SomaTriggerType,
       userRoles: triggeringUser.roles || [],
@@ -1401,6 +1409,33 @@ export class AgentLoop {
       // A reply with "ping on reply" enabled includes the bot in message.mentions and is
       // already handled by the mention check above. A reply with the ping toggled off must
       // not wake the bot — fall through to the remaining triggers (random / name / etc.).
+      //
+      // EXCEPTION — portal backend: webhook personas can't carry a native reply/ping, so a
+      // reply-ping never lands in message.mentions. The relay instead surfaces it as the
+      // 'reply' address reason (computed per-recipient in portal-relay reasonsFor()). It
+      // cannot encode the ping toggle for personas, so any reply to one of our messages
+      // counts — this is the portal equivalent of the account-bot reply-ping above, and
+      // restores pre-hard-rule behavior for portal only. Account/discord.js events carry
+      // no _address, so they remain governed by the hard rule.
+      const portalReply = this.connector.isPortal() && message._address?.reasons?.includes('reply')
+      if (portalReply) {
+        const chainDepth = await this.connector.getBotReplyChainDepth(channelId, message)
+
+        if (!loadConfig()) return false
+
+        if (chainDepth >= config.max_bot_reply_chain_depth) {
+          logger.info({
+            messageId: message.id,
+            chainDepth,
+            limit: config.max_bot_reply_chain_depth
+          }, 'Bot reply chain depth limit reached, blocking portal reply activation')
+          await this.connector.addReaction(channelId, message.id, config.bot_reply_chain_depth_emote)
+          continue
+        }
+
+        logger.debug({ messageId: message.id, chainDepth }, 'Activated by portal reply')
+        return true
+      }
 
       // 4. Random chance activation
       if (!loadConfig()) return false

@@ -23,7 +23,7 @@ export interface SomaCheckParams {
   userId: string           // Discord user ID
   serverId: string         // Discord guild ID
   channelId: string        // Discord channel ID (for reactions)
-  botId: string            // Bot's Discord ID
+  botId: string            // Discord user id (account) or EMS bot name (portal)
   messageId: string        // Triggering message ID
   triggerType: SomaTriggerType
   userRoles: string[]      // User's role IDs for cost multipliers
