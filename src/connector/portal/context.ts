@@ -30,6 +30,14 @@ function snowflakeLT(a: string, b: string): boolean {
   }
 }
 
+/** The relay addresses personas via pooled roles named `portal-<name>`, so a
+ *  resolved role mention in `cleanContent` reads `@portal-glm52`. Strip that
+ *  internal prefix so the model sees `@glm52` — the addressing plumbing is noise
+ *  to it. Text-only rewrite of the readable rendering; a no-op on raw `<@&id>`. */
+function stripPortalRolePrefix(text: string): string {
+  return text.replaceAll('@portal-', '@')
+}
+
 /** Full PortalMessage → DiscordMessage. Uses portal's resolved `cleanContent`;
  *  adds the `<reply:@name>` prefix for non-bot authors (matching convertMessage). */
 export function portalMessageToDiscordMessage(
@@ -38,7 +46,7 @@ export function portalMessageToDiscordMessage(
   _botPersonaId: string,
 ): DiscordMessage {
   const a = authorOfMessage(pm)
-  let content = pm.cleanContent || pm.content
+  let content = stripPortalRolePrefix(pm.cleanContent || pm.content)
 
   if (pm.replyToId && !a.bot) {
     const replied = messageMap.get(pm.replyToId)
