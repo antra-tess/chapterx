@@ -24,9 +24,9 @@
   "license": "MIT",
   "dependencies": {
     "@animalabs/membrane": "^0.5.67",
+    "@animalabs/portal-client": "^0.2.1",
+    "@animalabs/portal-protocol": "^0.2.0",
     "@anthropic-ai/sdk": "^0.32.1",
-    "@animalabs/portal-client": "^0.1.0",
-    "@animalabs/portal-protocol": "^0.1.0",
     "@aws-sdk/client-bedrock-runtime": "^3.709.0",
     "@google/generative-ai": "^0.21.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
