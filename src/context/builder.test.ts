@@ -432,12 +432,23 @@ describe('filterDotMessages', () => {
   })
 
   it('filters a dot command behind a role mention (raw snowflake form)', () => {
-    // Role mentions arrive post-convertMessage as raw <@&ROLEID> (not converted).
+    // Unresolved role mentions (e.g. pins, or before convertMessage) are raw <@&ROLEID>.
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '<@&123456789> .config foo' }),
       makeDiscordMessage({ id: 'u2', content: '<@&123456789> visible' }),
     ]
     expectKept(messages, true, ['u2'])
+  })
+
+  it('filters a dot command behind a resolved role mention (@name form)', () => {
+    // convertMessage now resolves <@&id> → @rolename (portal- stripped), so the
+    // leading-mention strip must handle the bare @name form too.
+    const messages = [
+      makeDiscordMessage({ id: 'u1', content: '@glm52 .config foo' }),
+      makeDiscordMessage({ id: 'u2', content: '@nemotron-3-ultra @Fugu .history clear' }),
+      makeDiscordMessage({ id: 'u3', content: '@glm52 a normal sentence.' }),
+    ]
+    expectKept(messages, true, ['u3'])
   })
 
   it('filters when reply + mention both sit in front of the dot', () => {

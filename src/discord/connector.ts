@@ -2332,6 +2332,16 @@ export class DiscordConnector {
       const channel = msg.guild?.channels.cache.get(channelId)
       return channel && 'name' in channel ? `#${channel.name}` : `#unknown-channel`
     })
+
+    // Convert role mentions to a readable @role-name (raw <@&id> is noise to the
+    // LLM). <@&123456789> → @RoleName, or @unknown-role if uncached. Strip the
+    // portal relay's internal `portal-` pool prefix so a portal persona addressed
+    // by its role reads as @glm52, not @portal-glm52 (matches the portal path).
+    content = content.replace(/<@&(\d+)>/g, (_match, roleId) => {
+      const role = msg.mentions.roles.get(roleId) ?? msg.guild?.roles.cache.get(roleId)
+      if (!role?.name) return '@unknown-role'
+      return `@${role.name.startsWith('portal-') ? role.name.slice('portal-'.length) : role.name}`
+    })
     
     // Defensive: log and skip if author is null (should be caught upstream in context-fetch)
     if (!msg.author) {

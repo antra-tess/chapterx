@@ -57,8 +57,10 @@ export function mergeConsecutiveBotMessages(
  * Dot prefix: any `.` not immediately followed by another `.`. Covers real
  * commands (`.config`) and hide-markers (`. side comment`, `.*bit*`, `.4.7`).
  * Ellipsis (`..`, `...`) is preserved because the second dot breaks the match.
- * Reply (`<reply:@user>`) and leading mentions (`<@name>`, `<@&role>`) are
- * stripped first so `<@alice> .config` still filters.
+ * Reply (`<reply:@user>`) and leading mentions are stripped first so
+ * `<@alice> .config` still filters. Covers both the bracketed form (`<@name>`,
+ * raw `<@&role>`) and the bare `@name` form that a resolved role mention becomes
+ * (e.g. `@glm52` after the portal- strip / role-name resolution).
  *
  * .steer is preserved when steerVisible is true.
  *
@@ -79,7 +81,7 @@ export function filterDotMessages(messages: DiscordMessage[], steerVisible: bool
 
     const stripped = msg.content.trim()
       .replace(/^<reply:@[^>]+>\s*/, '')
-      .replace(/^(<@[^>]+>\s*)+/, '')
+      .replace(/^(<@[^>]+>\s*|@[\w.-]+\s*)+/, '')
     if (/^\.(?!\.)/.test(stripped) && !(steerVisible && /^\.steer\b/.test(stripped))) {
       return false
     }
