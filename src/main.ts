@@ -141,11 +141,18 @@ async function main() {
             ? join(emsPath, botNameOverride, 'portal-creds.json')
             : join(cachePath, 'portal-creds.json'))
         const { loadOrEnrollCreds } = await import('@animalabs/portal-client')
+        // desiredName is the portal persona display name. Defaults to BOT_NAME
+        // (the EMS directory name) but can be overridden via env or config for
+        // personas whose display identity differs from their bot slug.
+        const desiredName =
+          process.env.PORTAL_DESIRED_NAME ||
+          botBootstrap.portal_desired_name ||
+          botNameOverride
         const creds = await loadOrEnrollCreds({
           url: portalUrl,
           credsPath,
           invite: process.env.PORTAL_INVITE || botBootstrap.portal_invite,
-          desiredName: botNameOverride,
+          desiredName,
         })
         personaId = creds.personaId
         portalToken = creds.token
