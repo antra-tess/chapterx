@@ -173,9 +173,39 @@ describe('Content Block Conversion', () => {
         },
         tokenEstimate: 1000,
       };
-      
+
       const result = toMembraneContentBlock(input);
       expect((result as any).tokenEstimate).toBe(1000);
+    });
+  });
+
+  describe('audio blocks', () => {
+    it('should convert base64 audio with media_type → mediaType', () => {
+      const input: ContentBlock = {
+        type: 'audio',
+        source: {
+          type: 'base64',
+          data: 'base64audio',
+          media_type: 'audio/mp3',
+        },
+      };
+
+      const result = toMembraneContentBlock(input);
+
+      expect(result.type).toBe('audio');
+      expect((result as any).source.type).toBe('base64');
+      expect((result as any).source.data).toBe('base64audio');
+      expect((result as any).source.mediaType).toBe('audio/mp3');
+      expect((result as any).source.media_type).toBeUndefined();
+    });
+
+    it('should preserve duration when present', () => {
+      const input: any = {
+        type: 'audio',
+        source: { type: 'base64', data: 'd', media_type: 'audio/wav' },
+        duration: 106,
+      };
+      expect((toMembraneContentBlock(input) as any).duration).toBe(106);
     });
   });
   

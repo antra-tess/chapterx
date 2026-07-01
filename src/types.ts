@@ -53,6 +53,7 @@ export interface ParticipantMessage {
 export type ContentBlock =
   | TextContent
   | ImageContent
+  | AudioContent
   | ToolUseContent
   | ToolResultContent
   | ThinkingContent
@@ -87,6 +88,16 @@ export interface ImageContent {
     data: string  // base64 data or URL
     media_type: string  // 'image/jpeg', 'image/png', etc. (snake_case for Anthropic API)
   }
+}
+
+export interface AudioContent {
+  type: 'audio'
+  source: {
+    type: 'base64'
+    data: string  // base64-encoded audio
+    media_type: string  // 'audio/mp3', 'audio/wav', 'audio/ogg', etc.
+  }
+  duration?: number  // seconds, if known
 }
 
 export interface ToolUseContent {
@@ -209,6 +220,10 @@ export interface BotConfig {
   max_ephemeral_images?: number  // Max images in rolling window after cache marker (default: max_images)
   cache_images?: boolean  // If true, include images in cached prefix (requires deterministic handling). Default: false (images only in rolling window)
   generate_images?: boolean  // If true, set responseModalities for image generation models (overrides auto-detect from model name)
+
+  // Audio config — only enable for audio-capable models (e.g. Gemini). Default off.
+  include_audio?: boolean  // If true, route audio attachments to this model as inline audio
+  max_audio?: number  // Max audio files to include per context (default: 1 when include_audio)
 
   // Text attachment config
   include_text_attachments: boolean
@@ -502,6 +517,7 @@ export interface DiscordContext {
   pinnedConfigs: string[]  // Raw YAML strings from pinned messages
   images: CachedImage[]
   documents: CachedDocument[]  // Text file contents
+  audios: CachedAudio[]  // Audio file contents (for audio-capable models)
   guildId: string
   /** Inheritance info for plugin state */
   inheritanceInfo?: {
@@ -534,6 +550,15 @@ export interface CachedDocument {
   size: number
   text: string
   truncated?: boolean
+}
+
+export interface CachedAudio {
+  url: string
+  messageId: string
+  data: Buffer
+  mediaType: string  // normalized, e.g. 'audio/mp3', 'audio/wav', 'audio/ogg'
+  hash: string
+  duration?: number  // seconds, when Discord provides it (e.g. voice messages)
 }
 
 // ============================================================================

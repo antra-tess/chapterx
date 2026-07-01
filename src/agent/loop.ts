@@ -1489,6 +1489,9 @@ export class AgentLoop {
       // Cap image fetching to prevent RAM bloat in image-heavy channels
       // Use 2x max_images to give context builder selection room while preventing worst-case loading
       const maxImagesFetch = Math.max((preConfig.max_images || 5) * 2, 10)
+      // Only fetch audio for audio-capable bots (include_audio); others pass 0.
+      // Use ?? so an explicit max_audio:0 disables fetching (matches the send-side cap).
+      const maxAudioFetch = preConfig.include_audio ? (preConfig.max_audio ?? 1) : 0
       const discordContext = await this.connector.fetchContext({
         channelId,
         depth: fetchDepth,
@@ -1499,6 +1502,7 @@ export class AgentLoop {
         authorized_roles: [],  // Will apply after loading config
         pinnedConfigs,  // Reuse pre-fetched pinned configs (avoids second API call)
         maxImages: maxImagesFetch,  // Prevents loading all images from image-heavy channels
+        maxAudio: maxAudioFetch,  // Only audio-capable bots fetch audio
       })
       endProfile('fetchContext')
 

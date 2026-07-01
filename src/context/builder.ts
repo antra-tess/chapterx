@@ -125,7 +125,8 @@ export class ContextBuilder {
       discordContext.documents,
       config,
       botDiscordUsername,
-      imageSelectionMarker
+      imageSelectionMarker,
+      discordContext.audios
     )
 
     logger.debug({
