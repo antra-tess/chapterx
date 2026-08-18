@@ -92,9 +92,19 @@ export interface SentMessageChunk {
   bridgeClose?: string
 }
 
+interface TypingState {
+  interval?: NodeJS.Timeout
+}
+
 export class DiscordConnector {
   private client: Client
-  private typingIntervals = new Map<string, NodeJS.Timeout>()
+  /**
+   * A state entry exists from the instant startTyping is called, including while
+   * its Discord requests are still in flight. Object identity acts as a token:
+   * a stop or newer start invalidates older async work before it can install an
+   * orphaned refresh interval.
+   */
+  private typingStates = new Map<string, TypingState>()
   private imageCache = new Map<string, CachedImage>()
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
   private urlMapPath: string  // Path to URL map file
@@ -1458,36 +1468,63 @@ export class DiscordConnector {
    * Start typing indicator (refreshes every 8 seconds)
    */
   async startTyping(channelId: string): Promise<void> {
-    const channel = await this.client.channels.fetch(channelId) as TextChannel
-
-    if (!channel || !channel.isTextBased()) {
-      return
+    const previous = this.typingStates.get(channelId)
+    if (previous?.interval) {
+      clearInterval(previous.interval)
     }
 
-    // Send initial typing
-    await channel.sendTyping()
+    const state: TypingState = {}
+    this.typingStates.set(channelId, state)
 
-    // Set up interval to refresh
-    const interval = setInterval(async () => {
-      try {
-        await channel.sendTyping()
-      } catch (error) {
-        logger.warn({ error, channelId }, 'Failed to refresh typing')
+    try {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+
+      // stopTyping or a newer startTyping call superseded this startup while
+      // the channel fetch was in flight.
+      if (this.typingStates.get(channelId) !== state) {
+        return
       }
-    }, 8000)
 
-    this.typingIntervals.set(channelId, interval)
+      if (!channel || !channel.isTextBased()) {
+        this.typingStates.delete(channelId)
+        return
+      }
+
+      // Send initial typing
+      await channel.sendTyping()
+
+      // The initial request may also have raced with a stop/new start.
+      if (this.typingStates.get(channelId) !== state) {
+        return
+      }
+
+      // Set up interval to refresh
+      state.interval = setInterval(async () => {
+        try {
+          await channel.sendTyping()
+        } catch (error) {
+          logger.warn({ error, channelId }, 'Failed to refresh typing')
+        }
+      }, 8000)
+    } catch (error) {
+      if (this.typingStates.get(channelId) === state) {
+        this.typingStates.delete(channelId)
+      }
+      throw error
+    }
   }
 
   /**
    * Stop typing indicator
    */
   async stopTyping(channelId: string): Promise<void> {
-    const interval = this.typingIntervals.get(channelId)
-    if (interval) {
-      clearInterval(interval)
-      this.typingIntervals.delete(channelId)
+    const state = this.typingStates.get(channelId)
+    if (state?.interval) {
+      clearInterval(state.interval)
     }
+    // Deleting the state also invalidates an in-flight startTyping call that
+    // has not installed its interval yet.
+    this.typingStates.delete(channelId)
   }
 
   /**
@@ -1762,9 +1799,10 @@ export class DiscordConnector {
    */
   async close(): Promise<void> {
     // Clear all typing intervals
-    for (const interval of this.typingIntervals.values()) {
-      clearInterval(interval)
+    for (const state of this.typingStates.values()) {
+      if (state.interval) clearInterval(state.interval)
     }
+    this.typingStates.clear()
     // Clear cache maintenance intervals
     if (this.cacheStatsInterval) clearInterval(this.cacheStatsInterval)
     if (this.evictionInterval) clearInterval(this.evictionInterval)
