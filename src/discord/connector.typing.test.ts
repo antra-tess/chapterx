@@ -53,7 +53,9 @@ function makeHarness(opts: { fetchGate?: boolean } = {}) {
     ? vi.fn(() => new Promise((res) => { release = () => res(channel) }))
     : vi.fn().mockResolvedValue(channel)
 
-  ;(connector as any).client = { channels: { fetch } }
+  // destroy() is what close() calls; without it the harness throws and the
+  // test fails for a reason that has nothing to do with the code under test.
+  ;(connector as any).client = { channels: { fetch }, destroy: async () => {} }
 
   return {
     connector,
@@ -136,5 +138,45 @@ describe('typing indicator lifecycle', () => {
     h.sendTyping.mockClear()
     await vi.advanceTimersByTimeAsync(REFRESH_MS * 3)
     expect(h.sendTyping.mock.calls.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('a start still pending at shutdown never installs a timer', async () => {
+    // Reported by greptile on PR #17, and correct. The per-channel counter was
+    // derived from its own stored value, so clearing the map on close() reset
+    // its numeric identity: a stopTyping arriving afterwards recomputed
+    // (undefined ?? 0) + 1 === 1 -- exactly the generation the pending start was
+    // still holding. The start's guard then passed and it installed a refresh
+    // interval on a destroyed connector, sending typing forever through a dead
+    // client. Classic ABA: the token was not unique, only locally fresh.
+    h = makeHarness({ fetchGate: true })
+
+    const starting = h.connector.startTyping(CH)   // generation 1, blocks in fetch
+    await h.connector.close()                      // clears intervals + generations
+    await h.connector.stopTyping(CH)               // must NOT be able to re-mint 1
+    h.release()
+    await starting
+
+    expect(h.intervals().size).toBe(0)
+    h.sendTyping.mockClear()
+    await vi.advanceTimersByTimeAsync(REFRESH_MS * 3)
+    expect(h.sendTyping).not.toHaveBeenCalled()
+  })
+
+  it('does not send typing after a stop that landed mid-fetch', async () => {
+    // Pins the post-await identity re-check, which survived mutation until this
+    // existed -- the other tests watch TIMERS, and this is about a single stray
+    // SEND. Note what it is and is not: sending is asynchronous, so a stop can
+    // always land mid-send and you cannot un-send. The check narrows the window,
+    // it does not close it, and the residual is one indicator that Discord
+    // expires on its own in ~10s. Bounded, self-healing, and worth pinning
+    // precisely because nothing else would notice if it disappeared.
+    h = makeHarness({ fetchGate: true })
+
+    await h.connector.startTyping(CH)   // registers synchronously; tick blocks in fetch
+    await h.connector.stopTyping(CH)    // stop wins the map
+    h.release()                         // fetch resolves into a tick that was cancelled
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(h.sendTyping).not.toHaveBeenCalled()
   })
 })
