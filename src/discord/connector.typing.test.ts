@@ -1,26 +1,18 @@
 /**
  * Tests for the typing indicator's lifecycle.
  *
- * THE BUG THESE PIN: a bot sometimes sits in Discord's "typing" state with no
- * request in flight. Discord's indicator expires after ~10s, so a STUCK
- * indicator is not a stale UI state -- something is actively re-sending it.
- * That something is an orphaned setInterval inside DiscordConnector.
+ * WHAT THESE PROTECT: a bot sitting in Discord's "typing" state with no request
+ * in flight. Discord's indicator expires after ~10s, so a stuck one is never a
+ * stale UI state -- an interval is actively re-sending it, orphaned from the
+ * connector's map and unreachable by stopTyping.
  *
- * Two ways one gets orphaned, both live because activations are fire-and-forget
- * (agent/loop.ts calls `startTyping(...).catch(() => {})`, and processBatch
- * never awaits its activationPromise, so two activations on one channel can
- * overlap):
+ * These races are live rather than theoretical because callers are
+ * fire-and-forget: agent/loop.ts calls `startTyping(...).catch(() => {})`, and
+ * processBatch never awaits its activationPromise, so two activations on one
+ * channel overlap freely.
  *
- *   1. DOUBLE START. startTyping overwrote typingIntervals[channelId] without
- *      clearing what was already there, so the first interval was dropped from
- *      the map while still firing. stopTyping could then only ever clear the
- *      most recent one.
- *
- *   2. STOP-BEFORE-START RACE. startTyping awaits channels.fetch() and
- *      sendTyping() BEFORE registering its interval. A fast activation calls
- *      stopTyping while the map is still empty -- clearing nothing -- and the
- *      interval registers afterwards with nobody left to stop it. This is the
- *      one that produces "typing forever, nothing in flight".
+ * The invariant under test: a typing timer exists if and only if it is in
+ * `typingIntervals`, and both start and stop mutate that map synchronously.
  *
  * Run with: npm test -- connector.typing
  */
@@ -82,9 +74,9 @@ describe('typing indicator lifecycle', () => {
   })
 
   it('a second startTyping does not orphan the first interval', async () => {
-    // Two overlapping activations on one channel. Before the fix the first
-    // interval was dropped from the map while still running, so it kept
-    // sending typing forever and no stopTyping could ever reach it.
+    // Two overlapping activations on one channel. An interval dropped from the
+    // map while still running keeps sending typing forever, and no stopTyping
+    // can reach it again.
     h = makeHarness()
     await h.connector.startTyping(CH)
     await h.connector.startTyping(CH)
@@ -96,9 +88,9 @@ describe('typing indicator lifecycle', () => {
   })
 
   it('a stopTyping during startTyping wins, rather than being overtaken', async () => {
-    // THE "typing forever with nothing in flight" CASE. startTyping is
-    // fire-and-forget, so a fast activation finishes and calls stopTyping while
-    // startTyping is still awaiting Discord. The stop must not be silently lost.
+    // THE "typing forever with nothing in flight" CASE. A fast activation
+    // finishes and calls stopTyping while a start is still awaiting Discord.
+    // The stop must win; it must not be silently overtaken.
     h = makeHarness({ fetchGate: true })
 
     const starting = h.connector.startTyping(CH)   // blocks inside channels.fetch
@@ -112,14 +104,12 @@ describe('typing indicator lifecycle', () => {
   })
 
   it('leaves no live timer once stopped', async () => {
-    // NOT the Map -- the Map is exactly where an orphan ISN'T. Asserting
-    // typingIntervals.size === 0 passed against the buggy code, because the
-    // orphaned interval had already been evicted from the map while still
-    // running. Ask the timer system instead; it can see what the map cannot.
+    // Ask the TIMER SYSTEM, not the map: an orphan is by definition the thing
+    // the map no longer holds, so `typingIntervals.size === 0` cannot detect
+    // one. Only the timer count can.
     h = makeHarness()
     // The connector opens 2 timers of its own at construction, so the absolute
-    // count is not the signal -- the DELTA is. Asserting 0 here failed against
-    // correct code, which is its own small lesson about checks.
+    // count is not the signal -- the DELTA is.
     const baseline = vi.getTimerCount()
 
     await h.connector.startTyping(CH)
@@ -141,13 +131,10 @@ describe('typing indicator lifecycle', () => {
   })
 
   it('a start still pending at shutdown never installs a timer', async () => {
-    // Reported by greptile on PR #17, and correct. The per-channel counter was
-    // derived from its own stored value, so clearing the map on close() reset
-    // its numeric identity: a stopTyping arriving afterwards recomputed
-    // (undefined ?? 0) + 1 === 1 -- exactly the generation the pending start was
-    // still holding. The start's guard then passed and it installed a refresh
-    // interval on a destroyed connector, sending typing forever through a dead
-    // client. Classic ABA: the token was not unique, only locally fresh.
+    // Shutdown is the sharpest ordering: a start is still awaiting Discord when
+    // the connector closes, and a stop arrives after the close. Nothing in that
+    // sequence may leave a timer behind -- one that survives close() sends
+    // typing through a dead client forever.
     h = makeHarness({ fetchGate: true })
 
     const starting = h.connector.startTyping(CH)   // generation 1, blocks in fetch
@@ -163,13 +150,12 @@ describe('typing indicator lifecycle', () => {
   })
 
   it('does not send typing after a stop that landed mid-fetch', async () => {
-    // Pins the post-await identity re-check, which survived mutation until this
-    // existed -- the other tests watch TIMERS, and this is about a single stray
-    // SEND. Note what it is and is not: sending is asynchronous, so a stop can
-    // always land mid-send and you cannot un-send. The check narrows the window,
-    // it does not close it, and the residual is one indicator that Discord
-    // expires on its own in ~10s. Bounded, self-healing, and worth pinning
-    // precisely because nothing else would notice if it disappeared.
+    // Pins the post-await identity re-check. Every other test here watches
+    // TIMERS; this one watches a single stray SEND, and nothing else would
+    // notice if the re-check disappeared. Note its limit: sending is
+    // asynchronous and cannot be un-sent, so a stop can always land mid-send.
+    // The check narrows that window rather than closing it, leaving at most one
+    // indicator, which Discord expires by itself in ~10s.
     h = makeHarness({ fetchGate: true })
 
     await h.connector.startTyping(CH)   // registers synchronously; tick blocks in fetch

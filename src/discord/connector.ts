@@ -1462,37 +1462,35 @@ export class DiscordConnector {
   /**
    * Start typing indicator (refreshes every 8 seconds)
    *
-   * Discord's typing state expires after ~10s, so the indicator only persists
-   * because of the refresh interval below -- which means an orphaned interval
-   * is indistinguishable, to a user, from a request that never finishes: the
-   * bot types forever with nothing in flight.
+   * Discord's typing state expires after ~10s, so the indicator persists only
+   * because of the refresh interval below. An orphaned interval is therefore
+   * indistinguishable, to a user, from a request that never finishes: the bot
+   * types forever with nothing in flight.
    *
-   * WHY THIS SHAPE. The earlier version awaited channels.fetch() and
-   * sendTyping() BEFORE registering its interval, and callers are
-   * fire-and-forget (agent/loop.ts: `startTyping(...).catch(() => {})`, and
-   * processBatch never awaits its activationPromise). That async gap admitted a
-   * whole family of races: a second start orphaning the first, a stop landing
-   * mid-gap and clearing an empty map, and -- with a per-channel counter
-   * guarding the gap -- a stop after close() re-minting the exact token a
-   * pending start still held.
+   * TWO RULES HOLD THIS TOGETHER. Callers are fire-and-forget (agent/loop.ts
+   * does `startTyping(...).catch(() => {})`, and processBatch never awaits its
+   * activationPromise), so starts and stops for one channel genuinely overlap.
    *
-   * Rather than guard the gap, this removes it. Nothing is awaited before the
-   * map write, so registration is atomic with respect to stopTyping; the async
-   * work moved inside the tick. The timer handle itself is the identity token,
-   * which is why the family cannot come back: a Timeout is created by the
-   * runtime and cannot be forged, re-derived, or re-minted the way a number can.
+   *   1. NEVER AWAIT BEFORE THE MAP WRITE. Registration must stay atomic with
+   *      respect to stopTyping; an await above it reopens a window in which a
+   *      stop clears an empty map and this interval registers behind it. The
+   *      method stays `async` only so `.catch()` callers keep working -- an
+   *      async function runs synchronously until its first await, and there
+   *      must be none before the registration.
+   *   2. COMPARE THE HANDLE, NOT A COUNTER. The Timeout is the identity token:
+   *      the runtime mints it and it cannot be re-derived, so "is this still
+   *      the channel's timer?" has no false positives. A numeric generation
+   *      can be re-minted and will eventually collide.
    *
-   * Stays `async` so the existing `.catch()` callers keep working. An async
-   * function runs synchronously until its first await, and there is none before
-   * the registration.
+   * Invariant: a typing timer exists if and only if it is in typingIntervals.
    */
   async startTyping(channelId: string): Promise<void> {
     if (this.closed) {
       return
     }
 
-    // Replace, never shadow: anything already running for this channel would
-    // otherwise be evicted from the map while still firing.
+    // Replace, never shadow: an interval evicted from the map while still
+    // running can never be reached by stopTyping again.
     this.clearTypingInterval(channelId)
 
     const tick = async (): Promise<void> => {
@@ -1506,9 +1504,10 @@ export class DiscordConnector {
         if (!channel || !channel.isTextBased()) {
           return
         }
-        // Re-checked after the await: a fast activation can finish inside a
-        // network round-trip. Worst case here is one stray indicator, which
-        // Discord expires on its own in ~10s; a stray INTERVAL would not.
+        // Re-checked after the await: a stop can land inside a network
+        // round-trip. This narrows that window rather than closing it --
+        // sending is asynchronous and cannot be un-sent -- so the residual is
+        // one stray indicator, which Discord expires by itself in ~10s.
         if (this.typingIntervals.get(channelId) !== interval) {
           return
         }
@@ -1526,8 +1525,8 @@ export class DiscordConnector {
   /**
    * Stop typing indicator
    *
-   * Synchronous with respect to the map, so it always wins: there is no state a
-   * pending start could be holding that would let it register afterwards.
+   * Synchronous with respect to the map, so it always wins: no pending start
+   * holds state that could let it register afterwards.
    */
   async stopTyping(channelId: string): Promise<void> {
     this.clearTypingInterval(channelId)
@@ -1817,9 +1816,9 @@ export class DiscordConnector {
       clearInterval(interval)
     }
     this.typingIntervals.clear()
-    // Any tick still awaiting Discord will find its handle absent from the map
-    // and return without sending. The flag additionally refuses a start that
-    // arrives after close, which would otherwise type through a dead client.
+    // A tick still awaiting Discord finds its handle absent and returns without
+    // sending. The flag refuses starts arriving after close, which would
+    // otherwise type through a dead client.
     this.closed = true
     // Clear cache maintenance intervals
     if (this.cacheStatsInterval) clearInterval(this.cacheStatsInterval)
