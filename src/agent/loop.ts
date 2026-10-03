@@ -34,7 +34,7 @@ import { parseSteerMessage, loadCatalog, resolveDirective, toProviderParams, for
 import type { ChannelSteering } from '../steering/index.js'
 import { SleepState } from './sleep.js'
 import { pinAddressesBot } from './pin-target.js'
-import { loadThinkingBlocks, persistThinkingBlocks, type ThinkingBlock } from './thinking-cache.js'
+import { finalStepThinkingBlocks, loadThinkingBlocks, persistThinkingBlocks, type ThinkingBlock } from './thinking-cache.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
 type Membrane = any
@@ -2829,8 +2829,12 @@ export class AgentLoop {
       // Persist native thinking blocks anchored to the sent messages so they
       // can be re-attached to this turn in future context builds.
       // Default-on (opt out via preserve_thinking_blocks: false).
-      if (config.preserve_thinking_blocks !== false && nativeThinkingBlocks.length > 0 && allSentMessageIds.length > 0) {
-        persistThinkingBlocks(this.cacheDir, this.botId, channelId, allSentMessageIds, nativeThinkingBlocks, config.continuation_model)
+      // Only the FINAL response's blocks: the turn is rebuilt from Discord as
+      // one assistant message, and the API rejects a latest turn carrying
+      // thinking from several tool-loop responses.
+      const persistedThinkingBlocks = finalStepThinkingBlocks(result?.content || [])
+      if (config.preserve_thinking_blocks !== false && persistedThinkingBlocks.length > 0 && allSentMessageIds.length > 0) {
+        persistThinkingBlocks(this.cacheDir, this.botId, channelId, allSentMessageIds, persistedThinkingBlocks, config.continuation_model)
       }
 
       return {
