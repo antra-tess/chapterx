@@ -1,9 +1,9 @@
 /**
  * Thinking cache: one response's thinking per assistant turn.
  *
- * The API validates the thinking blocks of the latest thinking-bearing
- * assistant turn and rejects blocks from several responses flattened into it
- * (a tool loop's steps, or merged consecutive bot messages).
+ * The API rejects any turn in which thinking blocks from different responses
+ * sit next to each other (a tool loop's steps flattened together). Blocks
+ * from different responses separated by other content are accepted.
  *
  * Run with: npx vitest run thinking-cache
  */
@@ -17,7 +17,7 @@ import {
   persistThinkingBlocks,
   loadThinkingBlocks,
   attachThinkingBlocks,
-  sanitizeLatestThinkingTurn,
+  sanitizeThinkingRuns,
   type ThinkingBlock,
   type ThinkingGroup,
 } from './thinking-cache.js'
@@ -95,53 +95,61 @@ describe('persist / load', () => {
   })
 })
 
-describe('sanitizeLatestThinkingTurn', () => {
-  it('leaves a valid latest turn and older turns untouched', () => {
-    const old = group([thinking('A'), thinking('B')], false)
+describe('sanitizeThinkingRuns', () => {
+  it('leaves single-response runs untouched', () => {
+    const g1 = group([thinking('A')])
+    const g2 = group([thinking('B'), thinking('B2')])
+    const msgs = [
+      { content: [...g1.blocks, text('one')] as ContentBlock[] },
+      { content: [text('user')] as ContentBlock[] },
+      { content: [...g2.blocks, text('two')] as ContentBlock[] },
+    ]
+    expect(sanitizeThinkingRuns(msgs, [g1, g2])).toBe(0)
+    expect(sigs(msgs[0]!.content)).toEqual(['T:A', 't:one'])
+    expect(sigs(msgs[2]!.content)).toEqual(['T:B', 'T:B2', 't:two'])
+  })
+
+  it('drops a flattened legacy run in an OLDER turn too', () => {
+    const flattened = group([thinking('A'), thinking('B')], false)
     const latest = group([thinking('C')])
     const msgs = [
-      { content: [...old.blocks, text('one')] as ContentBlock[] },
-      { content: [text('user')] as ContentBlock[] },
-      { content: [...latest.blocks, text('two')] as ContentBlock[] },
-    ]
-    expect(sanitizeLatestThinkingTurn(msgs, [old, latest])).toBe(0)
-    expect(sigs(msgs[0]!.content)).toEqual(['T:A', 'T:B', 't:one'])
-    expect(sigs(msgs[2]!.content)).toEqual(['T:C', 't:two'])
-  })
-
-  it('strips a flattened legacy turn and checks the turn before it', () => {
-    const prev = group([thinking('P')])
-    const flattened = group([thinking('A'), thinking('B')], false)
-    const msgs = [
-      { content: [...prev.blocks, text('earlier')] as ContentBlock[] },
-      { content: [text('user')] as ContentBlock[] },
       { content: [...flattened.blocks, text('reply')] as ContentBlock[] },
+      { content: [text('user')] as ContentBlock[] },
+      { content: [...latest.blocks, text('newer')] as ContentBlock[] },
       { content: [text('ping')] as ContentBlock[] },
     ]
-    expect(sanitizeLatestThinkingTurn(msgs, [prev, flattened])).toBe(2)
-    expect(sigs(msgs[2]!.content)).toEqual(['t:reply'])
-    expect(sigs(msgs[0]!.content)).toEqual(['T:P', 't:earlier'])
+    expect(sanitizeThinkingRuns(msgs, [flattened, latest])).toBe(2)
+    expect(sigs(msgs[0]!.content)).toEqual(['t:reply'])
+    expect(sigs(msgs[2]!.content)).toEqual(['T:C', 't:newer'])
   })
 
-  it('keeps the leading response of a merged turn and drops the rest', () => {
+  it('keeps both responses of a merged turn when text separates them', () => {
     const g1 = group([thinking('G1')])
     const g2 = group([thinking('G2')])
     const msgs = [{ content: [...g1.blocks, text('first'), ...g2.blocks, text('second')] as ContentBlock[] }]
-    expect(sanitizeLatestThinkingTurn(msgs, [g1, g2])).toBe(1)
-    expect(sigs(msgs[0]!.content)).toEqual(['T:G1', 't:first', 't:second'])
+    expect(sanitizeThinkingRuns(msgs, [g1, g2])).toBe(0)
+    expect(sigs(msgs[0]!.content)).toEqual(['T:G1', 't:first', 'T:G2', 't:second'])
   })
 
-  it('drops all thinking from a turn whose leading group is unusable', () => {
+  it('drops adjacent runs of two different responses', () => {
+    const g1 = group([thinking('G1')])
+    const g2 = group([thinking('G2')])
+    const msgs = [{ content: [...g1.blocks, ...g2.blocks, text('reply')] as ContentBlock[] }]
+    expect(sanitizeThinkingRuns(msgs, [g1, g2])).toBe(2)
+    expect(sigs(msgs[0]!.content)).toEqual(['t:reply'])
+  })
+
+  it('checks each run of a turn independently', () => {
     const legacy = group([thinking('A'), thinking('B')], false)
     const g2 = group([thinking('G2')])
     const msgs = [{ content: [...legacy.blocks, text('first'), ...g2.blocks, text('second')] as ContentBlock[] }]
-    expect(sanitizeLatestThinkingTurn(msgs, [legacy, g2])).toBe(3)
-    expect(sigs(msgs[0]!.content)).toEqual(['t:first', 't:second'])
+    expect(sanitizeThinkingRuns(msgs, [legacy, g2])).toBe(2)
+    expect(sigs(msgs[0]!.content)).toEqual(['t:first', 'T:G2', 't:second'])
   })
 
   it('drops thinking blocks of unknown origin', () => {
     const msgs = [{ content: [thinking('X'), text('reply')] as ContentBlock[] }]
-    expect(sanitizeLatestThinkingTurn(msgs, [])).toBe(1)
+    expect(sanitizeThinkingRuns(msgs, [])).toBe(1)
     expect(sigs(msgs[0]!.content)).toEqual(['t:reply'])
   })
 })
@@ -191,9 +199,9 @@ describe('ContextBuilder with persisted thinking', () => {
     }
   }
 
-  it('drops a pre-fix tool-loop entry from the latest bot turn, keeps the earlier turn', async () => {
-    const earlier = group([thinking('E')])
+  it('drops a pre-fix tool-loop entry from an older bot turn, keeps the newer turn', async () => {
     const flattened = group([thinking('A'), thinking('B')], false)
+    const newer = group([thinking('N')])
     const result = await new ContextBuilder().buildContext({
       discordContext: {
         messages: [
@@ -213,10 +221,10 @@ describe('ContextBuilder with persisted thinking', () => {
       messagesSinceRoll: 0,
       config,
       botDiscordUsername: 'FableBot',
-      thinkingByMessageId: new Map([['b1', earlier], ['b2', flattened]]),
+      thinkingByMessageId: new Map([['b1', flattened], ['b2', newer]]),
     })
 
     const botTurns = result.request.messages.filter(m => m.messageId === 'b1' || m.messageId === 'b2')
-    expect(botTurns.map(m => sigs(m.content).filter(s => s.startsWith('T:')))).toEqual([['T:E'], []])
+    expect(botTurns.map(m => sigs(m.content).filter(s => s.startsWith('T:')))).toEqual([[], ['T:N']])
   })
 })

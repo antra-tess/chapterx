@@ -14,7 +14,7 @@ import {
 } from '../types.js'
 import { Activation } from '../activation/index.js'
 import { logger } from '../utils/logger.js'
-import { attachThinkingBlocks, sanitizeLatestThinkingTurn, type ThinkingGroup } from '../agent/thinking-cache.js'
+import { attachThinkingBlocks, sanitizeThinkingRuns, type ThinkingGroup } from '../agent/thinking-cache.js'
 import {
   determineCacheMarker,
   applyChapterXCacheMarker,
@@ -193,13 +193,13 @@ export class ContextBuilder {
       participantMessages.push(...finalMessages)
     }
 
-    // 8b. The API validates the thinking of the latest thinking-bearing turn
-    // and rejects it when that turn mixes responses (pre-fix tool-loop
-    // entries, merged consecutive bot messages). Repair that turn only.
+    // 8b. The API rejects any turn where thinking blocks from different
+    // responses sit next to each other (pre-fix tool-loop cache entries).
+    // Drop such runs; everything else is sent as persisted.
     if (thinkingByMessageId && thinkingByMessageId.size > 0) {
-      const dropped = sanitizeLatestThinkingTurn(participantMessages, thinkingByMessageId.values())
+      const dropped = sanitizeThinkingRuns(participantMessages, thinkingByMessageId.values())
       if (dropped > 0) {
-        logger.info({ dropped }, 'Dropped thinking blocks the API would reject on the latest thinking-bearing turn')
+        logger.info({ dropped }, 'Dropped thinking blocks that mix responses (API would reject the turn)')
       }
     }
 

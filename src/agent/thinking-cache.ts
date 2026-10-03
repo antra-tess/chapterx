@@ -13,14 +13,16 @@
  * Blocks must round-trip verbatim, including signature-only blocks whose
  * thinking field is an empty string.
  *
- * One response per turn: the API validates the thinking blocks of the latest
- * assistant turn that carries any, and rejects that turn when it holds blocks
- * from more than one response ("thinking or redacted_thinking blocks in the
- * latest assistant message cannot be modified"). A tool-loop activation makes
- * several responses but is rebuilt from Discord as one turn, so only the final
- * response's blocks are persisted (finalStepThinkingBlocks), and
- * sanitizeLatestThinkingTurn repairs turns that still mix responses (entries
- * written before this rule, or merged consecutive bot messages).
+ * Adjacent blocks must share a response: the API rejects any turn in which
+ * thinking blocks from different responses sit next to each other ("thinking
+ * or redacted_thinking blocks in the latest assistant message cannot be
+ * modified" — reported for whichever turn has them, latest or not). Blocks
+ * from different responses separated by other content (e.g. merged
+ * consecutive bot messages: thinking, text, thinking, text) are accepted.
+ * A tool-loop activation makes several responses but is rebuilt from Discord
+ * as one turn, so only the final response's blocks are persisted
+ * (finalStepThinkingBlocks), and sanitizeThinkingRuns drops runs that still
+ * mix responses (entries written before this rule).
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'fs'
@@ -190,18 +192,17 @@ export function attachThinkingBlocks(
 }
 
 /**
- * Make the latest thinking-bearing turn acceptable to the API. Only that turn
- * is validated: its thinking blocks must be exactly one response's blocks,
- * verbatim, leading the turn. Earlier turns are left as they are.
+ * Make every turn's thinking acceptable to the API: each maximal run of
+ * adjacent thinking blocks must be exactly one single-response group, in
+ * order. Any other run is dropped — in practice a cache entry written before
+ * final-step-only persistence, whose tool-loop responses were flattened
+ * together. Runs separated by other content are checked independently.
  *
  * Run after merging and limits, on the final message list. Identifies groups
  * by block identity, so `groups` must be the same objects that were attached.
- * If the turn leads with one whole single-response group, other thinking
- * blocks in the turn (from a merged message) are dropped. Otherwise all its
- * thinking is dropped and the previous thinking-bearing turn, now the latest,
- * is checked the same way. Returns the number of blocks dropped.
+ * Returns the number of blocks dropped.
  */
-export function sanitizeLatestThinkingTurn(
+export function sanitizeThinkingRuns(
   messages: Array<{ content: ContentBlock[] }>,
   groups: Iterable<ThinkingGroup>
 ): number {
@@ -211,31 +212,32 @@ export function sanitizeLatestThinkingTurn(
   }
 
   let dropped = 0
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]!
-    const thinkingCount = msg.content.filter(isThinkingBlock).length
-    if (thinkingCount === 0) continue
-
-    let lead = 0
-    while (lead < msg.content.length && isThinkingBlock(msg.content[lead]!)) lead++
-    const group = lead > 0 ? groupOf.get(msg.content[0]!) : undefined
-    const leadsWithOneResponse = !!group && group.singleResponse &&
-      lead === group.blocks.length &&
-      group.blocks.every((block, k) => msg.content[k] === block)
-
-    if (leadsWithOneResponse) {
-      if (thinkingCount > lead) {
-        msg.content = [
-          ...msg.content.slice(0, lead),
-          ...msg.content.slice(lead).filter(block => !isThinkingBlock(block)),
-        ]
-        dropped += thinkingCount - lead
+  for (const msg of messages) {
+    if (!msg.content.some(isThinkingBlock)) continue
+    const kept: ContentBlock[] = []
+    let changed = false
+    for (let i = 0; i < msg.content.length;) {
+      if (!isThinkingBlock(msg.content[i]!)) {
+        kept.push(msg.content[i]!)
+        i++
+        continue
       }
-      return dropped
+      let end = i
+      while (end < msg.content.length && isThinkingBlock(msg.content[end]!)) end++
+      const run = msg.content.slice(i, end)
+      const group = groupOf.get(run[0]!)
+      const isOneWholeResponse = !!group && group.singleResponse &&
+        run.length === group.blocks.length &&
+        group.blocks.every((block, k) => run[k] === block)
+      if (isOneWholeResponse) {
+        kept.push(...run)
+      } else {
+        dropped += run.length
+        changed = true
+      }
+      i = end
     }
-
-    msg.content = msg.content.filter(block => !isThinkingBlock(block))
-    dropped += thinkingCount
+    if (changed) msg.content = kept
   }
   return dropped
 }
