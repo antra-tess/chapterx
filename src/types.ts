@@ -422,7 +422,14 @@ export interface ToolCall {
   messageId: string  // For pruning old calls (triggering user message)
   timestamp: Date
   originalCompletionText: string  // The bot's original text including XML tool call
-  botMessageIds?: string[]  // Discord message IDs from bot's response (for existence checking)
+  /** All Discord messages emitted by the activation (tool-cache liveness anchors). */
+  botMessageIds?: string[]
+  /**
+   * Subset of botMessageIds whose visible text is reconstructed by
+   * originalCompletionText. Only these messages may be removed from raw Discord
+   * context before the cached tool exchange is interleaved.
+   */
+  coveredMessageIds?: string[]
 }
 
 export interface ToolCallWithResult {
@@ -614,4 +621,3 @@ export class ToolError extends Chapter3Error {
     this.name = 'ToolError'
   }
 }
-
