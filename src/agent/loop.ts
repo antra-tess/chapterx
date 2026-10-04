@@ -74,6 +74,10 @@ export class AgentLoop {
   private botMessageIds = new Set<string>()  // Track bot's own message IDs
   private mcpInitialized = false
   private activeChannels = new Set<string>()  // Track channels currently being processed
+  // Events that arrive during an activation must be replayed after it finishes.
+  // Coalescing per channel retains every trigger and command without creating
+  // a separate in-memory reply job for every arrival.
+  private pendingChannelEvents = new Map<string, Event[]>()
   private activationStore: ActivationStore
   private cacheDir: string
   private somaClient?: SomaClient  // Optional Soma credit system client
@@ -494,6 +498,19 @@ export class AgentLoop {
     const firstEvent = events[0]
     if (!firstEvent) return
 
+    const { channelId, guildId } = firstEvent
+
+    // The run loop keeps polling while activations execute asynchronously. Save
+    // active-channel events for a follow-up pass instead of discarding mentions,
+    // commands, reactions, edits, or deletes received in the meantime.
+    if (this.activeChannels.has(channelId)) {
+      const pending = this.pendingChannelEvents.get(channelId) || []
+      pending.push(...events)
+      this.pendingChannelEvents.set(channelId, pending)
+      logger.debug({ channelId, pendingEventCount: pending.length }, 'Channel active, deferred events')
+      return
+    }
+
     // Profile: time from Discord event receipt to batch processing
     const eventReceivedAt = (firstEvent as any).receivedAt
     if (eventReceivedAt) {
@@ -522,8 +539,6 @@ export class AgentLoop {
       return
     }
     logger.debug({ durationMs: Date.now() - shouldActivateStart }, 'shouldActivate completed')
-
-    const { channelId, guildId } = firstEvent
 
     // Get triggering message ID for tool tracking (prefer non-system messages)
     const triggeringEvent = this.findTriggeringMessageEvent(events)
@@ -629,12 +644,6 @@ export class AgentLoop {
       logger.debug({ channelId }, 'Cancelled pending deferred activation due to new activity')
     }
 
-    // Check if this channel is already being processed
-    if (this.activeChannels.has(channelId)) {
-      logger.debug({ channelId }, 'Channel already being processed, skipping')
-      return
-    }
-
     // Mark channel as active and process asynchronously (don't await)
     this.activeChannels.add(channelId)
     
@@ -662,7 +671,7 @@ export class AgentLoop {
 
     if (somaCheckResult.status === 'blocked') {
       // User doesn't have enough ichor - message already sent
-      this.activeChannels.delete(channelId)
+      this.completeChannelActivation(channelId)
       return
     }
 
@@ -756,8 +765,22 @@ export class AgentLoop {
         }, 'Failed to handle activation')
       })
       .finally(() => {
-        this.activeChannels.delete(channelId)
+        this.completeChannelActivation(channelId)
       })
+  }
+
+  /** Release a channel and put arrivals from its active turn back on the queue. */
+  private completeChannelActivation(channelId: string): void {
+    this.activeChannels.delete(channelId)
+
+    const pending = this.pendingChannelEvents.get(channelId)
+    if (!pending || pending.length === 0) return
+
+    this.pendingChannelEvents.delete(channelId)
+    // These events were polled before anything still in the shared queue, so
+    // restore them at the front to preserve arrival order.
+    this.queue.prepend(pending)
+    logger.debug({ channelId, pendingEventCount: pending.length }, 'Requeued deferred channel events')
   }
   
   private determineActivationReason(events: Event[]): {
@@ -4045,4 +4068,3 @@ export class AgentLoop {
     )
   }
 }
-
