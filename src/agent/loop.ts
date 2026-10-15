@@ -12,6 +12,8 @@ import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { ToolSystem } from '../tools/system.js'
 import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult, VendorConfig } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
+import { displayNameClasses } from '../discord/member-names.js'
+import { mentionsToIds } from './outgoing-mentions.js'
 import { sleep } from '../utils/retry.js'
 import { exclusiveOnly, type MarkdownCarry } from '../utils/discord-markdown.js'
 import { 
@@ -942,25 +944,16 @@ export class AgentLoop {
     return null
   }
 
-  private async replaceMentions(text: string, messages: any[]): Promise<string> {
-    // Build username -> user ID mapping from recent messages
-    // Use actual username (not displayName) for chapter2 compatibility
-    const userMap = new Map<string, string>()
-    
-    for (const msg of messages) {
-      if (msg.author && !msg.author.bot) {
-        userMap.set(msg.author.username, msg.author.id)
-      }
-    }
-    
-    // Replace <@username> with <@USER_ID>
-    let result = text
-    for (const [name, userId] of userMap.entries()) {
-      const pattern = new RegExp(`<@${name}>`, 'gi')
-      result = result.replace(pattern, `<@${userId}>`)
-    }
-    
-    return result
+  private async replaceMentions(text: string, messages: any[], config: BotConfig): Promise<string> {
+    // Mentions of the people in the conversation become <@USER_ID>, in the
+    // forms the context shows their names (outgoing-mentions.ts). The bot's
+    // own messages are left out: the context labels them config.name, so
+    // their author's Discord names would otherwise make a person's name look
+    // shared. config.name itself is held by no one there.
+    const authors = messages
+      .filter((msg) => msg.author && msg.author.id !== this.botUserId)
+      .map((msg) => ({ ...msg.author, webhook: Boolean(msg.webhookId) }))
+    return mentionsToIds(text, authors, config)
   }
 
   /**
@@ -1496,6 +1489,7 @@ export class AgentLoop {
         authorized_roles: [],  // Will apply after loading config
         pinnedConfigs,  // Reuse pre-fetched pinned configs (avoids second API call)
         maxImages: maxImagesFetch,  // Prevents loading all images from image-heavy channels
+        displayNames: displayNameClasses(preConfig),  // Server nicknames for display-name labels
       })
       endProfile('fetchContext')
 
@@ -2585,6 +2579,11 @@ export class AgentLoop {
                 logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncating native pre-tool text at participant')
                 return  // Don't send hallucinated content
               }
+
+              // Mentions become <@USER_ID>, as in the final reply
+              for (const segment of segments) {
+                segment.visible = await this.replaceMentions(segment.visible, discordMessages, config)
+              }
             }
 
             const sendResult = await this.sendSegments(
@@ -2788,7 +2787,7 @@ export class AgentLoop {
 
       // Replace mentions
       if (discordMessages) {
-        displayText = await this.replaceMentions(displayText, discordMessages)
+        displayText = await this.replaceMentions(displayText, discordMessages, config)
       }
 
       // Send remaining text to Discord (text not already sent via onPreToolContent)
@@ -3200,6 +3199,13 @@ export class AgentLoop {
           segments = this.truncateSegmentsAtPosition(segments, truncResult.text.length)
         }
       }
+
+      // Mentions become <@USER_ID>, as in the final reply
+      if (discordMessages) {
+        for (const segment of segments) {
+          segment.visible = await this.replaceMentions(segment.visible, discordMessages, config)
+        }
+      }
       
       if (segments.length > 0) {
         // Send segments, preserving invisible content associations
@@ -3463,7 +3469,7 @@ export class AgentLoop {
     // 5. Replace <@username> with <@USER_ID> for Discord mentions in segments
     if (discordMessages) {
       for (const segment of segments) {
-        segment.visible = await this.replaceMentions(segment.visible, discordMessages)
+        segment.visible = await this.replaceMentions(segment.visible, discordMessages, config)
       }
     }
     
@@ -3540,7 +3546,7 @@ export class AgentLoop {
     // 10. Calculate full display text for trace
     let displayText = stripped
     if (discordMessages) {
-      displayText = await this.replaceMentions(displayText, discordMessages)
+      displayText = await this.replaceMentions(displayText, discordMessages, config)
     }
     
     // 11. Build final completion text for trace
@@ -3978,6 +3984,7 @@ export class AgentLoop {
       channelId,
       depth: fetchDepth,
       maxImages: config.include_images ? Math.max((config.max_images || 5) * 2, 10) : 0,
+      displayNames: displayNameClasses(config),
     })
 
     if (discordContext.messages.length === 0) {

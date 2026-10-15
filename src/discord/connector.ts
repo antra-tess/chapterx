@@ -24,6 +24,7 @@ import {
   fetchChannelMessages,
   type FetchDeps,
 } from './context-fetch.js'
+import { AuthorMembers, type DisplayNameClasses } from './member-names.js'
 
 export interface ConnectorOptions {
   token: string
@@ -82,6 +83,9 @@ export interface FetchContextParams {
   pinnedConfigs?: string[]  // Optional: Pre-fetched pinned configs (skips fetchPinned call)
   maxImages?: number  // Optional: Cap image fetching to avoid RAM bloat (default: unlimited)
   ignoreHistory?: boolean  // Optional: Skip .history command processing (raw fetch)
+  // Optional: whose labels use display names. Their members missing from the
+  // cache are fetched first, so a label can carry the server nickname.
+  displayNames?: DisplayNameClasses
 }
 
 /** A sent Discord message plus the synthetic markdown bridge strings injected
@@ -95,6 +99,8 @@ export interface SentMessageChunk {
 export class DiscordConnector {
   private client: Client
   private typingIntervals = new Map<string, NodeJS.Timeout>()
+  // Server nicknames for display-name labels (member-names.ts)
+  private authorMembers = new AuthorMembers()
   private imageCache = new Map<string, CachedImage>()
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
   private urlMapPath: string  // Path to URL map file
@@ -789,6 +795,12 @@ export class DiscordConnector {
       }
 
       logger.debug({ finalMessageCount: messages.length }, 'Context fetch pipeline complete')
+
+      if (params.displayNames) {
+        startProfile('memberNames')
+        await this.authorMembers.cacheFor(messages, params.displayNames)
+        endProfile('memberNames')
+      }
 
       startProfile('messageConvert')
       // Convert to our format (with reply username lookup)
@@ -2470,6 +2482,7 @@ export class DiscordConnector {
       authorRoles: msg.member ? Array.from(msg.member.roles.cache.values()).map(r => r.name) : undefined,
       mentions: Array.from(msg.mentions.users.keys()),
       referencedMessage: msg.reference?.messageId,
+      webhookId: msg.webhookId ?? undefined,
     }
   }
 
