@@ -72,6 +72,12 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('```\n@Jack\n``` then @Jack', [jack], byDisplayName)).toBe('```\n@Jack\n``` then <@111>')
   })
 
+  it('reads a backtick escaped with a backslash as text, as the splitter does', () => {
+    expect(mentionsToIds('\\`a @Jack` @Jack', [jack], byDisplayName)).toBe('\\`a <@111>` <@111>')
+    // An escaped backslash leaves the backtick after it to open a span.
+    expect(mentionsToIds('\\\\`a @Jack` @Jack', [jack], byDisplayName)).toBe('\\\\`a @Jack` <@111>')
+  })
+
   it('ends a code span only at a run of backticks as long as the one that opened it', () => {
     expect(mentionsToIds('``a ` @Jack` <@Jack> b`` @Jack', [jack], byDisplayName)).toBe('``a ` @Jack` <@Jack> b`` <@111>')
   })
@@ -88,6 +94,21 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('<@111111111111111111> <@num>', [numbered], byDisplayName)).toBe(
       '<@111111111111111111> <@222222222222222222>',
     )
+  })
+
+  it('takes 17 to 20 digits as an id, and a shorter or longer number as a name', () => {
+    const shownAs = (digits: number): MentionAuthor => ({
+      id: '999999999999999999',
+      username: `num${digits}`,
+      displayName: '1'.repeat(digits),
+      bot: false,
+    })
+    for (const n of [17, 20]) {
+      expect(mentionsToIds(`<@${'1'.repeat(n)}>`, [shownAs(n)], byDisplayName)).toBe(`<@${'1'.repeat(n)}>`)
+    }
+    for (const n of [16, 21]) {
+      expect(mentionsToIds(`<@${'1'.repeat(n)}>`, [shownAs(n)], byDisplayName)).toBe('<@999999999999999999>')
+    }
   })
 
   it('leaves a display name two people share as written, and keeps <@Name> for it from pinging anyone', () => {

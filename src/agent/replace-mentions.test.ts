@@ -87,6 +87,30 @@ describe('AgentLoop.replaceMentions', () => {
     // When the context shows dot messages, the second Jack is in the conversation too.
     expect(await replaceMentions()('@Jack', messages, { ...humans, ignore_dotted_messages: false })).toBe('@Jack')
   })
+
+  it('counts a .steer message only when steer_visible shows it, as the context does', async () => {
+    const messages = [message('111', 'jack_one', 'Jack'), message('112', 'jack_two', 'Jack', { content: '.steer be brief' })]
+    const humans = { use_display_names_humans: true }
+    expect(await replaceMentions()('@Jack', messages, humans)).toBe('<@111>')
+    expect(await replaceMentions()('@Jack', messages, { ...humans, steer_visible: true })).toBe('@Jack')
+  })
+
+  it('reads the reactions that hide or show a message, as the context does', async () => {
+    const humans = { use_display_names_humans: true }
+    const hidden = [message('111', 'jack_one', 'Jack'), message('112', 'jack_two', 'Jack', { reactions: [{ emoji: '🫥' }] })]
+    expect(await replaceMentions()('@Jack', hidden, humans)).toBe('<@111>')
+    const shown = [
+      message('111', 'jack_one', 'Jack'),
+      message('112', 'jack_two', 'Jack', { content: '.note to self', reactions: [{ emoji: '👁️‍🗨️' }] }),
+    ]
+    expect(await replaceMentions()('@Jack', shown, humans)).toBe('@Jack')
+  })
+
+  it("leaves out the connector's placeholder for a message without an author, which isn't anyone", async () => {
+    const placeholder = { author: { id: 'system', username: 'system', displayName: 'system', bot: true }, content: '' }
+    const messages = [message('111', 'sys_h4ndle', 'system'), placeholder]
+    expect(await replaceMentions()('@system', messages, { use_display_names_humans: true })).toBe('<@111>')
+  })
 })
 
 describe('AgentLoop.replaceMentionsInSegments', () => {

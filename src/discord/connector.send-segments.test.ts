@@ -157,4 +157,9 @@ describe('DiscordConnector.sendSegmentChunks with its mention lookup', () => {
     expect(h.sent).toHaveLength(1)
     expect(h.sent[0]).toMatch(/^```\n<@jack_h4ndle>\n```\nthen <@123>$/)
   })
+
+  it("doesn't let a '<@' left open in code take the mention after it out with it", async () => {
+    await h.connector.sendSegmentChunks(CH, 'type `<@` then ask <@jack_h4ndle>', undefined, [])
+    expect(h.sent).toEqual(['type `<@` then ask <@123>'])
+  })
 })

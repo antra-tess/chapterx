@@ -6,7 +6,7 @@
 import { EventQueue } from './event-queue.js'
 import { DeferredQueue, isTransientError } from './deferred-queue.js'
 import { ChannelStateManager } from './state-manager.js'
-import { DiscordConnector, type PinnedSteer } from '../discord/connector.js'
+import { DiscordConnector, SYSTEM_PLACEHOLDER_ID, type PinnedSteer } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { ToolSystem } from '../tools/system.js'
@@ -953,15 +953,20 @@ export class AgentLoop {
   ): Promise<string> {
     // Mentions of the people in the conversation become <@USER_ID>, in the
     // forms the context shows their names (outgoing-mentions.ts). Messages
-    // the context hides (dot commands and the like) are left out, as the
-    // context builder leaves them out, and so are the bot's own: the context
-    // labels them config.name, so their author's Discord names would
-    // otherwise make a person's name look shared. config.name itself is held
-    // by no one there. `carry` is the code block or span the text begins
-    // inside, carried open from an earlier send.
+    // the context hides (dot commands and the like) are left out, with the
+    // same filter and settings the context builder uses, and so are the
+    // bot's own: the context labels them config.name, so their author's
+    // Discord names would otherwise make a person's name look shared.
+    // config.name itself is held by no one there. The connector's 'system'
+    // placeholder for a message without an author isn't anyone, so it's
+    // left out too. Authors of messages the context drops for having no
+    // content, or for its limits, still count: their names can appear in
+    // text the context shows, and a name they share pings no one. `carry` is
+    // the code block or span the text begins inside, carried open from an
+    // earlier send.
     const shown = filterDotMessages(messages, config.steer_visible === true, config.ignore_dotted_messages !== false)
     const authors = shown
-      .filter((msg) => msg.author && msg.author.id !== this.botUserId)
+      .filter((msg) => msg.author && msg.author.id !== this.botUserId && msg.author.id !== SYSTEM_PLACEHOLDER_ID)
       .map((msg) => ({ ...msg.author, webhook: Boolean(msg.webhookId) }))
     return mentionsToIds(text, authors, config, carry)
   }

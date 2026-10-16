@@ -96,6 +96,10 @@ export interface SentMessageChunk {
   bridgeClose?: string
 }
 
+/** The author id convertMessage gives a message that has no author: a
+ *  placeholder, not anyone in the conversation. */
+export const SYSTEM_PLACEHOLDER_ID = 'system'
+
 export class DiscordConnector {
   private client: Client
   private typingIntervals = new Map<string, NodeJS.Timeout>()
@@ -1024,8 +1028,10 @@ export class DiscordConnector {
    * from an earlier message, as the markdown splitter sends it.
    */
   private async resolveMentions(content: string, channelId: string, startCarry: MarkdownCarry = []): Promise<string> {
-    // Find all <@username> patterns (not already numeric IDs), outside code
-    const mentionPattern = /<@([^>0-9][^>]*)>/g
+    // Find all <@username> patterns (not already numeric IDs), outside code.
+    // A name stops short of another '<' or a line end, so a '<@' left open
+    // in code doesn't run on to a mention after it and take it out with it.
+    const mentionPattern = /<@([^>0-9<\n][^><\n]*)>/g
     const code = codeRanges(content, startCarry)
     const matches = [...content.matchAll(mentionPattern)].filter(
       (match) => !code.some(([start, end]) => match.index >= start && match.index < end),
@@ -2387,7 +2393,7 @@ export class DiscordConnector {
         id: msg.id,
         channelId: msg.channelId,
         guildId: msg.guildId || '',
-        author: { id: 'system', username: 'system', displayName: 'system', bot: true },
+        author: { id: SYSTEM_PLACEHOLDER_ID, username: 'system', displayName: 'system', bot: true },
         content: '',
         timestamp: msg.createdAt,
         attachments: [],

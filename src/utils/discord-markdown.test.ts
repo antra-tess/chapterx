@@ -1326,6 +1326,13 @@ describe('codeRanges', () => {
     expect(codeIn('a ` b ```\nc')).toEqual(['```\nc'])
   })
 
+  it('opens nothing at a backtick escaped with a backslash, as the splitter reads it', () => {
+    expect(codeIn('a \\`b` c')).toEqual([])
+    expect(codeIn('a \\``` b')).toEqual([])
+    // An escaped backslash leaves the backtick after it unescaped.
+    expect(codeIn('a \\\\`b` c')).toEqual(['`b`'])
+  })
+
   it('reads text that begins inside a carried block or span after its reopener', () => {
     expect(codeIn('k\n```\nThanks', [{ kind: 'fence', opener: '```py', closer: '```' }])).toEqual(['k\n```'])
     expect(codeIn('x` y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`'])
