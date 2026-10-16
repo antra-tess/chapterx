@@ -3,7 +3,7 @@
  * Handles all Discord API interactions
  */
 
-import { Attachment, Client, Collection, GatewayIntentBits, Message, Partials, PermissionFlagsBits, OAuth2Scopes, TextChannel } from 'discord.js'
+import { Attachment, Client, Collection, GatewayIntentBits, Message, Partials, PermissionFlagsBits, OAuth2Scopes, TextChannel, type MessageMentionOptions } from 'discord.js'
 import { pinAddressesBot } from '../agent/pin-target.js'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
@@ -99,6 +99,16 @@ export interface SentMessageChunk {
 /** The author id convertMessage gives a message that has no author: a
  *  placeholder, not anyone in the conversation. */
 export const SYSTEM_PLACEHOLDER_ID = 'system'
+
+/** A reply's allowed mentions: the reply doesn't ping the author it answers,
+ *  and the people its text mentions are pinged. Once a message carries
+ *  allowed_mentions, Discord pings only what that field allows (its default
+ *  of every mention type applies only when the field is left out), so
+ *  `repliedUser: false` alone would keep every mention in a reply silent.
+ *  Roles and @everyone stay unparsed in a reply, as they were. */
+function replyAllowedMentions(): MessageMentionOptions {
+  return { repliedUser: false, parse: ['users'] }
+}
 
 export class DiscordConnector {
   private client: Client
@@ -1226,7 +1236,7 @@ export class DiscordConnector {
         const sent = await channel.send({
           content,
           reply: { messageReference: replyToMessageId },
-          allowedMentions: { repliedUser: false },
+          allowedMentions: replyAllowedMentions(),
         })
         return sent.id
       } catch (error: any) {
@@ -1278,7 +1288,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
-          options.allowedMentions = { repliedUser: false }
+          options.allowedMentions = replyAllowedMentions()
           const sent = await channel.send(options)
           logger.debug({ channelId, attachmentName: attachment.name, replyTo: replyToMessageId }, 'Sent message with attachment')
           return [sent.id]
@@ -1341,7 +1351,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
-          options.allowedMentions = { repliedUser: false }
+          options.allowedMentions = replyAllowedMentions()
           const sent = await channel.send(options)
           logger.debug({ channelId, filename, replyTo: replyToMessageId }, 'Sent image attachment')
           return [sent.id]
@@ -1402,7 +1412,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
-          options.allowedMentions = { repliedUser: false }
+          options.allowedMentions = replyAllowedMentions()
           const sent = await channel.send(options)
           logger.debug({ channelId, filename, size: fileBuffer.length, replyTo: replyToMessageId }, 'Sent file attachment')
           return [sent.id]
