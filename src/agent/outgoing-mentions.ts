@@ -30,8 +30,14 @@
  *   can't be pinged, so its `<@Name>` form is written as `@Name` too.
  * - A `<@name>` the conversation doesn't hold, which goes on to the
  *   connector's lookup, as before.
- * - Code spans and code blocks, where Discord shows a mention raw. An
- *   unclosed fence counts as code to the end of the text.
+ * - A mention by id: `<@` and the 17 to 20 digits of a Discord id, even when
+ *   someone in the conversation is shown by that number.
+ * - Code blocks and inline code, where Discord shows a mention raw
+ *   (`codeRanges`, discord-markdown.ts): a block runs from ``` to the next
+ *   ```, or to the end of the text if nothing closes it, and an inline span
+ *   ends at the next run of as many backticks as opened it. Text that begins
+ *   inside a block or span carried open from an earlier message (`carry`) is
+ *   code up to its closer.
  * - `@everyone` and `@here`.
  * - Reply tags: `<reply:@Name>`, and the context's `(replying to @Name)`. A
  *   `<@Name>` in one, as a `<@{name}>` template writes it, is read like any
@@ -54,6 +60,7 @@
  */
 
 import { displayNameClasses } from '../discord/member-names.js'
+import { codeRanges, type MarkdownCarry } from '../utils/discord-markdown.js'
 
 export interface MentionAuthor {
   id: string
@@ -76,8 +83,8 @@ export interface MentionConfig {
 
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
-/** Code blocks and code spans, which are left alone. */
-const CODE = '```[\\s\\S]*?(?:```|$)|`[^`\\n]+`'
+/** A mention by id, which is left as written. */
+const DISCORD_ID = /^\d{17,20}$/
 /** Not inside the context's reply tag, `(replying to @Name)`. */
 const NOT_IN_REPLY_TAG = '(?<!\\(replying to)'
 /** What may come just before a mention. */
@@ -107,7 +114,12 @@ class Names extends Map<string, Holder> {
   }
 }
 
-export function mentionsToIds(text: string, authors: MentionAuthor[], config: MentionConfig): string {
+export function mentionsToIds(
+  text: string,
+  authors: MentionAuthor[],
+  config: MentionConfig,
+  carry: MarkdownCarry = [],
+): string {
   const classes = displayNameClasses(config)
   // An empty mention_format is unset, as the context reads it.
   const template = config.mention_format || undefined
@@ -140,7 +152,7 @@ export function mentionsToIds(text: string, authors: MentionAuthor[], config: Me
   const anyName = alternatives([...bracketedNames.spellings, ...otherNames.spellings, ...usernames.spellings])
   if (!anyName) return text
 
-  const forms = [`(?<code>${CODE})`, `<@(?<bracketed>${anyName})>`]
+  const forms = [`<@(?<bracketed>${anyName})>`]
   const format = template ?? '@{name}'
   const at = format.indexOf('{name}')
   const prefix = at < 0 ? '' : format.slice(0, at)
@@ -151,10 +163,13 @@ export function mentionsToIds(text: string, authors: MentionAuthor[], config: Me
     forms.push(`${NOT_IN_REPLY_TAG}${LEAD}${escapeRegExp(prefix)}(?<shown>${otherForm})${end}`)
   }
 
+  const code = codeRanges(text, carry)
   return text.replace(new RegExp(forms.join('|'), 'giu'), (match: string, ...rest: unknown[]) => {
     const groups = rest[rest.length - 1] as Record<string, string | undefined>
-    if (groups.code !== undefined) return match
+    const offset = rest[rest.length - 3] as number
+    if (code.some(([start, end]) => offset >= start && offset < end)) return match
     if (groups.bracketed !== undefined) {
+      if (DISCORD_ID.test(groups.bracketed)) return match
       const key = groups.bracketed.toLowerCase()
       const names = [bracketedNames, otherNames, usernames].find((n) => n.has(key))
       if (!names) return match

@@ -36,6 +36,7 @@ function replaceMentions(botUserId?: string): ReplaceMentions {
 
 const message = (id: string, username: string, displayName: string, extra: Record<string, unknown> = {}) => ({
   author: { id, username, displayName, bot: false },
+  content: 'hi',
   ...extra,
 })
 
@@ -54,7 +55,7 @@ describe('AgentLoop.replaceMentions', () => {
 
   it("leaves out the bot's own messages, which the context shows by its config name", async () => {
     const bot = { id: '999', username: 'sam_bot', displayName: 'Sam', bot: true }
-    const messages = [{ author: bot }, message('111', 'sam_h4ndle', 'Sam')]
+    const messages = [{ author: bot, content: 'hi' }, message('111', 'sam_h4ndle', 'Sam')]
     expect(await replaceMentions('999')('@Sam', messages, { use_display_names_humans: true })).toBe('<@111>')
     // Without its own id, the loop can't tell, and the name reads as shared.
     expect(await replaceMentions()('@Sam', messages, { use_display_names_humans: true })).toBe('@Sam')
@@ -63,7 +64,7 @@ describe('AgentLoop.replaceMentions', () => {
   it("keeps another bot's messages, so its <@Name> goes to its id", async () => {
     const self = { id: '999', username: 'sam_bot', displayName: 'Sam', bot: true }
     const helper = { id: '333', username: 'helperbot', displayName: 'Helper', bot: true }
-    const messages = [{ author: self }, { author: helper }]
+    const messages = [{ author: self, content: 'hi' }, { author: helper, content: 'hi' }]
     expect(await replaceMentions('999')('<@Helper> <@helperbot>', messages, {})).toBe('<@333> <@333>')
   })
 
@@ -75,7 +76,35 @@ describe('AgentLoop.replaceMentions', () => {
   })
 
   it('leaves out a message with no author', async () => {
-    const messages = [{ author: null }, message('111', 'jack_h4ndle', 'Jack')]
+    const messages = [{ author: null, content: 'hi' }, message('111', 'jack_h4ndle', 'Jack')]
     expect(await replaceMentions()('<@jack_h4ndle>', messages, {})).toBe('<@111>')
+  })
+
+  it("leaves out messages the context hides, so a name only they carry isn't shared", async () => {
+    const messages = [message('111', 'jack_one', 'Jack'), message('112', 'jack_two', 'Jack', { content: '.note to self' })]
+    const humans = { use_display_names_humans: true }
+    expect(await replaceMentions()('@Jack', messages, humans)).toBe('<@111>')
+    // When the context shows dot messages, the second Jack is in the conversation too.
+    expect(await replaceMentions()('@Jack', messages, { ...humans, ignore_dotted_messages: false })).toBe('@Jack')
+  })
+})
+
+describe('AgentLoop.replaceMentionsInSegments', () => {
+  type Segment = { prefix: string; visible: string }
+  type InSegments = (segments: Segment[], messages: unknown[], config: object, carry: unknown[]) => Promise<void>
+
+  it('reads each segment from the code block the segment before it left open, as they are sent', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'replace-mentions-test-'))
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+    const unused = {} as never
+    const loop = new AgentLoop('bot', unused, unused, unused, unused, unused, unused, dir)
+    const inSegments = (loop as unknown as { replaceMentionsInSegments: InSegments }).replaceMentionsInSegments.bind(loop)
+    const segments: Segment[] = [
+      { prefix: '', visible: 'see:\n```\n@Jack' },
+      { prefix: '', visible: '' },
+      { prefix: '', visible: '```\nThanks @Jack' },
+    ]
+    await inSegments(segments, [message('111', 'jack_h4ndle', 'Jack')], { use_display_names_humans: true }, [])
+    expect(segments.map((s) => s.visible)).toEqual(['see:\n```\n@Jack', '', '```\nThanks <@111>'])
   })
 })

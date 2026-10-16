@@ -20,6 +20,7 @@ import { describe, it, expect } from 'vitest'
 import {
   splitPreservingMarkdown,
   scanMarkdown,
+  codeRanges,
   exclusiveOnly,
   closeMarks,
   reopenMarks,
@@ -1310,5 +1311,23 @@ describe('splitPreservingMarkdown — defect 2: bridge/body delimiter-run merge 
     const r = splitPreservingMarkdown(text, 2000)
     expect(reconstruct(r.chunks)).toBe(text)
     assertNoSeamMerge(r.chunks)
+  })
+})
+
+describe('codeRanges', () => {
+  const codeIn = (text: string, start: MarkdownCarry = []): string[] =>
+    codeRanges(text, start).map(([from, to]) => text.slice(from, to))
+
+  it('finds code blocks and inline spans, a span ending only at a run as long as its opener', () => {
+    expect(codeIn('a `x` b ``c ` @J`` d ```\nk\n``` e')).toEqual(['`x`', '``c ` @J``', '```\nk\n```'])
+  })
+
+  it('runs a block nothing closes to the end of the text, and leaves a lone backtick as text', () => {
+    expect(codeIn('a ` b ```\nc')).toEqual(['```\nc'])
+  })
+
+  it('reads text that begins inside a carried block or span after its reopener', () => {
+    expect(codeIn('k\n```\nThanks', [{ kind: 'fence', opener: '```py', closer: '```' }])).toEqual(['k\n```'])
+    expect(codeIn('x` y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`'])
   })
 })

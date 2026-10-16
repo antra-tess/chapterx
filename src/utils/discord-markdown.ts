@@ -532,6 +532,30 @@ export function scanMarkdown(text: string, start: MarkdownCarry = []): MarkdownC
   return parse(text, start).endStack
 }
 
+/** A code block from ``` to the next ``` (or the end), or an inline span
+ *  closed by a run of as many backticks as opened it. */
+const CODE = /```[\s\S]*?(?:```|$)|(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g
+
+/**
+ * Where `text` is code, where Discord shows a mention raw, as `[start, end)`
+ * ranges, for reading the mentions a message sends. Unlike the splitter's
+ * line rules above, a code block opens at ``` anywhere and ends at the next
+ * ```, or at the end of the text if nothing closes it. An inline span ends
+ * at the next run of as many backticks as opened it, as in the splitter.
+ * Text that begins inside a block or span carried open from an earlier
+ * message (`start`, as `scanMarkdown` reports it) is read after its reopener,
+ * as the splitter sends it.
+ */
+export function codeRanges(text: string, start: MarkdownCarry = []): Array<[number, number]> {
+  const reopener = reopenMarks(exclusiveOnly(start))
+  const ranges: Array<[number, number]> = []
+  for (const match of (reopener + text).matchAll(CODE)) {
+    const end = match.index + match[0].length - reopener.length
+    if (end > 0) ranges.push([Math.max(match.index - reopener.length, 0), end])
+  }
+  return ranges
+}
+
 // ---------------------------------------------------------------------------
 // Splitting
 // ---------------------------------------------------------------------------

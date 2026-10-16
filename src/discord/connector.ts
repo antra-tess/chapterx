@@ -19,7 +19,7 @@ import {
 } from '../types.js'
 import { logger } from '../utils/logger.js'
 import { retryDiscord } from '../utils/retry.js'
-import { splitPreservingMarkdown, type MarkdownCarry } from '../utils/discord-markdown.js'
+import { codeRanges, splitPreservingMarkdown, type MarkdownCarry } from '../utils/discord-markdown.js'
 import {
   fetchChannelMessages,
   type FetchDeps,
@@ -1018,11 +1018,18 @@ export class DiscordConnector {
   /**
    * Resolve <@username> mentions to <@USER_ID> format for Discord
    * This reverses the conversion done in convertMessage
+   *
+   * A mention in code is left as written, since Discord shows it raw there.
+   * `startCarry` is a code block or span the text begins inside, carried open
+   * from an earlier message, as the markdown splitter sends it.
    */
-  private async resolveMentions(content: string, channelId: string): Promise<string> {
-    // Find all <@username> patterns (not already numeric IDs)
+  private async resolveMentions(content: string, channelId: string, startCarry: MarkdownCarry = []): Promise<string> {
+    // Find all <@username> patterns (not already numeric IDs), outside code
     const mentionPattern = /<@([^>0-9][^>]*)>/g
-    const matches = [...content.matchAll(mentionPattern)]
+    const code = codeRanges(content, startCarry)
+    const matches = [...content.matchAll(mentionPattern)].filter(
+      (match) => !code.some(([start, end]) => match.index >= start && match.index < end),
+    )
     
     if (matches.length === 0) {
       return content
@@ -1034,7 +1041,7 @@ export class DiscordConnector {
       return content
     }
 
-    let result = content
+    const resolved = new Map<number, string>()
     for (const match of matches) {
       const username = match[1]
       if (!username) continue
@@ -1064,7 +1071,7 @@ export class DiscordConnector {
           
           const member = sortedMatches[0]
           if (member) {
-            result = result.replace(match[0], `<@${member.user.id}>`)
+            resolved.set(match.index, `<@${member.user.id}>`)
             logger.debug({ 
               username, 
               userId: member.user.id, 
@@ -1078,7 +1085,17 @@ export class DiscordConnector {
       }
     }
 
-    return result
+    // Each mention is replaced where it was found, so the same text in code
+    // stays as written.
+    let result = ''
+    let from = 0
+    for (const match of matches) {
+      const to = resolved.get(match.index)
+      if (to === undefined) continue
+      result += content.slice(from, match.index) + to
+      from = match.index + match[0].length
+    }
+    return result + content.slice(from)
   }
 
   /**
@@ -1166,7 +1183,7 @@ export class DiscordConnector {
         throw new DiscordError(`Channel ${channelId} not found`)
       }
 
-      let resolvedContent = await this.resolveMentions(content, channelId)
+      let resolvedContent = await this.resolveMentions(content, channelId, startCarry)
       if (channel.guild) {
         resolvedContent = this.resolveEmojis(resolvedContent, channel.guild)
       }

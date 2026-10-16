@@ -72,6 +72,24 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('```\n@Jack\n``` then @Jack', [jack], byDisplayName)).toBe('```\n@Jack\n``` then <@111>')
   })
 
+  it('ends a code span only at a run of backticks as long as the one that opened it', () => {
+    expect(mentionsToIds('``a ` @Jack` <@Jack> b`` @Jack', [jack], byDisplayName)).toBe('``a ` @Jack` <@Jack> b`` <@111>')
+  })
+
+  it('reads text that begins inside a code block carried open from an earlier message as code up to its closer', () => {
+    const fence = [{ kind: 'fence' as const, opener: '```', closer: '```' }]
+    expect(mentionsToIds('@Jack, in code\n```\nThanks @Jack', [jack], byDisplayName, fence)).toBe(
+      '@Jack, in code\n```\nThanks <@111>',
+    )
+  })
+
+  it('leaves a mention by id as written, even when someone is shown by that number', () => {
+    const numbered: MentionAuthor = { id: '222222222222222222', username: 'num', displayName: '111111111111111111', bot: false }
+    expect(mentionsToIds('<@111111111111111111> <@num>', [numbered], byDisplayName)).toBe(
+      '<@111111111111111111> <@222222222222222222>',
+    )
+  })
+
   it('leaves a display name two people share as written, and keeps <@Name> for it from pinging anyone', () => {
     const otherJack: MentionAuthor = { id: '444', username: 'jack2', displayName: 'Jack', bot: false }
     expect(mentionsToIds('@Jack?', [jack, otherJack], byDisplayName)).toBe('@Jack?')

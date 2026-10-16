@@ -15,7 +15,8 @@ import { logger, withActivationLogging } from '../utils/logger.js'
 import { displayNameClasses } from '../discord/member-names.js'
 import { mentionsToIds } from './outgoing-mentions.js'
 import { sleep } from '../utils/retry.js'
-import { exclusiveOnly, type MarkdownCarry } from '../utils/discord-markdown.js'
+import { exclusiveOnly, scanMarkdown, type MarkdownCarry } from '../utils/discord-markdown.js'
+import { filterDotMessages } from '../context/stages/message-filtering.js'
 import { 
   withTrace, 
   TraceCollector, 
@@ -944,16 +945,42 @@ export class AgentLoop {
     return null
   }
 
-  private async replaceMentions(text: string, messages: any[], config: BotConfig): Promise<string> {
+  private async replaceMentions(
+    text: string,
+    messages: any[],
+    config: BotConfig,
+    carry: MarkdownCarry = [],
+  ): Promise<string> {
     // Mentions of the people in the conversation become <@USER_ID>, in the
-    // forms the context shows their names (outgoing-mentions.ts). The bot's
-    // own messages are left out: the context labels them config.name, so
-    // their author's Discord names would otherwise make a person's name look
-    // shared. config.name itself is held by no one there.
-    const authors = messages
+    // forms the context shows their names (outgoing-mentions.ts). Messages
+    // the context hides (dot commands and the like) are left out, as the
+    // context builder leaves them out, and so are the bot's own: the context
+    // labels them config.name, so their author's Discord names would
+    // otherwise make a person's name look shared. config.name itself is held
+    // by no one there. `carry` is the code block or span the text begins
+    // inside, carried open from an earlier send.
+    const shown = filterDotMessages(messages, config.steer_visible === true, config.ignore_dotted_messages !== false)
+    const authors = shown
       .filter((msg) => msg.author && msg.author.id !== this.botUserId)
       .map((msg) => ({ ...msg.author, webhook: Boolean(msg.webhookId) }))
-    return mentionsToIds(text, authors, config)
+    return mentionsToIds(text, authors, config, carry)
+  }
+
+  /**
+   * Mentions become <@USER_ID> in each segment, each read from the markdown
+   * carry it starts in, as sendSegments sends them.
+   */
+  private async replaceMentionsInSegments(
+    segments: ContentSegment[],
+    messages: any[],
+    config: BotConfig,
+    carry: MarkdownCarry,
+  ): Promise<void> {
+    for (const segment of segments) {
+      if (!segment.visible) continue
+      segment.visible = await this.replaceMentions(segment.visible, messages, config, carry)
+      carry = exclusiveOnly(scanMarkdown(segment.visible, carry))
+    }
   }
 
   /**
@@ -2581,9 +2608,7 @@ export class AgentLoop {
               }
 
               // Mentions become <@USER_ID>, as in the final reply
-              for (const segment of segments) {
-                segment.visible = await this.replaceMentions(segment.visible, discordMessages, config)
-              }
+              await this.replaceMentionsInSegments(segments, discordMessages, config, markdownCarry)
             }
 
             const sendResult = await this.sendSegments(
@@ -2785,9 +2810,9 @@ export class AgentLoop {
         }
       }
 
-      // Replace mentions
+      // Replace mentions, from the markdown carry the remaining text is sent in
       if (discordMessages) {
-        displayText = await this.replaceMentions(displayText, discordMessages, config)
+        displayText = await this.replaceMentions(displayText, discordMessages, config, markdownCarry)
       }
 
       // Send remaining text to Discord (text not already sent via onPreToolContent)
@@ -3202,9 +3227,7 @@ export class AgentLoop {
 
       // Mentions become <@USER_ID>, as in the final reply
       if (discordMessages) {
-        for (const segment of segments) {
-          segment.visible = await this.replaceMentions(segment.visible, discordMessages, config)
-        }
+        await this.replaceMentionsInSegments(segments, discordMessages, config, markdownCarry)
       }
       
       if (segments.length > 0) {
@@ -3468,9 +3491,7 @@ export class AgentLoop {
     
     // 5. Replace <@username> with <@USER_ID> for Discord mentions in segments
     if (discordMessages) {
-      for (const segment of segments) {
-        segment.visible = await this.replaceMentions(segment.visible, discordMessages, config)
-      }
+      await this.replaceMentionsInSegments(segments, discordMessages, config, markdownCarry)
     }
     
     // 6. Strip <reply:@username> prefix from first segment if present
