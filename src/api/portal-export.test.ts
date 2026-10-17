@@ -64,6 +64,7 @@ async function startOverHistory(all: ReturnType<typeof msg>[]) {
         .sort((a, b) => (BigInt(b.nativeId) > BigInt(a.nativeId) ? 1 : -1))
         .slice(0, limit),
     })),
+    call: vi.fn(async () => ({ messages: [] })), // list_pins: the channel has no pins
     cache: { getChannel: () => undefined, allChannels: () => [], allGuilds: () => [], persona: { displayName: 'p' } },
   }
   server = new ApiServer({ port: 0, bearerToken: 'secret' }, connector)
@@ -76,6 +77,7 @@ async function startOverHistory(all: ReturnType<typeof msg>[]) {
       body: JSON.stringify(body),
     })
   post.get = (path: string) => fetch(`http://127.0.0.1:${port}${path}`, { headers: { Authorization: 'Bearer secret' } })
+  post.connector = connector
   return post
 }
 
@@ -100,6 +102,19 @@ describe('POST /api/messages/export on the portal backend', () => {
     expect(byId('105').referencedMessageId).toBe('101')
     expect(byId('103').referencedMessageId).toBeUndefined()
     expect(JSON.stringify(body)).not.toContain('rm_')
+  })
+
+  it('gives a reply to a deleted message no reply target', async () => {
+    // 105 replies to 101, which the connector has seen; then 101 is deleted.
+    const all = [100, 101, 102, 103, 104, 105, 106].map((n) => msg(n, n === 105 ? 101 : undefined))
+    const post = await startOverHistory(all)
+    await post({ last: url(105), first: url(102) })
+    all.splice(1, 1)
+    ;(post.connector as any).onEvent({ type: 'message_delete', channelId: CHANNEL, messageId: `rm_${CHANNEL}_101` })
+
+    const body = await (await post({ last: url(105), first: url(102) })).json()
+
+    expect(body.messages.find((m: { id: string }) => m.id === '105').referencedMessageId).toBeUndefined()
   })
 
   it('gives a persona-authored message the persona\'s id as its author\'s id, since a persona has no Discord account', async () => {
