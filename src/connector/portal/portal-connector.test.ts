@@ -307,6 +307,7 @@ describe('PortalConnector pins', () => {
     replies[0]!({ messages: [pinned(40, '.sleep')] })
     await new Promise((r) => setTimeout(r, 0))
     expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1)
+    expect(h.client.call).toHaveBeenCalledTimes(1) // the second message only waited for the load
   })
 })
 
