@@ -546,7 +546,9 @@ export function scanMarkdown(text: string, start: MarkdownCarry = []): MarkdownC
  * cut at a newline comes after the chunk's first content, and the text's last
  * content stays with the whitespace and closers after it: a paragraph break,
  * trailing whitespace or a code block's fence lines aren't sent on their own.
- * Whitespace and markup that fill nearly a chunk's length can still leave one.
+ * Whitespace and markup that fill nearly a chunk's length can still leave one,
+ * and so can pulling a cut back to keep a bridge's marker from fusing with the
+ * same character beside it, when the chunk's content sits among such characters.
  */
 export function splitPreservingMarkdown(
   text: string,
