@@ -59,6 +59,12 @@ describe('inboundFromPortal', () => {
     expect(m.reference).toBeUndefined()
   })
 
+  it('carries the message\'s Discord snowflake beside the relay id, for the loop\'s answered-context mark', () => {
+    const m = inboundFromPortal(pm(), BOT)
+    expect(m.id).toBe('rm_chan_100')
+    expect(m.nativeId).toBe(pm().nativeId)
+  })
+
   it('mentions.has() is true for a persona role-mention (→ bot mentioned)', () => {
     const m = inboundFromPortal(pm({ mentions: { personas: [BOT], roles: [], users: [], everyone: false } }), BOT)
     expect(m.mentions.has(BOT)).toBe(true)
