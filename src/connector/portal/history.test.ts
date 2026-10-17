@@ -194,7 +194,7 @@ describe('fetchPortalHistory', () => {
     expect(calls.slice(1)).toEqual(['500', '300'])
   })
 
-  it('skips .history when authorizedRoles set but roles unverifiable (P2 deps return null)', async () => {
+  it('skips .history when authorizedRoles set but roles unverifiable (deps return null)', async () => {
     const deps = makeDeps({ c: [msg('c', '100'), msg('c', '200', '.history'), msg('c', '300')] })
     const r = await fetchPortalHistory('c', undefined, undefined, 50, ['admin'], false, deps)
     // unauthorized/unverifiable → .history ignored, all kept

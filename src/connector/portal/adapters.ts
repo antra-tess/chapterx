@@ -84,7 +84,9 @@ export function inboundFromPortal(
         some: (fn: (r: unknown) => boolean) => pm.reactions.some((r) => fn({ emoji: { name: emojiName(r.emoji) } })),
       },
     },
-    // member.roles unavailable inbound (P1); role-gated user features degrade.
+    // A portal message carries no author roles (portal-protocol's MessageAuthor),
+    // so there's no `member`, and what reads the trigger's roles from it, such as
+    // the Soma check, sees none.
     member: undefined,
     _portal: pm,
   }

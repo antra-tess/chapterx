@@ -1,11 +1,20 @@
 /**
- * PortalConnector — IConnector backed by the shared portal-relay over a
- * websocket (portal-client), instead of an own discord.js gateway.
+ * PortalConnector: the IConnector backed by the shared portal relay over a
+ * WebSocket (portal-client), in place of the bot's own discord.js gateway. The
+ * bot connects as a persona, a webhook identity the relay speaks for.
  *
- * Phase 1 scope: connect as a persona, feed inbound events to the EventQueue,
- * send/edit/delete/react/typing. fetchContext is minimal (live history only),
- * pins + role auth + attachment upload land in later phases. Degradations are
- * marked `P1 degrade` / `P-N` below.
+ * It feeds inbound events to the EventQueue through the adapter (adapters.ts);
+ * sends, edits, deletes, reacts, uploads attachments and shows typing; builds
+ * context with the .history engine (history.ts, context.ts); and reads pins
+ * (list_pins) and member roles (list_members).
+ *
+ * Where the relay offers less than a gateway, the connector does this instead:
+ * - a persona can't add native reactions, so its reactions are pseudo-reactions
+ *   the relay records and humans don't see;
+ * - nothing can pin a message, so pinMessage throws;
+ * - nothing fetches a message by id, so it's looked up in the channel's history;
+ * - nothing looks a member up by id, so roles come from list_members, which
+ *   returns at most 1,000 members.
  */
 import { PortalClient, fileFromBytes } from '@animalabs/portal-client'
 import type { PortalMessage, PortalEvent } from '@animalabs/portal-protocol'
@@ -316,8 +325,8 @@ export class PortalConnector implements IConnector {
   }
 
   async addReaction(_channelId: string, messageId: string, emoji: string): Promise<void> {
-    // Personas can't add native Discord reactions; portal records a pseudo
-    // reaction (structured, not shown to humans). Visible feedback is P4.
+    // Personas can't add native Discord reactions; the relay records a pseudo
+    // reaction, which humans don't see.
     await this.client.react(messageId, emoji, false)
   }
 
