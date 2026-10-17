@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { PortalMessage, PortalEvent } from '@animalabs/portal-protocol'
-import { inboundFromPortal, queueEventFromPortal, authorOfMessage, containerOf, type AdapterCtx } from './adapters.js'
+import { inboundFromPortal, queueEventFromPortal, authorOfMessage, containerOf, emojiName, type AdapterCtx } from './adapters.js'
 
 const BOT = 'persona_bot'
 
@@ -167,9 +167,9 @@ describe('queueEventFromPortal', () => {
     expect(ev.channelId).toBe('thr')
   })
 
-  it('propagates relay address reasons onto inbound._address (reply-ping signal)', () => {
-    // A reply-ping to a webhook persona never lands in mentions, so the loop's
-    // portal reply-activation depends on this 'reply' reason being carried through.
+  it('a reply the relay addresses to the persona puts the persona in mentions', () => {
+    // A webhook persona can't receive a native reply-ping, so the relay's address
+    // is what makes a reply wake the bot through the loop's mention path.
     const e: PortalEvent = {
       type: 'message_create',
       message: pm({ replyToId: 'rm_chan_50' }),
@@ -177,14 +177,46 @@ describe('queueEventFromPortal', () => {
       reasons: ['reply'],
     }
     const ev = queueEventFromPortal(e, ctx)!
+    expect(ev.data.mentions.has(BOT)).toBe(true)
     expect(ev.data._address).toEqual({ addressedToMe: true, reasons: ['reply'] })
-    expect(ev.data._address.reasons.includes('reply')).toBe(true)
   })
 
-  it('ambient (unaddressed) message carries empty reasons', () => {
+  it('an ambient message leaves the persona out of mentions', () => {
     const e: PortalEvent = { type: 'message_create', message: pm(), addressedToMe: false, reasons: ['subscription'] }
     const ev = queueEventFromPortal(e, ctx)!
-    expect(ev.data._address.addressedToMe).toBe(false)
-    expect(ev.data._address.reasons.includes('reply')).toBe(false)
+    expect(ev.data.mentions.has(BOT)).toBe(false)
+    expect(ev.data._address).toEqual({ addressedToMe: false, reasons: ['subscription'] })
+  })
+
+  it('an edit the relay addresses to the persona carries the address too', () => {
+    const e: PortalEvent = {
+      type: 'message_update',
+      message: pm({ replyToId: 'rm_chan_50', editedAt: '2026-06-14T00:01:00.000Z' }),
+      addressedToMe: true,
+      reasons: ['reply'],
+    }
+    const ev = queueEventFromPortal(e, ctx)!
+    expect(ev.data.new.mentions.has(BOT)).toBe(true)
+    expect(ev.data.new._address).toEqual({ addressedToMe: true, reasons: ['reply'] })
+  })
+
+  it('a custom emoji reaches the loop by its name, as discord.js gives it', () => {
+    const e: PortalEvent = {
+      type: 'reaction_add',
+      channelId: 'chan',
+      messageId: 'rm_chan_100',
+      reaction: { emoji: 'blobcat:112233445566778899', count: 1, kind: 'native', by: [{ kind: 'user', id: 'u7', name: 'bob' }] },
+    }
+    expect(queueEventFromPortal(e, ctx)!.data.emoji).toBe('blobcat')
+    const m = inboundFromPortal(pm({ reactions: [{ emoji: 'eye_in_speech_bubble:42', count: 1, kind: 'native', by: [] }] }), BOT)
+    expect(m.reactions!.cache.some((r: any) => r.emoji?.name === 'eye_in_speech_bubble')).toBe(true)
+  })
+})
+
+describe('emojiName', () => {
+  it('drops a custom emoji\'s id and leaves a unicode emoji as it is', () => {
+    expect(emojiName('blobcat:112233445566778899')).toBe('blobcat')
+    expect(emojiName('✅')).toBe('✅')
+    expect(emojiName('👁️‍🗨️')).toBe('👁️‍🗨️')
   })
 })

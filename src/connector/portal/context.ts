@@ -43,7 +43,6 @@ function stripPortalRolePrefix(text: string): string {
 export function portalMessageToDiscordMessage(
   pm: PortalMessage,
   messageMap: Map<string, PortalMessage>,
-  _botPersonaId: string,
 ): DiscordMessage {
   const a = authorOfMessage(pm)
   let content = stripPortalRolePrefix(pm.cleanContent || pm.content)
@@ -166,7 +165,7 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
   // ── Convert + filter ──
   const messageMap = new Map(messages.map((m) => [m.id, m]))
   const discordMessages = messages
-    .map((m) => portalMessageToDiscordMessage(m, messageMap, deps.botPersonaId))
+    .map((m) => portalMessageToDiscordMessage(m, messageMap))
     .filter((m) => m.content || m.attachments.length > 0)
 
   // ── Stage 4: attachments (newest-first so the image cap keeps recent ones) ──

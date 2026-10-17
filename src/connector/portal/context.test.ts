@@ -22,7 +22,7 @@ const noMap = new Map<string, PortalMessage>()
 
 describe('portalMessageToDiscordMessage — strip portal- role prefix', () => {
   it('strips the portal- prefix from a resolved role mention', () => {
-    const d = portalMessageToDiscordMessage(pm({ cleanContent: '@portal-glm52 hey' }), noMap, 'bot')
+    const d = portalMessageToDiscordMessage(pm({ cleanContent: '@portal-glm52 hey' }), noMap)
     expect(d.content).toBe('@glm52 hey')
   })
 
@@ -30,18 +30,17 @@ describe('portalMessageToDiscordMessage — strip portal- role prefix', () => {
     const d = portalMessageToDiscordMessage(
       pm({ cleanContent: 'ping @portal-nemotron-3-ultra and @portal-Fugu, cc @alice' }),
       noMap,
-      'bot',
     )
     expect(d.content).toBe('ping @nemotron-3-ultra and @Fugu, cc @alice')
   })
 
   it('leaves ordinary (non-portal) mentions untouched', () => {
-    const d = portalMessageToDiscordMessage(pm({ cleanContent: 'hey @alice and @bob' }), noMap, 'bot')
+    const d = portalMessageToDiscordMessage(pm({ cleanContent: 'hey @alice and @bob' }), noMap)
     expect(d.content).toBe('hey @alice and @bob')
   })
 
   it('is a no-op on raw <@&id> content (no cleanContent)', () => {
-    const d = portalMessageToDiscordMessage(pm({ cleanContent: '', content: '<@&123> hi' }), noMap, 'bot')
+    const d = portalMessageToDiscordMessage(pm({ cleanContent: '', content: '<@&123> hi' }), noMap)
     expect(d.content).toBe('<@&123> hi')
   })
 })
