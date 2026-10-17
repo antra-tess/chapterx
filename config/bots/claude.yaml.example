@@ -2,22 +2,20 @@
 # Rename to claude.yaml (or your bot name)
 
 name: Claude
-innerName: Claude
 
 # Model configuration
-mode: prefill  # or 'chat'
+mode: prefill  # or 'chat' or 'base-model'
 # prefill_thinking: true  # Prefill with <thinking> tag for reasoning
 # debug_thinking: true    # Send thinking as dot-prefixed debug message  
 # preserve_thinking_context: true  # Keep thinking traces in context (for Opus 4.5)
 continuation_model: claude-3-5-sonnet-20241022
 temperature: 1.0
 max_tokens: 4096
-top_p: 1.0
+# top_p: 1.0  # Optional: sent only when set
 
 # Context configuration
 recency_window_messages: 400  # Optional: Max messages to include
 recency_window_characters: 100000  # Optional: Max characters to include
-# When both specified, whichever limit is reached first is used
 hard_max_characters: 500000  # Hard limit never exceeded (prevents API errors), defaults to 500k (~140k tokens)
 rolling_threshold: 50  # Roll context after this many new messages
 recent_participant_count: 10  # Number of recent participants for stop sequences
@@ -57,15 +55,12 @@ stop_sequences: []
 
 # Retry configuration
 llm_retries: 3
-discord_backoff_max: 32000  # Max backoff in ms for Discord API
 
 # Optional system prompt
 # system_prompt: "You are a helpful assistant."
 
 # Misc
 reply_on_random: 500  # Random reply: 1/N chance per message (default 500 = 0.2% chance)
-reply_on_name: false  # Reply when name is mentioned (not yet implemented)
-max_queued_replies: 1  # Max queued replies before dropping
 
 # Soma integration (credit system) - optional
 # When enabled, users must have sufficient ichor (credits) to trigger the bot
@@ -73,10 +68,3 @@ max_queued_replies: 1  # Max queued replies before dropping
 #   enabled: true
 #   url: "http://localhost:3100/api/v1"
 #   # token: "..."  # Optional: uses SOMA_TOKEN env var if not set
-
-# Membrane integration (experimental)
-# When enabled, uses the membrane library for LLM calls instead of built-in providers.
-# This provides unified handling of prefill transforms, caching, and provider routing.
-# Requires the membrane npm package to be installed.
-# use_membrane: true
-
