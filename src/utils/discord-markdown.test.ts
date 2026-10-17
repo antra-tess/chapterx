@@ -1151,6 +1151,28 @@ describe('splitPreservingMarkdown — edge cases', () => {
     assertAllWithinLimit(r.chunks, 1800)
   })
 
+  it('keeps a closer and the whitespace after it with the text\'s last content', () => {
+    // Bold or a code block that ends with the text's content, then a paragraph
+    // break: the last chunk takes some of that content, not just the closer
+    // and the break, which would be an empty bold or an empty code block.
+    for (const text of ['**' + 'a'.repeat(1796) + '**\n\n', '```\n' + 'a'.repeat(1792) + '\n```\n\n']) {
+      const r = splitPreservingMarkdown(text, 1800)
+      for (const c of r.chunks) expect(c.text).toContain('a')
+      expect(reconstruct(r.chunks)).toBe(text)
+      assertAllWithinLimit(r.chunks, 1800)
+    }
+  })
+
+  it('splits a text whose only content is its first character, then more whitespace than a chunk holds', () => {
+    // Nothing can keep the trailing whitespace with content here; the split
+    // still ends, with the content in the first chunk.
+    const text = 'z' + '\n'.repeat(2000)
+    const r = splitPreservingMarkdown(text, 1800)
+    expect(r.chunks[0]!.text.startsWith('z')).toBe(true)
+    expect(reconstruct(r.chunks)).toBe(text)
+    assertAllWithinLimit(r.chunks, 1800)
+  })
+
   it('still cuts at the paragraph break when the chunk before it holds text', () => {
     const text = 'x'.repeat(900) + '\n\n' + 'y'.repeat(1800)
     const r = splitPreservingMarkdown(text, 1800)
