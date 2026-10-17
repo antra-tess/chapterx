@@ -154,7 +154,9 @@ describe('the sleep gate on the portal backend, with the real connector', () => 
       }
       await connector.start()
 
-      handlers.get('event')!({ type: 'message_create', message: pm(), addressedToMe: true, reasons: ['role_mention'] })
+      // The message mentions the persona itself, so it would wake the bot.
+      const mention = pm({ mentions: { personas: [PERSONA], roles: [], users: [], everyone: false } })
+      handlers.get('event')!({ type: 'message_create', message: mention, addressedToMe: true, reasons: ['role_mention'] })
       await vi.waitFor(() => expect(queue.size()).toBe(1))
 
       const loop = Object.create(AgentLoop.prototype)
