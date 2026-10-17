@@ -150,6 +150,7 @@ describe('the sleep gate on the portal backend, with the real connector', () => 
         on: (name: string, fn: (arg: unknown) => void) => handlers.set(name, fn),
         connect: async () => undefined,
         call: vi.fn(async () => ({ messages: [sleepPin] })),
+        fetchHistory: vi.fn(async () => ({ messages: [] })),
         cache: { persona: { displayName: 'p' }, getChannel: () => undefined },
       }
       await connector.start()
