@@ -876,10 +876,7 @@ export class AgentLoop {
       userId: triggeringUser.id,
       serverId: guildId,
       channelId: channelId,
-      // Portal personas have no Discord user id; key cost by the EMS bot name
-      // (this.botId) so admin cost commands (which resolve a portal role to the
-      // EMS name) target the same key. Account bots stay keyed by Discord user id.
-      botId: this.connector.isPortal() ? this.botId : (this.botUserId || ''),
+      botId: this.somaBotKey(),
       messageId: triggeringMessageId || '',
       triggerType: triggerReason as SomaTriggerType,
       userRoles: triggeringUser.roles || [],
@@ -987,6 +984,14 @@ export class AgentLoop {
   private findTriggeringMessageEvent(events: Event[]): (Event & { data: any }) | undefined {
     return events.find((event) => event.type === 'message' && !this.isSystemDiscordMessage(event.data))
       || events.find((event) => event.type === 'message')
+  }
+
+  /** The bot's key in Soma, for charging and for tracking its messages alike.
+   *  A portal persona has no Discord user id, so it's keyed by the EMS bot name
+   *  (this.botId), which admin cost commands resolve a portal role to; an
+   *  account bot is keyed by its Discord user id. */
+  private somaBotKey(): string {
+    return this.connector.isPortal() ? this.botId : (this.botUserId || '')
   }
 
   private isSystemDiscordMessage(message: any): boolean {
@@ -2286,7 +2291,7 @@ export class AgentLoop {
                 messageId,
                 channelId,
                 serverId: guildId,
-                botId: this.botUserId || '',
+                botId: this.somaBotKey(),
                 triggerUserId,
                 triggerMessageId: triggeringMessageId,
               })

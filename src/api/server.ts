@@ -8,6 +8,28 @@ import type { IConnector } from '../connector/types.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder } from '../context/builder.js'
 import { logger } from '../utils/logger.js'
+import type { DiscordMessage } from '../types.js'
+
+/**
+ * The API speaks Discord message ids: it takes them from Discord URLs and returns
+ * them. On the portal backend a fetched message's `id` is the relay's id and its
+ * snowflake is `nativeId`, so read each message by its snowflake, and a reply's
+ * target too when it's among the messages. On the Discord backend, where there's
+ * no `nativeId`, this changes nothing.
+ */
+export function withDiscordIds(messages: DiscordMessage[]): DiscordMessage[] {
+  const snowflakeOf = new Map(messages.map((m) => [m.id, m.nativeId ?? m.id]))
+  return messages.map((m) =>
+    m.nativeId === undefined
+      ? m
+      : {
+          ...m,
+          id: m.nativeId,
+          referencedMessage:
+            m.referencedMessage === undefined ? undefined : (snowflakeOf.get(m.referencedMessage) ?? m.referencedMessage),
+        },
+  )
+}
 
 export interface ApiConfig {
   port: number
@@ -446,7 +468,7 @@ export class ApiServer {
       throw new Error(`Failed to fetch messages: ${error.message}`)
     }
     
-    let messages = context.messages
+    let messages = withDiscordIds(context.messages)
     const imageCache = new Map(context.images.map(img => [img.url, img]))
     
     logger.debug({ 
@@ -560,7 +582,7 @@ export class ApiServer {
       throw new Error(`Failed to fetch messages: ${error.message}`)
     }
 
-    const messages = context.messages
+    const messages = withDiscordIds(context.messages)
     if (messages.length === 0) {
       throw new Error(`No messages found in channel ${channelId}`)
     }

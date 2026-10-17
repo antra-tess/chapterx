@@ -3,10 +3,11 @@
  * operating on PortalMessage instead of discord.js Message.
  *
  * The critical adaptation: discord.js uses `msg.id` for BOTH identity and
- * ordering (it's the snowflake). In portal those split — identity is the relay
- * id (`rm_<container>_<snowflake>`), ordering/boundaries are the Discord
- * snowflake (`pm.nativeId`). So all cursor/boundary math here uses the snowflake
- * (BigInt-compared), while message identity stays the relay id downstream.
+ * ordering (it's the snowflake). In portal those split: identity is the relay id
+ * (`pm.id`, opaque by portal-protocol's contract), and ordering and boundaries
+ * are the Discord snowflake (`pm.nativeId`). So all cursor/boundary math here
+ * uses the snowflake (BigInt-compared), while message identity stays the relay id
+ * downstream.
  *
  * The pure parsers (parseHistoryCommand / extract*FromUrl) are reused verbatim
  * from context-fetch.ts.
@@ -39,16 +40,6 @@ export interface PortalHistoryResult {
   messages: PortalMessage[]
   didClear: boolean
   originChannelId: string | null
-}
-
-/** Recover the Discord snowflake from a relay id (`rm_<container>_<snowflake>`)
- *  or pass through a raw snowflake. */
-export function snowflakeFromId(id: string): string {
-  if (id.startsWith('rm_')) {
-    const us = id.lastIndexOf('_')
-    if (us > 2) return id.slice(us + 1)
-  }
-  return id
 }
 
 function snowflakeLE(a: string, b: string): boolean {

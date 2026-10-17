@@ -226,6 +226,56 @@ describe('PortalConnector pins', () => {
   })
 })
 
+describe('PortalConnector message bookkeeping', () => {
+  let h: ReturnType<typeof makeHarness>
+  afterEach(() => h?.cleanup())
+
+  it('a reaction on the persona\'s own sent message carries the persona as its author', async () => {
+    h = makeHarness()
+    await h.connector.start()
+    const [id] = await h.connector.sendMessage(CH, 'hello')
+    const pushed: any[] = []
+    vi.spyOn((h.connector as any).queue, 'push').mockImplementation((e: any) => { pushed.push(e) })
+
+    h.client.emit('event', {
+      type: 'reaction_add',
+      channelId: CH,
+      messageId: id,
+      reaction: { emoji: '⏩', count: 1, kind: 'native', by: [{ kind: 'user', id: 'h1', name: 'h' }] },
+    })
+
+    expect(pushed[0].data.messageAuthorId).toBe('persona-p')
+  })
+
+  it('a delete of a message seen only in fetched history carries its author', async () => {
+    h = makeHarness()
+    await h.connector.start()
+    h.client.fetchHistory.mockImplementation(historyOf([msg(7, 'bot-a')]) as any)
+    await h.connector.fetchContext({ channelId: CH, depth: 5 })
+    const pushed: any[] = []
+    vi.spyOn((h.connector as any).queue, 'push').mockImplementation((e: any) => { pushed.push(e) })
+
+    h.client.emit('event', { type: 'message_delete', channelId: CH, messageId: `rm_${CH}_7` })
+
+    expect(pushed[0].data.author.id).toBe('a1')
+  })
+
+  it('findAndEditBotMessage edits the newest matching message, whatever order history comes in', async () => {
+    h = makeHarness()
+    const mine = (n: number) => ({ ...msg(n, 'persona'), content: 'Status: old', cleanContent: 'Status: old' })
+    h.client.fetchHistory.mockImplementation(historyOf([mine(1), mine(2), mine(3)]) as any)
+
+    expect(await h.connector.findAndEditBotMessage(CH, 'Status:', 'Status: <@alice> done')).toBe(true)
+    expect(h.client.editMessage).toHaveBeenCalledWith(`rm_${CH}_3`, 'Status: @alice done')
+  })
+
+  it('editMessage rewrites <@name> mentions as sendMessage does', async () => {
+    h = makeHarness()
+    await h.connector.editMessage(CH, `rm_${CH}_9`, 'thanks <@bob>')
+    expect(h.client.editMessage).toHaveBeenCalledWith(`rm_${CH}_9`, 'thanks @bob')
+  })
+})
+
 describe('PortalConnector sending', () => {
   let h: ReturnType<typeof makeHarness>
   afterEach(() => h?.cleanup())

@@ -11,7 +11,7 @@ import type { DiscordContext, DiscordMessage } from '../../types.js'
 import type { FetchContextParams } from '../types.js'
 import { logger } from '../../utils/logger.js'
 import { authorOfMessage, containerOf } from './adapters.js'
-import { fetchPortalHistory, snowflakeFromId, type PortalFetchDeps } from './history.js'
+import { fetchPortalHistory, type PortalFetchDeps } from './history.js'
 import type { AttachmentCache } from '../util/attachment-cache.js'
 
 const DISCORD_EPOCH = 1420070400000
@@ -55,6 +55,7 @@ export function portalMessageToDiscordMessage(
 
   return {
     id: pm.id,
+    nativeId: pm.nativeId,
     channelId: containerOf(pm),
     guildId: pm.guildId ?? '',
     author: { id: a.id, username: a.username, displayName: a.globalName ?? a.username, bot: a.bot },
@@ -77,6 +78,9 @@ export interface ContextDeps extends PortalFetchDeps {
   attachments: AttachmentCache
   /** Channel meta from the client cache. */
   channelMeta(channelId: string): { guildId: string; isThread: boolean; parentId?: string; native?: string } | null
+  /** A message id's Discord snowflake, or undefined when it isn't known: a relay
+   *  id is opaque, so the connector answers from the messages it has seen. */
+  snowflakeOf(messageId: string): string | undefined
 }
 
 const MAX_ANCHOR_GAP_MS = 24 * 60 * 60 * 1000
@@ -88,9 +92,13 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
   const meta = deps.channelMeta(channelId)
 
   // ── Stage 1: channel messages with .history ──
+  const startFrom = targetMessageId ? deps.snowflakeOf(targetMessageId) : undefined
+  if (targetMessageId && !startFrom) {
+    logger.warn({ targetMessageId }, 'portal: target message not known, fetching from the latest')
+  }
   const result = await fetchPortalHistory(
     channelId,
-    targetMessageId ? snowflakeFromId(targetMessageId) : undefined,
+    startFrom,
     undefined,
     depth,
     authorized_roles ?? [],
@@ -126,16 +134,24 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
   let cacheAnchorTrimmed = false
   let anchor = firstMessageId
   if (anchor && !historyDidClear) {
-    const anchorSnow = snowflakeFromId(anchor)
-    let firstIndex = messages.findIndex((m) => m.id === anchor || m.nativeId === anchorSnow)
+    const anchorSnow = deps.snowflakeOf(anchor)
+    const isAnchor = (m: PortalMessage) => m.id === anchor || (anchorSnow !== undefined && m.nativeId === anchorSnow)
+    let firstIndex = messages.findIndex(isAnchor)
     const oldest = messages[0]
 
     // Temporal sanity: skip extension if the anchor is far older than the window.
+    // An anchor whose snowflake isn't known (a relay id from before this process
+    // started) can't be dated, so it isn't extended to either.
     if (firstIndex < 0 && oldest) {
-      const gap = snowflakeToTimestamp(oldest.nativeId) - snowflakeToTimestamp(anchorSnow)
-      if (gap > MAX_ANCHOR_GAP_MS) {
-        logger.warn({ anchor, gapHours: Math.round(gap / 3.6e6) }, 'portal: cache anchor too old — skipping extension')
+      if (anchorSnow === undefined) {
+        logger.debug({ anchor }, 'portal: cache anchor not in the window and not known, so not extending')
         anchor = undefined
+      } else {
+        const gap = snowflakeToTimestamp(oldest.nativeId) - snowflakeToTimestamp(anchorSnow)
+        if (gap > MAX_ANCHOR_GAP_MS) {
+          logger.warn({ anchor, gapHours: Math.round(gap / 3.6e6) }, 'portal: cache anchor too old — skipping extension')
+          anchor = undefined
+        }
       }
     }
 
@@ -149,7 +165,7 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
         const sorted = [...batch].sort((a, b) => (snowflakeLT(a.nativeId, b.nativeId) ? -1 : 1))
         messages = [...sorted, ...messages]
         extended += sorted.length
-        firstIndex = messages.findIndex((m) => m.id === anchor || m.nativeId === anchorSnow)
+        firstIndex = messages.findIndex(isAnchor)
         if (firstIndex >= 0) break
         before = sorted[0]!.nativeId
       }

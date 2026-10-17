@@ -59,7 +59,8 @@ function isTextBasedType(type?: string): boolean {
   return type === 'text' || type === 'thread'
 }
 
-const AUTHOR_CAP = 5000
+/** How many messages `seen` remembers. */
+const SEEN_CAP = 5000
 /** How far back the reply-chain walk pages for a message it replies to, in pages
  *  of 100. The protocol has no fetch by id, so this bounds the RPCs one check
  *  can cost; a link older than this ends the walk, as a deleted message does on
@@ -76,8 +77,14 @@ export class PortalConnector implements IConnector {
   private displayName = ''
   private attachments: AttachmentCache
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>()
-  /** relayId → author id, so deletes/reactions can resolve their author. */
-  private authorById = new Map<string, string>()
+  /**
+   * Messages this process has seen, by relay id: from events, from history it
+   * fetched, and from its own sends. Deletes and reactions carry only a relay
+   * id, so this is where their message's author comes from; and the relay id is
+   * opaque, so this is where a message's snowflake comes from when the context
+   * pipeline needs one. A message from before this process started isn't here.
+   */
+  private seen = new Map<string, { authorId: string; nativeId?: string }>()
   /** channelId → tracked pins (bootstrapped via list_pins, refreshed on pins_update). */
   private pinnedByChannel = new Map<string, TrackedPin[]>()
   /** channelId → the number of the latest list_pins request, so an older reply
@@ -126,7 +133,7 @@ export class PortalConnector implements IConnector {
   // ── Inbound ──
 
   private onEvent(e: PortalEvent): void {
-    if (e.type === 'message_create' || e.type === 'message_update') this.recordAuthor(e.message)
+    if (e.type === 'message_create' || e.type === 'message_update') this.recordSeen(e.message)
     // Keep the pin cache warm so the hot-path getCachedPinned* getters stay fresh.
     // A thread's pins are cached under the thread, as every other thread event is.
     if (e.type === 'pins_update') void this.bootstrapPins(e.threadId ?? e.channelId)
@@ -137,17 +144,31 @@ export class PortalConnector implements IConnector {
   private adapterCtx(): AdapterCtx {
     return {
       botPersonaId: this.personaId,
-      authorOf: (id) => this.authorById.get(id),
+      authorOf: (id) => this.seen.get(id)?.authorId,
       guildOf: (channelId) => this.client.cache.getChannel(channelId)?.guildId ?? '',
     }
   }
 
-  private recordAuthor(pm: PortalMessage): void {
-    this.authorById.set(pm.id, authorOfMessage(pm).id)
-    if (this.authorById.size > AUTHOR_CAP) {
-      const first = this.authorById.keys().next().value
-      if (first !== undefined) this.authorById.delete(first)
+  private recordSeen(pm: PortalMessage): void {
+    this.remember(pm.id, { authorId: authorOfMessage(pm).id, nativeId: pm.nativeId })
+  }
+
+  /** Remember a message, most recent last, keeping at most SEEN_CAP. */
+  private remember(id: string, entry: { authorId: string; nativeId?: string }): void {
+    this.seen.delete(id)
+    this.seen.set(id, entry)
+    if (this.seen.size > SEEN_CAP) {
+      const oldest = this.seen.keys().next().value
+      if (oldest !== undefined) this.seen.delete(oldest)
     }
+  }
+
+  /** A message id's Discord snowflake: an id that is all digits already is one
+   *  (the API passes snowflakes from Discord URLs); a relay id is looked up in
+   *  what this process has seen, since its format isn't the protocol's to
+   *  promise. Undefined when neither says. */
+  private snowflakeOf(id: string): string | undefined {
+    return /^\d+$/.test(id) ? id : this.seen.get(id)?.nativeId
   }
 
   // ── Identity ──
@@ -204,6 +225,7 @@ export class PortalConnector implements IConnector {
    *  as on DiscordConnector, so replies don't pile up on the original message. */
   private async sendChunk(channelId: string, content: string, replyToId?: string): Promise<string> {
     const { messageId } = await this.client.sendMessage({ channelId, content, replyToId })
+    this.remember(messageId, { authorId: this.personaId })
     return messageId
   }
 
@@ -220,6 +242,7 @@ export class PortalConnector implements IConnector {
       files: [file],
       replyToId: replyToMessageId,
     })
+    this.remember(messageId, { authorId: this.personaId })
     return [messageId]
   }
 
@@ -238,6 +261,7 @@ export class PortalConnector implements IConnector {
       files: [file],
       replyToId: replyToMessageId,
     })
+    this.remember(messageId, { authorId: this.personaId })
     return [messageId]
   }
 
@@ -256,6 +280,7 @@ export class PortalConnector implements IConnector {
       files: [file],
       replyToId: replyToMessageId,
     })
+    this.remember(messageId, { authorId: this.personaId })
     return [messageId]
   }
 
@@ -267,7 +292,7 @@ export class PortalConnector implements IConnector {
   // ── Edit / react / pin / delete ──
 
   async editMessage(_channelId: string, messageId: string, newContent: string): Promise<void> {
-    await this.client.editMessage(messageId, newContent)
+    await this.client.editMessage(messageId, normalizeOutgoingMentions(newContent))
   }
 
   async findAndEditBotMessage(
@@ -276,12 +301,13 @@ export class PortalConnector implements IConnector {
     newContent: string,
     maxMessages = 20,
   ): Promise<boolean> {
+    // The newest of our messages with the prefix, as on DiscordConnector.
     const { messages } = await this.client.fetchHistory({ channelId, limit: maxMessages })
-    const target = messages.find(
+    const target = newestFirst(messages).find(
       (m) => m.author.kind === 'persona' && m.author.personaId === this.personaId && m.content.startsWith(contentPrefix),
     )
     if (!target) return false
-    await this.client.editMessage(target.id, newContent)
+    await this.client.editMessage(target.id, normalizeOutgoingMentions(newContent))
     return true
   }
 
@@ -339,8 +365,10 @@ export class PortalConnector implements IConnector {
       attachments: this.attachments,
       fetchBatch: async (channelId, opts) => {
         const { messages } = await this.client.fetchHistory({ channelId, before: opts.before, limit: opts.limit })
+        for (const m of messages) this.recordSeen(m)
         return messages
       },
+      snowflakeOf: (id) => this.snowflakeOf(id),
       fetchSingle: (channelId, snowflake) => this.fetchSingleBySnowflake(channelId, snowflake),
       resolveChannelBySnowflake: (snowflake) => this.resolveChannelBySnowflake(snowflake),
       authorRoles: (pm) => this.authorRolesOf(pm),
@@ -363,7 +391,9 @@ export class PortalConnector implements IConnector {
     }
     const { messages } = await this.client.fetchHistory({ channelId, before, limit: 1 })
     const m = messages[0]
-    return m && m.nativeId === snowflake ? m : null
+    if (!m || m.nativeId !== snowflake) return null
+    this.recordSeen(m)
+    return m
   }
 
   /** Resolve a Discord channel snowflake (from a .history URL) to a portal
@@ -421,7 +451,10 @@ export class PortalConnector implements IConnector {
         const { messages } = await this.client.fetchHistory({ channelId, before, limit: 100 })
         pages++
         const page = newestFirst(messages)
-        for (const m of page) seen.set(m.id, m)
+        for (const m of page) {
+          seen.set(m.id, m)
+          this.recordSeen(m)
+        }
         const oldest = page[page.length - 1]
         if (!oldest) exhausted = true
         else before = oldest.nativeId

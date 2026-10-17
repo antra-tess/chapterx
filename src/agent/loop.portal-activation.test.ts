@@ -131,3 +131,13 @@ describe('shouldActivate for portal events', () => {
     }
   })
 })
+
+describe('somaBotKey', () => {
+  it('keys a portal persona by its EMS bot name and an account bot by its Discord user id', () => {
+    const loop = Object.create(AgentLoop.prototype)
+    Object.assign(loop, { botId: 'glm52', botUserId: '123456789012345678', connector: { isPortal: () => true } })
+    expect((loop as any).somaBotKey()).toBe('glm52')
+    loop.connector = { isPortal: () => false }
+    expect((loop as any).somaBotKey()).toBe('123456789012345678')
+  })
+})

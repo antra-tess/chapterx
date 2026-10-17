@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import type { PortalMessage } from '@animalabs/portal-protocol'
-import { portalMessageToDiscordMessage } from './context.js'
+import { portalMessageToDiscordMessage, buildPortalContext, type ContextDeps } from './context.js'
 
 function pm(over: Partial<PortalMessage> = {}): PortalMessage {
   return {
@@ -42,5 +42,65 @@ describe('portalMessageToDiscordMessage — strip portal- role prefix', () => {
   it('is a no-op on raw <@&id> content (no cleanContent)', () => {
     const d = portalMessageToDiscordMessage(pm({ cleanContent: '', content: '<@&123> hi' }), noMap)
     expect(d.content).toBe('<@&123> hi')
+  })
+})
+
+/** buildPortalContext's dependencies over one channel's messages, served by
+ *  snowflake as fetch_history does. */
+function depsOver(all: PortalMessage[], known: Record<string, string> = {}) {
+  const fetchBatch = vi.fn(async (_ch: string, opts: { before?: string; limit: number }) =>
+    all
+      .filter((m) => opts.before === undefined || BigInt(m.nativeId) < BigInt(opts.before))
+      .sort((a, b) => (BigInt(b.nativeId) > BigInt(a.nativeId) ? 1 : -1))
+      .slice(0, opts.limit),
+  )
+  const fetchSingle = vi.fn(async (_ch: string, snowflake: string) => all.find((m) => m.nativeId === snowflake) ?? null)
+  const deps: ContextDeps = {
+    botPersonaId: 'persona-p',
+    fetchBatch,
+    fetchSingle,
+    resolveChannelBySnowflake: async () => null,
+    authorRoles: async () => null,
+    channelMeta: () => ({ guildId: 'guild', isThread: false }),
+    snowflakeOf: (id) => (/^\d+$/.test(id) ? id : known[id]),
+    attachments: {} as ContextDeps['attachments'],
+  }
+  return { deps, fetchBatch, fetchSingle }
+}
+
+const numbered = (from: number, to: number) =>
+  Array.from({ length: to - from + 1 }, (_, i) => pm({ id: `rm_chan_${from + i}`, nativeId: String(from + i) }))
+
+describe('buildPortalContext and message ids', () => {
+  it('starts from a target given as a Discord snowflake, as the API passes one', async () => {
+    const { deps, fetchSingle } = depsOver(numbered(1, 20))
+    const ctx = await buildPortalContext({ channelId: 'chan', depth: 5, targetMessageId: '10' }, deps)
+
+    expect(fetchSingle).toHaveBeenCalledWith('chan', '10')
+    expect(ctx.messages.map((m) => m.nativeId)).toEqual(['6', '7', '8', '9', '10'])
+  })
+
+  it('extends back to an anchor whose snowflake it knows, and trims to it', async () => {
+    const { deps } = depsOver(numbered(1, 30), { rm_chan_15: '15' })
+    const ctx = await buildPortalContext({ channelId: 'chan', depth: 10, firstMessageId: 'rm_chan_15' }, deps)
+
+    expect(ctx.messages[0]!.id).toBe('rm_chan_15')
+    expect(ctx.inheritanceInfo?.cacheAnchorTrimmed).toBe(true)
+  })
+
+  it('leaves an anchor it can\'t date alone, rather than parse the relay id', async () => {
+    // rm_chan_15 is outside the window and wasn't seen by this process.
+    const { deps, fetchBatch } = depsOver(numbered(1, 30))
+    const ctx = await buildPortalContext({ channelId: 'chan', depth: 10, firstMessageId: 'rm_chan_15' }, deps)
+
+    expect(fetchBatch).toHaveBeenCalledTimes(1)
+    expect(ctx.messages[0]!.nativeId).toBe('21')
+    expect(ctx.inheritanceInfo?.cacheAnchorTrimmed).toBeUndefined()
+  })
+
+  it('gives each converted message its snowflake beside the relay id', async () => {
+    const d = portalMessageToDiscordMessage(pm({ id: 'rm_chan_42', nativeId: '42' }), noMap)
+    expect(d.id).toBe('rm_chan_42')
+    expect(d.nativeId).toBe('42')
   })
 })

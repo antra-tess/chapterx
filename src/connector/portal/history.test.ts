@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { PortalMessage } from '@animalabs/portal-protocol'
-import { fetchPortalHistory, snowflakeFromId, type PortalFetchDeps, type PortalChannelRef } from './history.js'
+import { fetchPortalHistory, type PortalFetchDeps, type PortalChannelRef } from './history.js'
 
 /** Build a PortalMessage with snowflake `nativeId` and relay id `rm_<chan>_<sf>`. */
 function msg(chan: string, sf: string, content = 'hi', over: Partial<PortalMessage> = {}): PortalMessage {
@@ -48,14 +48,6 @@ function makeDeps(
 }
 
 const ids = (r: { messages: PortalMessage[] }) => r.messages.map((m) => m.nativeId)
-
-describe('snowflakeFromId', () => {
-  it('extracts snowflake from a relay id and passes through raw snowflakes', () => {
-    expect(snowflakeFromId('rm_chan_12345')).toBe('12345')
-    expect(snowflakeFromId('98765')).toBe('98765')
-    expect(snowflakeFromId('rm_thread99_777')).toBe('777')
-  })
-})
 
 describe('fetchPortalHistory', () => {
   it('returns chronological order (oldest first)', async () => {
