@@ -349,7 +349,7 @@ export class PortalConnector implements IConnector {
     // the .sleep and config tools pin to make something take effect, so a silent
     // success would tell them it had.
     logger.warn({ channelId, messageId }, 'portal: pinMessage unsupported (no pin-mutation RPC)')
-    throw new Error("Pinning isn't available on the portal backend: the relay has no pin RPC, so the message wasn't pinned.")
+    throw new Error("Pinning isn't available on the portal backend: the relay has no pin RPC, so the message wasn't pinned")
   }
 
   // ── Typing ──

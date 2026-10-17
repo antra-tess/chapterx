@@ -114,7 +114,10 @@ const sleepPlugin: ToolPlugin = {
           await context.pinMessage(sleepMsgId)
         } catch (error) {
           logger.error({ error, messageId: sleepMsgId }, 'Failed to pin .sleep message')
-          return `Error: .sleep message sent but could not pin it (channel may have hit the 50-pin limit). Sleep is NOT active.`
+          // Say why: on Discord that's usually the channel's 50-pin limit, and on
+          // the portal backend nothing can pin.
+          const reason = error instanceof Error ? error.message : String(error)
+          return `Error: .sleep message sent but could not pin it (${reason}). Sleep is NOT active.`
         }
 
         // React — purely cosmetic, don't fail the whole operation
