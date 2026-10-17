@@ -226,16 +226,69 @@ describe('PortalConnector pins', () => {
     expect(h.connector.getCachedPinnedSteers('parent')).toBeNull()
   })
 
-  it('a fresh ready drops the pin cache, since a gap\'s pins_update may be lost', async () => {
+  it('a fresh ready refreshes each cached channel, keeping its old pins until the new ones land', async () => {
+    // A pins_update lost in the gap: the .sleep was unpinned while the session was down.
+    h = makeHarness()
+    const replies: Array<(v: unknown) => void> = []
+    h.client.call.mockImplementation((() => new Promise((res) => replies.push(res))) as never)
+    await h.connector.start()
+    const read = h.connector.fetchPinnedSleeps(CH)
+    replies[0]!({ messages: [pinned(40, '.sleep')] })
+    await read
+
+    h.client.emit('ready', {})
+
+    expect(h.client.call).toHaveBeenCalledTimes(2)
+    expect((h.client.call.mock.calls[1] as any)[1]).toEqual({ channelId: CH })
+    expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1) // the gate never reads a cold cache
+    replies[1]!({ messages: [] })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(h.connector.getCachedPinnedSleeps(CH)).toEqual([])
+  })
+
+  it('a resume neither drops nor refreshes the pin cache', async () => {
     h = makeHarness()
     h.client.call.mockResolvedValue({ messages: [pinned(40, '.sleep')] } as never)
     await h.connector.start()
     await h.connector.fetchPinnedSleeps(CH)
-    expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1)
 
+    h.client.emit('resumed', 3)
+
+    expect(h.client.call).toHaveBeenCalledTimes(1)
+    expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1)
+  })
+
+  it('a load in flight across a fresh ready asks again once its request fails', async () => {
+    h = makeHarness()
+    const replies: Array<{ res: (v: unknown) => void; rej: (e: Error) => void }> = []
+    h.client.call.mockImplementation((() => new Promise((res, rej) => replies.push({ res, rej }))) as never)
+    await h.connector.start()
+    const cold = h.connector.fetchPinnedSleeps(CH) // a load starts, and its request is lost with the connection
     h.client.emit('ready', {})
 
-    expect(h.connector.getCachedPinnedSleeps(CH)).toBeNull()
+    replies[0]!.rej(new Error('RPC list_pins timed out'))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(h.client.call).toHaveBeenCalledTimes(2)
+    replies[1]!.res({ messages: [pinned(40, '.sleep')] })
+
+    expect(await cold).toHaveLength(1)
+  })
+
+  it('a channel\'s first message starts loading its pins, once', async () => {
+    h = makeHarness()
+    const replies: Array<(v: unknown) => void> = []
+    h.client.call.mockImplementation((() => new Promise((res) => replies.push(res))) as never)
+    vi.spyOn((h.connector as any).queue, 'push').mockImplementation(() => undefined)
+    await h.connector.start()
+
+    h.client.emit('event', { type: 'message_create', message: msg(5, 'human'), addressedToMe: false, reasons: ['subscription'] })
+    h.client.emit('event', { type: 'message_create', message: msg(6, 'human'), addressedToMe: false, reasons: ['subscription'] })
+    expect(h.client.call).toHaveBeenCalledTimes(1)
+    expect((h.client.call.mock.calls[0] as any)[1]).toEqual({ channelId: CH })
+
+    replies[0]!({ messages: [pinned(40, '.sleep')] })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1)
   })
 })
 
@@ -271,6 +324,21 @@ describe('PortalConnector message bookkeeping', () => {
     h.client.emit('event', { type: 'message_delete', channelId: CH, messageId: `rm_${CH}_7` })
 
     expect(pushed[0].data.author.id).toBe('a1')
+  })
+
+  it('a deleted message is forgotten, so a context anchor it was isn\'t extended to', async () => {
+    h = makeHarness()
+    let all = Array.from({ length: 30 }, (_, i) => msg(i + 1, 'human'))
+    h.client.fetchHistory.mockImplementation(((p: { before?: string; limit: number }) => historyOf(all)(p)) as any)
+    await h.connector.start()
+    await h.connector.fetchContext({ channelId: CH, depth: 20 }) // the connector sees message 15
+
+    all = all.filter((m) => m.nativeId !== '15')
+    h.client.emit('event', { type: 'message_delete', channelId: CH, messageId: `rm_${CH}_15` })
+    const ctx = await h.connector.fetchContext({ channelId: CH, depth: 10, firstMessageId: `rm_${CH}_15` })
+
+    // Remembered, the anchor would be extended to through everything older, and never found.
+    expect(ctx.messages[0]!.id).toBe(`rm_${CH}_21`)
   })
 
   it('findAndEditBotMessage edits the newest matching message, whatever order history comes in', async () => {

@@ -23,7 +23,7 @@ import type { DiscordContext } from '../../types.js'
 import { logger } from '../../utils/logger.js'
 import type { IConnector, FetchContextParams, TrackedPin, PinnedSteer, SentMessageChunk } from '../types.js'
 import { splitPreservingMarkdown, type MarkdownCarry } from '../../utils/discord-markdown.js'
-import { queueEventFromPortal, authorOfMessage, type AdapterCtx } from './adapters.js'
+import { queueEventFromPortal, authorOfMessage, containerOf, type AdapterCtx } from './adapters.js'
 import { AttachmentCache } from '../util/attachment-cache.js'
 import { buildPortalContext, type ContextDeps } from './context.js'
 import { newestFirst, type PortalChannelRef } from './history.js'
@@ -122,10 +122,16 @@ export class PortalConnector implements IConnector {
 
   async start(): Promise<void> {
     this.client.on('event', (e) => this.onEvent(e))
-    // A fresh `ready` means the relay couldn't resume the session, so pins_update
-    // events in the gap may be lost: drop the pin cache and let each channel
-    // refill it on its next read. A resume replays the gap and keeps the cache.
-    this.client.on('ready', () => this.pinnedByChannel.clear())
+    // A fresh `ready` means the relay couldn't resume the session, so a
+    // pins_update in the gap may be lost: refresh every channel the cache holds,
+    // and every load in progress, whose request may have gone out on the old
+    // connection. A cached channel keeps its old pins until the new ones land, so
+    // the synchronous getters the sleep gate reads never go cold. A resume
+    // replays the gap and needs nothing. (The first `ready` finds both empty.)
+    this.client.on('ready', () => {
+      const channels = new Set([...this.pinnedByChannel.keys(), ...this.pinLoads.keys()])
+      for (const channelId of channels) void this.loadPins(channelId, true)
+    })
     this.client.on('close', (info) =>
       logger.warn({ code: info.code, willReconnect: info.willReconnect }, 'portal connection closed'),
     )
@@ -144,12 +150,23 @@ export class PortalConnector implements IConnector {
   // ── Inbound ──
 
   private onEvent(e: PortalEvent): void {
-    if (e.type === 'message_create' || e.type === 'message_update') this.recordSeen(e.message)
+    if (e.type === 'message_create' || e.type === 'message_update') {
+      this.recordSeen(e.message)
+      // Start loading a channel's pins when its first message arrives, so the
+      // sleep gate's synchronous read usually finds them. It doesn't wait: a
+      // message the loop reaches first is checked against no pins, as the
+      // Discord backend's is in a channel it has no pins for.
+      const container = containerOf(e.message)
+      if (!this.pinnedByChannel.has(container)) void this.loadPins(container, false)
+    }
     // Keep the pin cache warm so the hot-path getCachedPinned* getters stay fresh.
     // A thread's pins are cached under the thread, as every other thread event is.
-    if (e.type === 'pins_update') void this.bootstrapPins(e.threadId ?? e.channelId)
+    if (e.type === 'pins_update') void this.loadPins(e.threadId ?? e.channelId, true)
     const ev = queueEventFromPortal(e, this.adapterCtx())
     if (ev) this.queue.push(ev)
+    // A deleted message is gone: forget it once its event carries its author, so
+    // a context anchor it was isn't extended to.
+    if (e.type === 'message_delete') this.seen.delete(e.messageId)
   }
 
   private adapterCtx(): AdapterCtx {
@@ -514,13 +531,16 @@ export class PortalConnector implements IConnector {
 
   // ── Pins ──
 
-  /** Bootstrap (or refresh) a channel's pin cache via list_pins, one request at
-   *  a time per channel (see pinLoads). A failed request caches nothing, so the
-   *  next read asks again. */
-  private bootstrapPins(channelId: string): Promise<void> {
+  /** Load a channel's pins with list_pins, one request at a time per channel
+   *  (see pinLoads). `refresh` is for a change that may have come after a load in
+   *  progress asked: it makes that load ask once more. Without it, a caller just
+   *  waits for the load in progress. A failed request leaves the cache as it was:
+   *  a channel with no entry is asked for again on its next read, and one with an
+   *  entry keeps its pins until the next refresh. */
+  private loadPins(channelId: string, refresh: boolean): Promise<void> {
     const inProgress = this.pinLoads.get(channelId)
     if (inProgress) {
-      inProgress.again = true
+      if (refresh) inProgress.again = true
       return inProgress.done
     }
     const load = { done: Promise.resolve(), again: true }
@@ -543,10 +563,13 @@ export class PortalConnector implements IConnector {
     return load.done
   }
 
+  /** A channel's pins, loading them if none are cached. When the load fails, the
+   *  answer is no pins for this read, with list_pins' warning in the log, and the
+   *  next read asks again. */
   private async ensurePins(channelId: string): Promise<TrackedPin[]> {
     let pins = this.pinnedByChannel.get(channelId)
     if (!pins) {
-      await this.bootstrapPins(channelId)
+      await this.loadPins(channelId, false)
       pins = this.pinnedByChannel.get(channelId)
     }
     return pins ?? []
