@@ -541,6 +541,8 @@ export function scanMarkdown(text: string, start: MarkdownCarry = []): MarkdownC
  * chunk boundary and reopening it at the next. `startCarry` continues a
  * construct inherited from a previous message; `endCarry` reports the open
  * stack after the last chunk so callers can thread continuity across calls.
+ * A cut at a newline is never taken where it would leave a chunk holding only
+ * whitespace, a message with nothing in it to show.
  */
 export function splitPreservingMarkdown(
   text: string,
@@ -663,13 +665,15 @@ export function splitPreservingMarkdown(
       } else {
         // Prefer the latest newline within (chunkStart, end] that does not land
         // inside a non-fence construct (which would fragment it and risk a seam
-        // merge); keep it at this chunk's end so reconstruction is exact.
+        // merge) and leaves this chunk more than whitespace; keep it at this
+        // chunk's end so reconstruction is exact. A paragraph break that starts
+        // a window would otherwise be sent alone, as a blank message.
         // Otherwise hard-split without bisecting a delimiter run.
         const body = text.slice(chunkStart, end)
         let nlCut = -1
         for (let nl = body.lastIndexOf('\n'); nl >= 0; nl = nl > 0 ? body.lastIndexOf('\n', nl - 1) : -1) {
           const candidate = chunkStart + nl + 1
-          if (!straddlesNonFence(candidate)) {
+          if (!straddlesNonFence(candidate) && /\S/.test(body.slice(0, nl + 1))) {
             nlCut = candidate
             break
           }

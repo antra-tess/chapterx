@@ -1105,6 +1105,23 @@ describe('splitPreservingMarkdown — edge cases', () => {
       expect(reconstruct(r.chunks)).toBe(ch)
     }
   })
+  // A paragraph break at the start of a window, cut at its newline, would be a
+  // chunk of only whitespace: a message with nothing in it to show.
+  it('never sends a paragraph break alone between two full chunks', () => {
+    for (const sep of ['\n\n', '\n \n', ' \n']) {
+      const text = 'x'.repeat(1800) + sep + 'y'.repeat(1800)
+      const r = splitPreservingMarkdown(text, 1800)
+      for (const c of r.chunks) expect(c.text.trim()).not.toBe('')
+      expect(reconstruct(r.chunks)).toBe(text)
+      assertAllWithinLimit(r.chunks, 1800)
+    }
+  })
+
+  it('still cuts at the paragraph break when the chunk before it holds text', () => {
+    const text = 'x'.repeat(900) + '\n\n' + 'y'.repeat(1800)
+    const r = splitPreservingMarkdown(text, 1800)
+    expect(r.chunks.map((c) => c.text)).toEqual(['x'.repeat(900) + '\n\n', 'y'.repeat(1800)])
+  })
 })
 
 // ---------------------------------------------------------------------------
