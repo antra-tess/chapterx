@@ -19,11 +19,11 @@
 import { PortalClient, fileFromBytes } from '@animalabs/portal-client'
 import type { PortalMessage, PortalEvent } from '@animalabs/portal-protocol'
 import { EventQueue } from '../../agent/event-queue.js'
-import type { DiscordContext } from '../../types.js'
+import type { DiscordContext, Event } from '../../types.js'
 import { logger } from '../../utils/logger.js'
 import type { IConnector, FetchContextParams, TrackedPin, PinnedSteer, SentMessageChunk } from '../types.js'
 import { splitPreservingMarkdown, type MarkdownCarry } from '../../utils/discord-markdown.js'
-import { queueEventFromPortal, authorOfMessage, containerOf, type AdapterCtx } from './adapters.js'
+import { queueEventFromPortal, authorOfMessage, type AdapterCtx } from './adapters.js'
 import { AttachmentCache } from '../util/attachment-cache.js'
 import { buildPortalContext, type ContextDeps } from './context.js'
 import { newestFirst, type PortalChannelRef } from './history.js'
@@ -101,13 +101,25 @@ export class PortalConnector implements IConnector {
    * remembers (SEEN_CAP), isn't here.
    */
   private seen = new Map<string, { authorId: string; nativeId?: string }>()
-  /** channelId → tracked pins (bootstrapped via list_pins, refreshed on pins_update). */
+  /** channelId → its pins as list_pins last returned them. The loop reads these
+   *  without waiting (getCachedPinned*) when it decides whether to activate: a
+   *  .sleep, and the channel's pinned config. */
   private pinnedByChannel = new Map<string, TrackedPin[]>()
+  /** The channels whose cached pins are current: loaded on this connection, with
+   *  the load each pins_update since asked for done too. A fresh `ready` empties
+   *  it, since a pins_update in the gap may be lost. */
+  private pinsCurrent = new Set<string>()
+  /** The channels whose last load failed. Their events don't wait for another
+   *  load; a read, a pins_update or the next fresh `ready` asks again. */
+  private pinsFailed = new Set<string>()
   /** channelId → the list_pins load in progress. A refresh asked for while one
    *  is in progress makes it load once more when its reply lands, so replies
    *  apply in the order they were asked for, and everyone waiting on the load
    *  reads the newest pins. */
   private pinLoads = new Map<string, { done: Promise<void>; again: boolean }>()
+  /** channelId → its events waiting, in order, for the channel's pins to load
+   *  (see deliver). */
+  private heldEvents = new Map<string, Event[]>()
   /** guildId → (roleId → name) with a fetch timestamp, for name-based auth. */
   private roleNameCache = new Map<string, { map: Map<string, string>; at: number }>()
 
@@ -130,14 +142,14 @@ export class PortalConnector implements IConnector {
   async start(): Promise<void> {
     this.client.on('event', (e) => this.onEvent(e))
     // A fresh `ready` means the relay couldn't resume the session, so a
-    // pins_update in the gap may be lost: refresh every channel the cache holds,
-    // and every load in progress, whose request may have gone out on the old
-    // connection. A cached channel keeps its old pins until the new ones land, so
-    // the synchronous getters the sleep gate reads never go cold. A resume
-    // replays the gap and needs nothing. (The first `ready` finds both empty.)
+    // pins_update in the gap may be lost: no channel's pins are current any more,
+    // and each channel loads them again on its next event or read, rather than
+    // all at once. A load in progress asks once more, since its request may have
+    // gone out on the old connection. A resume replays the gap and needs nothing.
     this.client.on('ready', () => {
-      const channels = new Set([...this.pinnedByChannel.keys(), ...this.pinLoads.keys()])
-      for (const channelId of channels) void this.loadPins(channelId, true)
+      this.pinsCurrent.clear()
+      this.pinsFailed.clear()
+      for (const load of this.pinLoads.values()) load.again = true
     })
     this.client.on('close', (info) =>
       logger.warn({ code: info.code, willReconnect: info.willReconnect }, 'portal connection closed'),
@@ -157,23 +169,40 @@ export class PortalConnector implements IConnector {
   // ── Inbound ──
 
   private onEvent(e: PortalEvent): void {
-    if (e.type === 'message_create' || e.type === 'message_update') {
-      this.recordSeen(e.message)
-      // Start loading a channel's pins when its first message arrives, so the
-      // sleep gate's synchronous read usually finds them. It doesn't wait: a
-      // message the loop reaches first is checked against no pins, as the
-      // Discord backend's is in a channel it has no pins for.
-      const container = containerOf(e.message)
-      if (!this.pinnedByChannel.has(container)) void this.loadPins(container, false)
-    }
-    // Keep the pin cache warm so the hot-path getCachedPinned* getters stay fresh.
+    if (e.type === 'message_create' || e.type === 'message_update') this.recordSeen(e.message)
     // A thread's pins are cached under the thread, as every other thread event is.
     if (e.type === 'pins_update') void this.loadPins(e.threadId ?? e.channelId, true)
     const ev = queueEventFromPortal(e, this.adapterCtx())
-    if (ev) this.queue.push(ev)
-    // A deleted message is gone: forget it once its event carries its author, so
-    // a context anchor it was isn't extended to.
+    // A deleted message is gone: forget it once its event carries its author. A
+    // context anchor it was then has no known snowflake, so the context falls
+    // back to its own window rather than extending toward a message it can't
+    // find, and a reply to it has no known target.
     if (e.type === 'message_delete') this.seen.delete(e.messageId)
+    if (ev) this.deliver(ev)
+  }
+
+  /** Queue an event once its channel's pins are current, since the loop decides
+   *  whether to activate from them without waiting. When they aren't (after a
+   *  start or a fresh `ready`), the channel's events wait, in order, for one
+   *  list_pins. If it fails, they go on, read against whatever pins are cached,
+   *  and the channel's later events don't wait again. */
+  private deliver(ev: Event): void {
+    const channelId = ev.channelId
+    const held = this.heldEvents.get(channelId)
+    if (held) {
+      held.push(ev)
+      return
+    }
+    if (this.pinsCurrent.has(channelId) || this.pinsFailed.has(channelId)) {
+      this.queue.push(ev)
+      return
+    }
+    this.heldEvents.set(channelId, [ev])
+    void this.loadPins(channelId, false).finally(() => {
+      const waiting = this.heldEvents.get(channelId) ?? []
+      this.heldEvents.delete(channelId)
+      for (const waited of waiting) this.queue.push(waited)
+    })
   }
 
   private adapterCtx(): AdapterCtx {
@@ -546,9 +575,9 @@ export class PortalConnector implements IConnector {
   /** Load a channel's pins with list_pins, one request at a time per channel
    *  (see pinLoads). `refresh` is for a change that may have come after a load in
    *  progress asked: it makes that load ask once more. Without it, a caller just
-   *  waits for the load in progress. A failed request leaves the cache as it was:
-   *  a channel with no entry is asked for again on its next read, and one with an
-   *  entry keeps its pins until the next refresh. */
+   *  waits for the load in progress. The channel's pins are current when the
+   *  load's last request succeeds. When it fails, the cache keeps what it had,
+   *  and the channel is marked failed (see pinsFailed). */
   private loadPins(channelId: string, refresh: boolean): Promise<void> {
     const inProgress = this.pinLoads.get(channelId)
     if (inProgress) {
@@ -557,34 +586,41 @@ export class PortalConnector implements IConnector {
     }
     const load = { done: Promise.resolve(), again: true }
     load.done = (async () => {
+      let loaded = false
       try {
         while (load.again) {
           load.again = false
           try {
             const { messages } = await this.client.call('list_pins', { channelId })
             this.pinnedByChannel.set(channelId, messages.map(portalMessageToTrackedPin))
+            loaded = true
           } catch (err) {
+            loaded = false
             logger.warn({ err: (err as Error).message, channelId }, 'portal: list_pins failed')
           }
         }
       } finally {
         this.pinLoads.delete(channelId)
+        if (loaded) {
+          this.pinsCurrent.add(channelId)
+          this.pinsFailed.delete(channelId)
+        } else {
+          this.pinsCurrent.delete(channelId)
+          this.pinsFailed.add(channelId)
+        }
       }
     })()
     this.pinLoads.set(channelId, load)
     return load.done
   }
 
-  /** A channel's pins, loading them if none are cached. When the load fails, the
-   *  answer is no pins for this read, with list_pins' warning in the log, and the
+  /** A channel's pins for a reader that can wait: loaded first when they aren't
+   *  current, and after any load in progress. When the load fails, the answer is
+   *  the pins cached before, or none, with list_pins' warning in the log, and the
    *  next read asks again. */
   private async ensurePins(channelId: string): Promise<TrackedPin[]> {
-    let pins = this.pinnedByChannel.get(channelId)
-    if (!pins) {
-      await this.loadPins(channelId, false)
-      pins = this.pinnedByChannel.get(channelId)
-    }
-    return pins ?? []
+    if (!this.pinsCurrent.has(channelId) || this.pinLoads.has(channelId)) await this.loadPins(channelId, false)
+    return this.pinnedByChannel.get(channelId) ?? []
   }
 
   /** Identity the relay-routed persona resolves pin targets against: its persona

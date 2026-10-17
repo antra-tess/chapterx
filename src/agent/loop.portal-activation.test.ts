@@ -25,6 +25,7 @@ import { logger } from '../utils/logger.js'
 import { EventQueue } from './event-queue.js'
 import { queueEventFromPortal, type AdapterCtx } from '../connector/portal/adapters.js'
 import { PortalConnector } from '../connector/portal/portal-connector.js'
+import { SleepState } from './sleep.js'
 
 const PERSONA = 'persona-p'
 
@@ -128,6 +129,47 @@ describe('shouldActivate for portal events', () => {
       const ev = event(pm({ id: 'rm_chan_4', nativeId: '4', replyToId: 'rm_chan_3' }), true, ['reply'])
 
       expect(await makeLoop(connector)([ev])).toBe(true)
+    } finally {
+      rmSync(tmpCache, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('the sleep gate on the portal backend, with the real connector', () => {
+  it('a channel\'s first message after a start is checked against the .sleep pinned there', async () => {
+    // The process has just started, so nothing has loaded the channel's pins;
+    // a .sleep for this bot has been pinned there for a minute, for an hour.
+    const tmpCache = mkdtempSync(join(tmpdir(), 'loop-portal-sleep-'))
+    try {
+      const queue = new EventQueue()
+      const connector = new PortalConnector(queue, { url: 'ws://relay.invalid', token: 't', personaId: PERSONA, cacheDir: tmpCache })
+      const startedAt = new Date(Date.now() - 60_000).toISOString()
+      const sleepPin = pm({ id: 'rm_chan_100', nativeId: '100', content: `.sleep glm52\n---\nstarted_at: \"${startedAt}\"\nduration_seconds: 3600` })
+      const handlers = new Map<string, (arg: unknown) => void>()
+      ;(connector as any).client = {
+        on: (name: string, fn: (arg: unknown) => void) => handlers.set(name, fn),
+        connect: async () => undefined,
+        call: vi.fn(async () => ({ messages: [sleepPin] })),
+        cache: { persona: { displayName: 'p' }, getChannel: () => undefined },
+      }
+      await connector.start()
+
+      handlers.get('event')!({ type: 'message_create', message: pm(), addressedToMe: true, reasons: ['role_mention'] })
+      await vi.waitFor(() => expect(queue.size()).toBe(1))
+
+      const loop = Object.create(AgentLoop.prototype)
+      Object.assign(loop, {
+        botId: 'glm52',
+        botUserId: PERSONA,
+        botMessageIds: new Set<string>(),
+        connector,
+        configSystem: { loadConfig: () => ({ max_bot_reply_chain_depth: 2, reply_on_random: 0 }) },
+        sleepState: new SleepState(connector, () => ({ botId: 'glm52' })),
+      })
+      const debug = vi.spyOn(logger, 'debug').mockImplementation(() => undefined as never)
+      expect(await (loop as any).shouldActivate(queue.pollBatch(), 'chan', 'guild')).toBe(false)
+      expect(debug).toHaveBeenCalledWith(expect.anything(), 'Skipping activation — bot is sleeping')
+      debug.mockRestore()
     } finally {
       rmSync(tmpCache, { recursive: true, force: true })
     }

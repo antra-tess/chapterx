@@ -180,9 +180,13 @@ describe('PortalConnector.getBotReplyChainDepth', () => {
     const all = [msg(1, 'human'), msg(2, 'persona', 1), ...filler]
     h.client.fetchHistory.mockImplementation(historyOf(all) as any)
 
+    const debug = vi.spyOn(logger, 'debug').mockImplementation(() => undefined as never)
+
     // Found, the persona's message would make it 2; five pages end the walk at 1.
     expect(await h.connector.getBotReplyChainDepth(CH, inbound(msg(5000, 'bot-a', 2)))).toBe(1)
     expect(h.client.fetchHistory).toHaveBeenCalledTimes(5)
+    expect(debug).toHaveBeenCalledWith({ channelId: CH, pages: 5 }, 'portal: reply-chain walk ended at its page bound')
+    debug.mockRestore()
   })
 })
 
@@ -244,33 +248,46 @@ describe('PortalConnector pins', () => {
     expect(h.connector.getCachedPinnedSteers('parent')).toBeNull()
   })
 
-  it('a fresh ready refreshes each cached channel, keeping its old pins until the new ones land', async () => {
-    // A pins_update lost in the gap: the .sleep was unpinned while the session was down.
+  it('a reader waits for a refresh in progress rather than answering from the cache', async () => {
     h = makeHarness()
     const replies: Array<(v: unknown) => void> = []
     h.client.call.mockImplementation((() => new Promise((res) => replies.push(res))) as never)
     await h.connector.start()
-    const read = h.connector.fetchPinnedSleeps(CH)
-    replies[0]!({ messages: [pinned(40, '.sleep')] })
-    await read
+    const first = h.connector.fetchPinnedSteerMessages(CH)
+    replies[0]!({ messages: [] })
+    await first
 
-    h.client.emit('ready', {})
+    h.client.emit('event', { type: 'pins_update', channelId: CH }) // a .steer was just pinned
+    const read = h.connector.fetchPinnedSteerMessages(CH)
+    replies[1]!({ messages: [pinned(30, '.steer be brief')] })
 
-    expect(h.client.call).toHaveBeenCalledTimes(2)
-    expect((h.client.call.mock.calls[1] as any)[1]).toEqual({ channelId: CH })
-    expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1) // the gate never reads a cold cache
-    replies[1]!({ messages: [] })
-    await new Promise((r) => setTimeout(r, 0))
-    expect(h.connector.getCachedPinnedSleeps(CH)).toEqual([])
+    expect(await read).toHaveLength(1)
   })
 
-  it('a resume neither drops nor refreshes the pin cache', async () => {
+  it('a failed refresh leaves the old pins for the gate, and the next read asks again', async () => {
+    h = makeHarness()
+    h.client.call.mockResolvedValueOnce({ messages: [pinned(40, '.sleep')] } as never)
+    h.client.call.mockRejectedValueOnce(new Error('relay down') as never)
+    h.client.call.mockResolvedValueOnce({ messages: [] } as never)
+    await h.connector.start()
+    await h.connector.fetchPinnedSleeps(CH)
+
+    h.client.emit('event', { type: 'pins_update', channelId: CH }) // the .sleep was unpinned
+    await new Promise((r) => setTimeout(r, 0))
+    expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1)
+
+    expect(await h.connector.fetchPinnedSleeps(CH)).toEqual([])
+    expect(h.client.call).toHaveBeenCalledTimes(3)
+  })
+
+  it('a resume neither drops nor reloads the pin cache', async () => {
     h = makeHarness()
     h.client.call.mockResolvedValue({ messages: [pinned(40, '.sleep')] } as never)
     await h.connector.start()
     await h.connector.fetchPinnedSleeps(CH)
 
     h.client.emit('resumed', 3)
+    await h.connector.fetchPinnedSleeps(CH)
 
     expect(h.client.call).toHaveBeenCalledTimes(1)
     expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1)
@@ -291,23 +308,89 @@ describe('PortalConnector pins', () => {
 
     expect(await cold).toHaveLength(1)
   })
+})
 
-  it('a channel\'s first message starts loading its pins, once', async () => {
+describe('PortalConnector events wait for their channel\'s pins', () => {
+  let h: ReturnType<typeof makeHarness>
+  afterEach(() => h?.cleanup())
+
+  const message = (n: number) => ({ type: 'message_create', message: msg(n, 'human'), addressedToMe: false, reasons: ['subscription'] })
+
+  /** The connector's queue, recording each event with the sleep pins the loop
+   *  would read for its channel at the moment it arrives. */
+  function watchQueue() {
+    const queued: Array<{ id: string; sleeps: number | null }> = []
+    vi.spyOn((h.connector as any).queue, 'push').mockImplementation(((ev: { channelId: string; data: { id: string } }) => {
+      queued.push({ id: ev.data.id, sleeps: h.connector.getCachedPinnedSleeps(ev.channelId)?.length ?? null })
+    }) as never)
+    return queued
+  }
+
+  it('a channel\'s first events wait, in order, for its pins, and later ones ask for nothing', async () => {
     h = makeHarness()
     const replies: Array<(v: unknown) => void> = []
     h.client.call.mockImplementation((() => new Promise((res) => replies.push(res))) as never)
-    vi.spyOn((h.connector as any).queue, 'push').mockImplementation(() => undefined)
+    const queued = watchQueue()
     await h.connector.start()
 
-    h.client.emit('event', { type: 'message_create', message: msg(5, 'human'), addressedToMe: false, reasons: ['subscription'] })
-    h.client.emit('event', { type: 'message_create', message: msg(6, 'human'), addressedToMe: false, reasons: ['subscription'] })
+    h.client.emit('event', message(5))
+    h.client.emit('event', message(6))
+    expect(queued).toEqual([])
     expect(h.client.call).toHaveBeenCalledTimes(1)
     expect((h.client.call.mock.calls[0] as any)[1]).toEqual({ channelId: CH })
 
     replies[0]!({ messages: [pinned(40, '.sleep')] })
     await new Promise((r) => setTimeout(r, 0))
-    expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1)
-    expect(h.client.call).toHaveBeenCalledTimes(1) // the second message only waited for the load
+    expect(queued).toEqual([
+      { id: `rm_${CH}_5`, sleeps: 1 },
+      { id: `rm_${CH}_6`, sleeps: 1 },
+    ])
+
+    h.client.emit('event', message(7))
+    expect(queued[2]).toEqual({ id: `rm_${CH}_7`, sleeps: 1 })
+    expect(h.client.call).toHaveBeenCalledTimes(1)
+  })
+
+  it('when the first load fails, the events go on and later ones don\'t wait, but a read asks again', async () => {
+    h = makeHarness()
+    h.client.call.mockRejectedValueOnce(new Error('relay down') as never)
+    h.client.call.mockResolvedValueOnce({ messages: [pinned(40, '.sleep')] } as never)
+    const queued = watchQueue()
+    await h.connector.start()
+
+    h.client.emit('event', message(5))
+    await new Promise((r) => setTimeout(r, 0))
+    h.client.emit('event', message(6))
+
+    expect(queued).toEqual([
+      { id: `rm_${CH}_5`, sleeps: null },
+      { id: `rm_${CH}_6`, sleeps: null },
+    ])
+    expect(h.client.call).toHaveBeenCalledTimes(1)
+    expect(await h.connector.fetchPinnedSleeps(CH)).toHaveLength(1)
+    expect(h.client.call).toHaveBeenCalledTimes(2)
+  })
+
+  it('a fresh ready asks for nothing at once, and a channel\'s next event waits for its pins again', async () => {
+    // A pins_update lost in the gap: the .sleep was unpinned while the session was down.
+    h = makeHarness()
+    const replies: Array<(v: unknown) => void> = []
+    h.client.call.mockImplementation((() => new Promise((res) => replies.push(res))) as never)
+    const queued = watchQueue()
+    await h.connector.start()
+    h.client.emit('event', message(5))
+    replies[0]!({ messages: [pinned(40, '.sleep')] })
+    await new Promise((r) => setTimeout(r, 0))
+
+    h.client.emit('ready', {})
+    expect(h.client.call).toHaveBeenCalledTimes(1)
+    expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1) // the old pins, until the channel's next event
+
+    h.client.emit('event', message(6))
+    expect(h.client.call).toHaveBeenCalledTimes(2)
+    replies[1]!({ messages: [] })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(queued[1]).toEqual({ id: `rm_${CH}_6`, sleeps: 0 })
   })
 })
 
@@ -322,12 +405,14 @@ describe('PortalConnector message bookkeeping', () => {
     const pushed: any[] = []
     vi.spyOn((h.connector as any).queue, 'push').mockImplementation((e: any) => { pushed.push(e) })
 
+    h.client.call.mockResolvedValue({ messages: [] } as never) // the channel has no pins
     h.client.emit('event', {
       type: 'reaction_add',
       channelId: CH,
       messageId: id,
       reaction: { emoji: '⏩', count: 1, kind: 'native', by: [{ kind: 'user', id: 'h1', name: 'h' }] },
     })
+    await new Promise((r) => setTimeout(r, 0)) // the channel's first event waits for its pins
 
     expect(pushed[0].data.messageAuthorId).toBe('persona-p')
   })
@@ -340,7 +425,9 @@ describe('PortalConnector message bookkeeping', () => {
     const pushed: any[] = []
     vi.spyOn((h.connector as any).queue, 'push').mockImplementation((e: any) => { pushed.push(e) })
 
+    h.client.call.mockResolvedValue({ messages: [] } as never) // the channel has no pins
     h.client.emit('event', { type: 'message_delete', channelId: CH, messageId: `rm_${CH}_7` })
+    await new Promise((r) => setTimeout(r, 0)) // the channel's first event waits for its pins
 
     expect(pushed[0].data.author.id).toBe('a1')
   })
