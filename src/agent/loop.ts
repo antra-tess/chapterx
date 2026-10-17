@@ -1467,7 +1467,7 @@ export class AgentLoop {
       })
       endProfile('pinnedConfigFetch')
       
-      // Use config values: recency_window + rolling_threshold + buffer for .history commands
+      // Use config values: recency_window_messages + rolling_threshold + buffer for .history commands
       const recencyWindow = preConfig.recency_window_messages || 200
       const rollingBuffer = preConfig.rolling_threshold || 50
       let fetchDepth = recencyWindow + rollingBuffer + 50  // +50 for .history boundary tolerance

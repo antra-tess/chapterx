@@ -22,7 +22,7 @@ vendors:
   # openai:
   #   config:
   #     openai_api_key: "sk-..."
-  #     # openai_base_url: "https://api.openai.com/v1"  # Optional, defaults to OpenAI
+  #     # api_base: "https://api.openai.com/v1"  # Optional, defaults to OpenAI
   #   provides:
   #     - "gpt-4.*"
   #     - "gpt-5.*"

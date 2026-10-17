@@ -323,15 +323,15 @@ interface BotConfig {
   name: string  // Name used in LLM context
   
   // Model config
-  mode: 'prefill' | 'chat'
+  mode?: 'prefill' | 'chat' | 'base-model'
   continuation_model: string
   temperature: number
   max_tokens: number
-  top_p: number
+  top_p?: number
   
   // Context config
-  recency_window_messages: number  // Max messages
-  recency_window_characters: number  // Max characters
+  recency_window_messages?: number  // Max messages
+  recency_window_characters?: number  // Max characters
   rolling_threshold: number  // Messages before truncation
   
   // Image config
@@ -348,12 +348,12 @@ interface BotConfig {
   
   // Retries
   llm_retries: number
-  discord_backoff_max: number
+  discord_backoff_max: number  // nothing reads this
   
   // Misc
   reply_on_random: number
-  reply_on_name: boolean
-  max_queued_replies: number
+  reply_on_name: boolean  // nothing reads this
+  max_queued_replies: number  // nothing reads this
 }
 ```
 
@@ -1178,7 +1178,6 @@ tool_output_visible: false
 max_tool_depth: 100
 
 llm_retries: 3
-discord_backoff_max: 32000
 ```
 
 ### Vendor Config

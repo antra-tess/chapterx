@@ -100,7 +100,7 @@ vendors:
   openai:
     config:
       openai_api_key: "sk-..."
-      openai_base_url: "https://api.openai.com/v1"  # Optional, for compatible APIs
+      api_base: "https://api.openai.com/v1"  # Optional, for compatible APIs
     provides:
       - "gpt-4o*"
       - "gpt-4-turbo*"
@@ -148,16 +148,15 @@ npm start
 name: BotName  # Name used in LLM context (prefill labels, stop sequences)
 
 # Model
-mode: prefill  # or 'chat'
+mode: prefill  # or 'chat' or 'base-model'
 continuation_model: claude-3-5-sonnet-20241022
 temperature: 1.0
 max_tokens: 4096
-top_p: 1.0
+# top_p: 1.0  # Optional: sent only when set
 
 # Context
 recency_window_messages: 400  # Optional: max messages
 recency_window_characters: 100000  # Optional: max characters
-# When both specified, whichever limit is reached first is used
 rolling_threshold: 50
 
 # Images
@@ -171,13 +170,10 @@ max_tool_depth: 100
 
 # Retry
 llm_retries: 3
-discord_backoff_max: 32000
 
 # Misc
 system_prompt: "Optional system prompt"
 reply_on_random: 0
-reply_on_name: false
-max_queued_replies: 1
 ```
 
 ### Discord Commands
