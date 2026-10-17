@@ -148,6 +148,14 @@ describe('PortalConnector.getBotReplyChainDepth', () => {
     expect((h.client.fetchHistory.mock.calls[1] as any)[0].before).toBe('150')
   })
 
+  it('a failed fetch ends the walk where it is, as on the Discord backend', async () => {
+    h = makeHarness()
+    h.client.fetchHistory.mockRejectedValue(new Error('relay timeout') as never)
+
+    expect(await h.connector.getBotReplyChainDepth(CH, inbound(msg(5, 'bot-a', 4)))).toBe(1)
+    expect(h.client.fetchHistory).toHaveBeenCalledTimes(1)
+  })
+
   it('stops paging after five pages and ends the walk there', async () => {
     h = makeHarness()
     const filler = Array.from({ length: 600 }, (_, i) => msg(1000 + i, 'human'))
@@ -185,19 +193,23 @@ describe('PortalConnector pins', () => {
     expect(h.client.call).toHaveBeenCalledTimes(2)
   })
 
-  it('when list_pins requests overlap, the latest one\'s reply is kept', async () => {
+  it('a refresh asked for during a load loads once more, and a reader waiting on it gets the newest pins', async () => {
     h = makeHarness()
     const replies: Array<(v: unknown) => void> = []
     h.client.call.mockImplementation((() => new Promise((res) => replies.push(res))) as never)
     await h.connector.start()
+    const tick = () => new Promise((r) => setTimeout(r, 0))
 
-    h.client.emit('event', { type: 'pins_update', channelId: CH })
-    h.client.emit('event', { type: 'pins_update', channelId: CH })
-    replies[1]!({ messages: [pinned(20, '.config\n---\nmood: newer')] })
-    await new Promise((r) => setTimeout(r, 0))
+    const read = h.connector.fetchPinnedConfigs(CH) // a cache miss starts a load
+    h.client.emit('event', { type: 'pins_update', channelId: CH }) // a pin changes meanwhile
+    expect(h.client.call).toHaveBeenCalledTimes(1) // one request at a time per channel
+
     replies[0]!({ messages: [pinned(10, '.config\n---\nmood: older')] })
-    await new Promise((r) => setTimeout(r, 0))
+    await tick()
+    expect(h.client.call).toHaveBeenCalledTimes(2) // the load asks again for the change
+    replies[1]!({ messages: [pinned(20, '.config\n---\nmood: newer')] })
 
+    expect(await read).toEqual(['mood: newer'])
     expect(h.connector.getCachedPinnedConfigs(CH)).toEqual(['mood: newer'])
   })
 
@@ -268,6 +280,15 @@ describe('PortalConnector message bookkeeping', () => {
 
     expect(await h.connector.findAndEditBotMessage(CH, 'Status:', 'Status: <@alice> done')).toBe(true)
     expect(h.client.editMessage).toHaveBeenCalledWith(`rm_${CH}_3`, 'Status: @alice done')
+  })
+
+  it('the attachment sends rewrite <@name> mentions in their text as sendMessage does', async () => {
+    h = makeHarness()
+    await h.connector.sendMessageWithAttachment(CH, 'for <@alice>', { name: 'a.txt', content: 'x' })
+    await h.connector.sendImageAttachment(CH, 'aGk=', 'image/png', 'look, <@bob>')
+    await h.connector.sendFileAttachment(CH, Buffer.from('x'), 'f.bin', 'application/octet-stream', 'from <@carol>')
+
+    expect(h.sent.map((m) => m.content)).toEqual(['for @alice', 'look, @bob', 'from @carol'])
   })
 
   it('editMessage rewrites <@name> mentions as sendMessage does', async () => {

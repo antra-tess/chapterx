@@ -96,9 +96,11 @@ export class PortalConnector implements IConnector {
   private seen = new Map<string, { authorId: string; nativeId?: string }>()
   /** channelId → tracked pins (bootstrapped via list_pins, refreshed on pins_update). */
   private pinnedByChannel = new Map<string, TrackedPin[]>()
-  /** channelId → the number of the latest list_pins request, so an older reply
-   *  that arrives after a newer one doesn't overwrite it. */
-  private pinRequests = new Map<string, number>()
+  /** channelId → the list_pins load in progress. A refresh asked for while one
+   *  is in progress makes it load once more when its reply lands, so replies
+   *  apply in the order they were asked for, and everyone waiting on the load
+   *  reads the newest pins. */
+  private pinLoads = new Map<string, { done: Promise<void>; again: boolean }>()
   /** guildId → (roleId → name) with a fetch timestamp, for name-based auth. */
   private roleNameCache = new Map<string, { map: Map<string, string>; at: number }>()
 
@@ -247,7 +249,7 @@ export class PortalConnector implements IConnector {
     const file = fileFromBytes(attachment.name, Buffer.from(attachment.content, 'utf-8'))
     const { messageId } = await this.client.sendMessage({
       channelId,
-      content: content || undefined,
+      content: content ? normalizeOutgoingMentions(content) : undefined,
       files: [file],
       replyToId: replyToMessageId,
     })
@@ -266,7 +268,7 @@ export class PortalConnector implements IConnector {
     const file = fileFromBytes(`image.${ext}`, Buffer.from(imageBase64, 'base64'), { contentType: mediaType })
     const { messageId } = await this.client.sendMessage({
       channelId,
-      content: caption || undefined,
+      content: caption ? normalizeOutgoingMentions(caption) : undefined,
       files: [file],
       replyToId: replyToMessageId,
     })
@@ -285,7 +287,7 @@ export class PortalConnector implements IConnector {
     const file = fileFromBytes(filename, fileBuffer, { contentType })
     const { messageId } = await this.client.sendMessage({
       channelId,
-      content: caption || undefined,
+      content: caption ? normalizeOutgoingMentions(caption) : undefined,
       files: [file],
       replyToId: replyToMessageId,
     })
@@ -473,16 +475,24 @@ export class PortalConnector implements IConnector {
   ): Promise<number> {
     // The walk starts at the message itself, so a human's message costs no RPC.
     // Each link it needs is looked up in the channel's history, paging back
-    // until it's found or CHAIN_PAGES pages have been read.
+    // until it's found or CHAIN_PAGES pages have been read. A failed fetch ends
+    // the walk where it is, as a failed fetch of a reply's target does on the
+    // Discord backend.
     const seen = new Map<string, PortalMessage>()
     let before: string | undefined
     let pages = 0
     let exhausted = false
     const lookup = async (id: string) => {
       while (!seen.has(id) && !exhausted && pages < CHAIN_PAGES) {
-        const { messages } = await this.client.fetchHistory({ channelId, before, limit: 100 })
+        let page: PortalMessage[]
+        try {
+          page = newestFirst((await this.client.fetchHistory({ channelId, before, limit: 100 })).messages)
+        } catch (err) {
+          logger.debug({ err: (err as Error).message, channelId }, 'portal: reply-chain fetch failed, ending the walk')
+          exhausted = true
+          break
+        }
         pages++
-        const page = newestFirst(messages)
         for (const m of page) {
           seen.set(m.id, m)
           this.recordSeen(m)
@@ -504,19 +514,33 @@ export class PortalConnector implements IConnector {
 
   // ── Pins ──
 
-  /** Bootstrap (or refresh) a channel's pin cache via list_pins. When requests
-   *  overlap, only the latest one's reply is kept. A failed request caches
-   *  nothing, so the next read asks again. */
-  private async bootstrapPins(channelId: string): Promise<void> {
-    const request = (this.pinRequests.get(channelId) ?? 0) + 1
-    this.pinRequests.set(channelId, request)
-    try {
-      const { messages } = await this.client.call('list_pins', { channelId })
-      if (this.pinRequests.get(channelId) !== request) return
-      this.pinnedByChannel.set(channelId, messages.map(portalMessageToTrackedPin))
-    } catch (err) {
-      logger.warn({ err: (err as Error).message, channelId }, 'portal: list_pins failed')
+  /** Bootstrap (or refresh) a channel's pin cache via list_pins, one request at
+   *  a time per channel (see pinLoads). A failed request caches nothing, so the
+   *  next read asks again. */
+  private bootstrapPins(channelId: string): Promise<void> {
+    const inProgress = this.pinLoads.get(channelId)
+    if (inProgress) {
+      inProgress.again = true
+      return inProgress.done
     }
+    const load = { done: Promise.resolve(), again: true }
+    load.done = (async () => {
+      try {
+        while (load.again) {
+          load.again = false
+          try {
+            const { messages } = await this.client.call('list_pins', { channelId })
+            this.pinnedByChannel.set(channelId, messages.map(portalMessageToTrackedPin))
+          } catch (err) {
+            logger.warn({ err: (err as Error).message, channelId }, 'portal: list_pins failed')
+          }
+        }
+      } finally {
+        this.pinLoads.delete(channelId)
+      }
+    })()
+    this.pinLoads.set(channelId, load)
+    return load.done
   }
 
   private async ensurePins(channelId: string): Promise<TrackedPin[]> {
