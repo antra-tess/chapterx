@@ -63,6 +63,93 @@ function makeHarness() {
 
 const fenceMarkers = (s: string) => (s.match(/```/g) ?? []).length
 
+/** A portal message in channel CH with the given snowflake, author and reply. */
+function msg(n: number, author: 'human' | 'bot-a' | 'persona', replyTo?: number) {
+  const a =
+    author === 'human'
+      ? { kind: 'user', userId: 'h1', username: 'h', displayName: 'H', bot: false }
+      : author === 'bot-a'
+        ? { kind: 'user', userId: 'a1', username: 'a', displayName: 'A', bot: true }
+        : { kind: 'persona', personaId: 'persona-p', displayName: 'p', avatarUrl: '' }
+  return {
+    id: `rm_${CH}_${n}`,
+    nativeId: String(n),
+    channelId: CH,
+    guildId: 'g',
+    author: a,
+    content: 'x',
+    cleanContent: 'x',
+    attachments: [],
+    mentions: { personas: [], roles: [], users: [], everyone: false },
+    reactions: [],
+    replyToId: replyTo === undefined ? undefined : `rm_${CH}_${replyTo}`,
+    createdAt: new Date(0).toISOString(),
+  }
+}
+
+/** fetch_history over `all`: the `limit` messages older than `before` (by
+ *  snowflake), oldest first, so the connector can't lean on the order. */
+function historyOf(all: ReturnType<typeof msg>[]) {
+  return async ({ before, limit }: { before?: string; limit: number }) => {
+    const older = all
+      .filter((m) => before === undefined || BigInt(m.nativeId) < BigInt(before))
+      .sort((x, y) => (BigInt(y.nativeId) > BigInt(x.nativeId) ? 1 : -1))
+      .slice(0, limit)
+    return { messages: older.reverse() }
+  }
+}
+
+/** The inbound object the loop hands getBotReplyChainDepth for message `m`. */
+function inbound(m: ReturnType<typeof msg>) {
+  const human = m.author.kind === 'user' && !(m.author as { bot: boolean }).bot
+  const id = m.author.kind === 'persona' ? 'persona-p' : (m.author as { userId: string }).userId
+  return { id: m.id, author: { id, bot: !human }, reference: m.replyToId ? { messageId: m.replyToId } : undefined }
+}
+
+describe('PortalConnector.getBotReplyChainDepth', () => {
+  let h: ReturnType<typeof makeHarness>
+  afterEach(() => h?.cleanup())
+
+  it('scores a human\'s reply 0 without fetching anything', async () => {
+    h = makeHarness()
+    const all = [msg(1, 'human'), msg(2, 'bot-a', 1), msg(3, 'persona', 2)]
+    h.client.fetchHistory.mockImplementation(historyOf(all) as any)
+
+    expect(await h.connector.getBotReplyChainDepth(CH, inbound(msg(4, 'human', 3)))).toBe(0)
+    expect(h.client.fetchHistory).not.toHaveBeenCalled()
+  })
+
+  it('counts a bot\'s reply and each bot turn above it, as the Discord walker does', async () => {
+    h = makeHarness()
+    const all = [msg(1, 'human'), msg(2, 'bot-a', 1), msg(3, 'persona', 2)]
+    h.client.fetchHistory.mockImplementation(historyOf(all) as any)
+
+    expect(await h.connector.getBotReplyChainDepth(CH, inbound(msg(4, 'bot-a', 3)))).toBe(3)
+  })
+
+  it('pages back past the latest 100 messages for an older link', async () => {
+    h = makeHarness()
+    const filler = Array.from({ length: 150 }, (_, i) => msg(100 + i, 'human'))
+    const all = [msg(1, 'human'), msg(2, 'bot-a', 1), msg(3, 'persona', 2), ...filler]
+    h.client.fetchHistory.mockImplementation(historyOf(all) as any)
+
+    expect(await h.connector.getBotReplyChainDepth(CH, inbound(msg(300, 'bot-a', 3)))).toBe(3)
+    expect(h.client.fetchHistory).toHaveBeenCalledTimes(2)
+    expect((h.client.fetchHistory.mock.calls[1] as any)[0].before).toBe('150')
+  })
+
+  it('stops paging after five pages and ends the walk there', async () => {
+    h = makeHarness()
+    const filler = Array.from({ length: 600 }, (_, i) => msg(1000 + i, 'human'))
+    const all = [msg(1, 'human'), msg(2, 'persona', 1), ...filler]
+    h.client.fetchHistory.mockImplementation(historyOf(all) as any)
+
+    // Found, the persona's message would make it 2; five pages end the walk at 1.
+    expect(await h.connector.getBotReplyChainDepth(CH, inbound(msg(5000, 'bot-a', 2)))).toBe(1)
+    expect(h.client.fetchHistory).toHaveBeenCalledTimes(5)
+  })
+})
+
 describe('PortalConnector sending', () => {
   let h: ReturnType<typeof makeHarness>
   afterEach(() => h?.cleanup())

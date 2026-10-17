@@ -17,7 +17,8 @@ import { splitPreservingMarkdown, type MarkdownCarry } from '../../utils/discord
 import { queueEventFromPortal, authorOfMessage, type AdapterCtx } from './adapters.js'
 import { AttachmentCache } from '../util/attachment-cache.js'
 import { buildPortalContext, type ContextDeps } from './context.js'
-import type { PortalChannelRef } from './history.js'
+import { newestFirst, type PortalChannelRef } from './history.js'
+import { replyChainDepth } from '../util/reply-chain.js'
 import { extractConfigs, extractSteers, extractSleeps } from '../util/pin-extract.js'
 import type { BotIdentity } from '../../agent/pin-target.js'
 
@@ -59,6 +60,11 @@ function isTextBasedType(type?: string): boolean {
 }
 
 const AUTHOR_CAP = 5000
+/** How far back the reply-chain walk pages for a message it replies to, in pages
+ *  of 100. The protocol has no fetch by id, so this bounds the RPCs one check
+ *  can cost; a link older than this ends the walk, as a deleted message does on
+ *  the Discord backend. */
+const CHAIN_PAGES = 5
 const TYPING_REFRESH_MS = 8000
 /** The split target for one message, as DiscordConnector uses: under Discord's
  *  2000-character limit, with room for the splitter's synthetic closers. */
@@ -392,20 +398,32 @@ export class PortalConnector implements IConnector {
     channelId: string,
     message: { id: string; author?: { id?: string; bot?: boolean }; reference?: { messageId?: string } },
   ): Promise<number> {
-    // Walk the reply chain over a recent window, counting consecutive bot msgs.
-    const { messages } = await this.client.fetchHistory({ channelId, limit: 100 })
-    const byId = new Map(messages.map((m) => [m.id, m]))
-    let depth = 0
-    let cursor = message.reference?.messageId
-    while (cursor) {
-      const m = byId.get(cursor)
-      if (!m) break
+    // The walk starts at the message itself, so a human's message costs no RPC.
+    // Each link it needs is looked up in the channel's history, paging back
+    // until it's found or CHAIN_PAGES pages have been read.
+    const seen = new Map<string, PortalMessage>()
+    let before: string | undefined
+    let pages = 0
+    let exhausted = false
+    const lookup = async (id: string) => {
+      while (!seen.has(id) && !exhausted && pages < CHAIN_PAGES) {
+        const { messages } = await this.client.fetchHistory({ channelId, before, limit: 100 })
+        pages++
+        const page = newestFirst(messages)
+        for (const m of page) seen.set(m.id, m)
+        const oldest = page[page.length - 1]
+        if (!oldest) exhausted = true
+        else before = oldest.nativeId
+      }
+      const m = seen.get(id)
+      if (!m) return null
       const a = authorOfMessage(m)
-      if (!a.bot) break
-      depth++
-      cursor = m.replyToId
+      return { authorId: a.id, bot: a.bot, replyTo: m.replyToId }
     }
-    return depth
+    return replyChainDepth(
+      { authorId: message.author?.id, bot: !!message.author?.bot, replyTo: message.reference?.messageId },
+      lookup,
+    )
   }
 
   // ── Pins ──

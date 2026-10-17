@@ -59,6 +59,12 @@ function snowflakeLE(a: string, b: string): boolean {
   }
 }
 
+/** A copy of `messages`, newest first by Discord snowflake. fetch_history's order
+ *  isn't part of portal-protocol, so callers sort rather than rely on it. */
+export function newestFirst<T extends { nativeId: string }>(messages: readonly T[]): T[] {
+  return [...messages].sort((a, b) => (a.nativeId === b.nativeId ? 0 : snowflakeLE(a.nativeId, b.nativeId) ? 1 : -1))
+}
+
 /** Keep only real user/persona messages (drop relay system notices). */
 function isKeepable(pm: PortalMessage): boolean {
   return pm.author.kind !== 'system'

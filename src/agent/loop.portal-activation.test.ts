@@ -16,9 +16,14 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import type { PortalEvent, PortalMessage } from '@animalabs/portal-protocol'
 import { AgentLoop } from './loop.js'
+import { EventQueue } from './event-queue.js'
 import { queueEventFromPortal, type AdapterCtx } from '../connector/portal/adapters.js'
+import { PortalConnector } from '../connector/portal/portal-connector.js'
 
 const PERSONA = 'persona-p'
 
@@ -46,12 +51,16 @@ function event(message: PortalMessage, addressedToMe: boolean, reasons: string[]
   return queueEventFromPortal(e, ctx)!
 }
 
-function makeLoop(depth = 0) {
-  const connector = {
+function fakeConnector(depth = 0) {
+  return {
     getCachedPinnedConfigs: () => null,
     getBotReplyChainDepth: vi.fn(async () => depth),
     addReaction: vi.fn(async () => undefined),
   }
+}
+
+/** shouldActivate on a loop that has only the fields it reads. */
+function makeLoop(connector: unknown) {
   const loop = Object.create(AgentLoop.prototype)
   Object.assign(loop, {
     botId: 'glm52',
@@ -63,39 +72,62 @@ function makeLoop(depth = 0) {
     },
     sleepState: { sleepPinsForBot: () => [], isSleeping: () => false, observeMessage: () => undefined },
   })
-  const shouldActivate = (events: unknown[]) => (loop as any).shouldActivate(events, 'chan', 'guild') as Promise<boolean>
-  return { connector, shouldActivate }
+  return (events: unknown[]) => (loop as any).shouldActivate(events, 'chan', 'guild') as Promise<boolean>
 }
 
 describe('shouldActivate for portal events', () => {
   it('a reply the relay addresses to the persona wakes the bot through the mention path', async () => {
-    const l = makeLoop(0)
+    const c = fakeConnector(0)
     const ev = event(pm({ replyToId: 'rm_chan_150' }), true, ['reply'])
 
-    expect(await l.shouldActivate([ev])).toBe(true)
-    expect(l.connector.getBotReplyChainDepth).toHaveBeenCalledTimes(1)
+    expect(await makeLoop(c)([ev])).toBe(true)
+    expect(c.getBotReplyChainDepth).toHaveBeenCalledTimes(1)
   })
 
   it('the mention path\'s reply-chain limit applies to such a reply', async () => {
-    const l = makeLoop(2)
+    const c = fakeConnector(2)
     const ev = event(pm({ replyToId: 'rm_chan_150' }), true, ['reply'])
 
-    expect(await l.shouldActivate([ev])).toBe(false)
-    expect(l.connector.addReaction).toHaveBeenCalledWith('chan', 'rm_chan_200', '🔗')
+    expect(await makeLoop(c)([ev])).toBe(false)
+    expect(c.addReaction).toHaveBeenCalledWith('chan', 'rm_chan_200', '🔗')
   })
 
   it('an m command sent as a reply to the persona is ours, even after a restart', async () => {
-    const l = makeLoop(0)
     const ev = event(pm({ replyToId: 'rm_chan_150', content: 'm continue', cleanContent: 'm continue' }), true, ['reply'])
 
-    expect(await l.shouldActivate([ev])).toBe(true)
+    expect(await makeLoop(fakeConnector(0))([ev])).toBe(true)
     expect((ev.data as any)._isMCommand).toBe(true)
   })
 
   it('ambient traffic doesn\'t wake the bot', async () => {
-    const l = makeLoop(0)
     const ev = event(pm(), false, ['subscription'])
 
-    expect(await l.shouldActivate([ev])).toBe(false)
+    expect(await makeLoop(fakeConnector(0))([ev])).toBe(false)
+  })
+
+  it('with the real portal connector, a human\'s reply under a bot exchange still wakes the bot', async () => {
+    // The persona's message answered bot A, which answered a human; a human now
+    // replies to the persona. The chain walk starts at the human's reply, so the
+    // limit (2 here) doesn't refuse it.
+    const tmpCache = mkdtempSync(join(tmpdir(), 'loop-portal-activation-'))
+    try {
+      const connector = new PortalConnector(new EventQueue(), {
+        url: 'ws://relay.invalid', token: 't', personaId: PERSONA, cacheDir: tmpCache,
+      })
+      const history = [
+        pm({ id: 'rm_chan_1', nativeId: '1' }),
+        pm({ id: 'rm_chan_2', nativeId: '2', replyToId: 'rm_chan_1', author: { kind: 'user', userId: 'a1', username: 'a', displayName: 'A', bot: true } }),
+        pm({ id: 'rm_chan_3', nativeId: '3', replyToId: 'rm_chan_2', author: { kind: 'persona', personaId: PERSONA, displayName: 'p', avatarUrl: '' } }),
+      ]
+      ;(connector as any).client = {
+        fetchHistory: vi.fn(async () => ({ messages: history })),
+        react: vi.fn(async () => undefined),
+      }
+      const ev = event(pm({ id: 'rm_chan_4', nativeId: '4', replyToId: 'rm_chan_3' }), true, ['reply'])
+
+      expect(await makeLoop(connector)([ev])).toBe(true)
+    } finally {
+      rmSync(tmpCache, { recursive: true, force: true })
+    }
   })
 })
