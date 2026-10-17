@@ -53,6 +53,7 @@ function event(message: PortalMessage, addressedToMe: boolean, reasons: string[]
 
 function fakeConnector(depth = 0) {
   return {
+    isPortal: () => true,
     getCachedPinnedConfigs: () => null,
     getBotReplyChainDepth: vi.fn(async () => depth),
     addReaction: vi.fn(async () => undefined),
