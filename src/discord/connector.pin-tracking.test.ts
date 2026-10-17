@@ -273,7 +273,7 @@ describe('fetchPinnedSteerMessages', () => {
 })
 
 describe('enqueue', () => {
-  it('queues an event the connector didn\'t receive at once, since its pins are on disk from the start', () => {
+  it('queues an event the connector didn\'t receive at once, as it queues its own', () => {
     const tmpCache = mkdtempSync(join(tmpdir(), 'connector-enqueue-test-'))
     try {
       const queue = new EventQueue()

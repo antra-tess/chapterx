@@ -343,8 +343,7 @@ export class DiscordConnector implements IConnector {
     return false
   }
 
-  /** The Discord backend's pins are on disk from the start, so an event goes
-   *  straight to the queue. */
+  /** Queues the event at once, as the connector's own events are. */
   enqueue(event: Event): void {
     this.queue.push(event)
   }
