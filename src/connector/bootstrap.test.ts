@@ -14,6 +14,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import * as YAML from 'yaml'
 
 vi.mock('@animalabs/portal-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@animalabs/portal-client')>()),
@@ -54,9 +55,9 @@ describe('resolveConnectorSettings: the backend', () => {
     expect(() => resolveConnectorSettings(inputs({ env: { CONNECTOR_BACKEND: 'portl' } }))).toThrow(/^CONNECTOR_BACKEND is "portl"/)
   })
 
-  it('refuses a config value that is not a string', () => {
+  it('refuses a config value that is not text, saying to quote it', () => {
     expect(() => resolveConnectorSettings(inputs({ botConfig: { connector_backend: true } }))).toThrow(
-      'connector_backend in the bot config must be a string',
+      'connector_backend in the bot config must be text, and YAML read it as true. Write it in quotes, as connector_backend: "…", so it\'s kept as written.',
     )
   })
 })
@@ -71,9 +72,12 @@ describe('resolveConnectorSettings: the portal backend', () => {
     )
   })
 
-  it('takes a number in the bot config as the string it was written as', () => {
-    // An invite code of digits, unquoted in YAML, reads as a number.
-    expect(portal({ botConfig: { portal_invite: 123456 } })).toMatchObject({ credentials: { invite: '123456' } })
+  it('refuses an unquoted invite code YAML read as a number, since its text as written is gone', () => {
+    // `portal_invite: 0482913` in the file: YAML's core schema reads it as 482913.
+    const botConfig = YAML.parse('portal_invite: 0482913\n')
+    expect(() => portal({ botConfig })).toThrow(
+      'portal_invite in the bot config must be text, and YAML read it as 482913. Write it in quotes, as portal_invite: "…", so it\'s kept as written.',
+    )
   })
 
   it('takes a persona\'s credentials from PORTAL_PERSONA and PORTAL_TOKEN together', () => {
@@ -159,15 +163,26 @@ describe('portalCredentials', () => {
     expect(loadOrEnrollCreds).not.toHaveBeenCalled()
   })
 
-  it('names what enrolling a new persona is missing', async () => {
+  it('names what enrolling a new persona is missing, and when the bot\'s config file is read', async () => {
     dir = mkdtempSync(join(tmpdir(), 'bootstrap-test-'))
     const credsPath = join(dir, 'portal-creds.json')
 
     await expect(portalCredentials('wss://relay', { from: 'file', credsPath, invite: 'inv' })).rejects.toThrow(
-      `No saved portal credentials at ${credsPath}, and enrolling a new persona needs a name (PORTAL_DESIRED_NAME, portal_desired_name or BOT_NAME)`,
+      `No saved portal credentials at ${credsPath}, and enrolling a new persona needs a name (PORTAL_DESIRED_NAME, portal_desired_name in the bot's config file, or BOT_NAME). The bot's config file is read when BOT_NAME is set.`,
     )
     await expect(portalCredentials('wss://relay', { from: 'file', credsPath })).rejects.toThrow(
-      'needs an invite (PORTAL_INVITE or portal_invite) and a name (PORTAL_DESIRED_NAME, portal_desired_name or BOT_NAME)',
+      "needs an invite (PORTAL_INVITE, or portal_invite in the bot's config file) and a name (PORTAL_DESIRED_NAME, portal_desired_name in the bot's config file, or BOT_NAME).",
+    )
+    expect(loadOrEnrollCreds).not.toHaveBeenCalled()
+  })
+
+  it('won\'t enroll over a credentials file that has no persona id and token', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'bootstrap-test-'))
+    const credsPath = join(dir, 'portal-creds.json')
+    writeFileSync(credsPath, '{ "personaId": "p1" }')
+
+    await expect(portalCredentials('wss://relay', { from: 'file', credsPath, invite: 'inv', desiredName: 'glm52' })).rejects.toThrow(
+      `The saved portal credentials at ${credsPath} have no persona id and token. Fix the file, or remove it to enroll a new persona.`,
     )
     expect(loadOrEnrollCreds).not.toHaveBeenCalled()
   })

@@ -18,6 +18,7 @@
  * starts, so only the environment applies.
  */
 
+import { existsSync } from 'fs'
 import { join } from 'path'
 import { fileCredsStore, loadOrEnrollCreds } from '@animalabs/portal-client'
 import { logger } from '../utils/logger.js'
@@ -62,13 +63,15 @@ function setting(
   if (fromEnv) return { value: fromEnv, from: envName }
   const fromConfig = inputs.botConfig[key]
   if (fromConfig === undefined || fromConfig === null || fromConfig === '') return undefined
-  const from = `${key} in the bot config`
-  // YAML reads an unquoted invite code of digits as a number: take it as written.
-  if (typeof fromConfig === 'number') return { value: String(fromConfig), from }
+  // YAML reads an unquoted value such as an invite code of digits as a number,
+  // and its text as written is gone by then (a leading zero, say), so it's
+  // refused rather than rebuilt.
   if (typeof fromConfig !== 'string') {
-    throw new Error(`${key} in the bot config must be a string, and it's ${JSON.stringify(fromConfig)}`)
+    throw new Error(
+      `${key} in the bot config must be text, and YAML read it as ${JSON.stringify(fromConfig)}. Write it in quotes, as ${key}: "…", so it's kept as written.`,
+    )
   }
-  return { value: fromConfig, from }
+  return { value: fromConfig, from: `${key} in the bot config` }
 }
 
 /**
@@ -145,12 +148,21 @@ export async function portalCredentials(url: string, source: PortalCredentialsSo
     logger.info({ credsPath: source.credsPath, personaId: saved.personaId }, 'Loaded the saved portal persona credentials')
     return saved
   }
+  // A file that parses without both is no persona's, but enrolling would write
+  // over it, so it stops the start as an unreadable one does.
+  if (existsSync(source.credsPath)) {
+    throw new Error(
+      `The saved portal credentials at ${source.credsPath} have no persona id and token. Fix the file, or remove it to enroll a new persona.`,
+    )
+  }
   const missing = [
-    !source.invite && 'an invite (PORTAL_INVITE or portal_invite)',
-    !source.desiredName && 'a name (PORTAL_DESIRED_NAME, portal_desired_name or BOT_NAME)',
+    !source.invite && "an invite (PORTAL_INVITE, or portal_invite in the bot's config file)",
+    !source.desiredName && "a name (PORTAL_DESIRED_NAME, portal_desired_name in the bot's config file, or BOT_NAME)",
   ].filter((s): s is string => !!s)
   if (missing.length > 0) {
-    throw new Error(`No saved portal credentials at ${source.credsPath}, and enrolling a new persona needs ${missing.join(' and ')}`)
+    throw new Error(
+      `No saved portal credentials at ${source.credsPath}, and enrolling a new persona needs ${missing.join(' and ')}. The bot's config file is read when BOT_NAME is set.`,
+    )
   }
   const creds = await loadOrEnrollCreds({
     url,
