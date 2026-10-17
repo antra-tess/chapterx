@@ -1134,7 +1134,7 @@ describe('splitPreservingMarkdown — edge cases', () => {
     ])
   })
 
-  it('never sends an empty code block when a fence\'s first line fills the window', () => {
+  it('never sends a fence\'s opening line alone when its first line of code fills the window', () => {
     const text = '```js\n' + 'x'.repeat(1800) + '\n```'
     const r = splitPreservingMarkdown(text, 1800)
     for (const c of r.chunks) expect(c.text).toContain('x')
@@ -1161,6 +1161,22 @@ describe('splitPreservingMarkdown — edge cases', () => {
       expect(reconstruct(r.chunks)).toBe(text)
       assertAllWithinLimit(r.chunks, 1800)
     }
+  })
+
+  it('keeps the last content with trailing blank lines when the closer makes the last window too long', () => {
+    // The whole text fits the window, but not with the closer an unclosed fence
+    // needs at the end, so the chunk shrinks to fit: the blank lines and the
+    // closer must not end up in a chunk of their own, an empty code block.
+    const text = '```\n' + 'a'.repeat(1790) + '\n'.repeat(5)
+    const r = splitPreservingMarkdown(text, 1800)
+    expect(r.chunks.length).toBeGreaterThan(1)
+    for (const c of r.chunks) expect(c.text).toContain('a')
+    expect(reconstruct(r.chunks)).toBe(text)
+    assertAllWithinLimit(r.chunks, 1800)
+  })
+
+  it('leaves a short text with markup and trailing whitespace in one chunk', () => {
+    expect(splitPreservingMarkdown('**ab**\n\n', 1800).chunks.map((c) => c.text)).toEqual(['**ab**\n\n'])
   })
 
   it('splits a text whose only content is its first character, then more whitespace than a chunk holds', () => {

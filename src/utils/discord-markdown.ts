@@ -541,11 +541,12 @@ export function scanMarkdown(text: string, start: MarkdownCarry = []): MarkdownC
  * chunk boundary and reopening it at the next. `startCarry` continues a
  * construct inherited from a previous message; `endCarry` reports the open
  * stack after the last chunk so callers can thread continuity across calls.
- * Where the text allows, every chunk holds some of its content, that is, text
- * other than whitespace and a construct's opener or closer: a chunk with none,
- * such as a paragraph break on its own or an empty code block, is a message
- * with nothing in it to show. A run of whitespace and markup nearly as long as
- * a chunk can still make one.
+ * A chunk with no content, that is, no text other than whitespace and a
+ * construct's opener or closer, is a message with nothing in it to show. So a
+ * cut at a newline comes after the chunk's first content, and the text's last
+ * content stays with the whitespace and closers after it: a paragraph break,
+ * trailing whitespace or a code block's fence lines aren't sent on their own.
+ * Whitespace and markup that fill nearly a chunk's length can still leave one.
  */
 export function splitPreservingMarkdown(
   text: string,
@@ -588,6 +589,9 @@ export function splitPreservingMarkdown(
   const chunks: ChunkPiece[] = []
   let chunkStart = 0
   let inherited: OpenMark[] = startCarry.slice()
+  // The first content at or after chunkStart. Chunks only move forward, so it
+  // does too, and finding it costs one pass over the text in all.
+  let firstContent = 0
 
   // Reopener for an inherited stack, with a fence's info-string tail capped so
   // the reopener can never, on its own, crowd out maxLength. A fence is
@@ -670,17 +674,19 @@ export function splitPreservingMarkdown(
     // snapped cut are counted. `cut <= chunkStart + 1` escapes the pathological
     // case where the closers alone exceed maxLength.
     let end = Math.min(text.length, chunkStart + Math.max(1, maxLength - reopenLen))
-    let firstContent = chunkStart
+    if (firstContent < chunkStart) firstContent = chunkStart
     while (firstContent < text.length && !isContent(firstContent)) firstContent++
-    // A window that takes the text's last content, but not the whitespace and
-    // closers after it, would leave those to a chunk of their own. Leave the
-    // last content to the next chunk instead, when this one holds some before it.
-    if (end < text.length && end >= lastContentEnd && firstContent < lastContentEnd - 1) {
-      end = lastContentEnd - 1
-    }
     let cut = -1
     let closeStack: OpenMark[] = []
     for (let guard = 0; guard < 64; guard++) {
+      // A window that takes the text's last content, but not the whitespace and
+      // closers after it, would leave those to a chunk of their own. Leave the
+      // last content to the next chunk instead, when this one holds some before
+      // it. Checked on every pass, since shrinking to fit closers can bring a
+      // window that took the whole text back to one that stops short of it.
+      if (end < text.length && end >= lastContentEnd && firstContent < lastContentEnd - 1) {
+        end = lastContentEnd - 1
+      }
       if (end >= text.length) {
         cut = text.length
         // Final chunk: close only exclusive constructs (emphasis stays literal).
