@@ -34,7 +34,16 @@ function makeHarness() {
   })
   const sent: Sent[] = []
   let nextId = 1
+  const handlers = new Map<string, Array<(arg: unknown) => void>>()
   const client = {
+    on: vi.fn((name: string, fn: (arg: unknown) => void) => {
+      handlers.set(name, [...(handlers.get(name) ?? []), fn])
+    }),
+    connect: vi.fn(async () => undefined),
+    /** Fire a client event, as PortalClient's emitter would. */
+    emit: (name: string, arg?: unknown) => {
+      for (const fn of handlers.get(name) ?? []) fn(arg)
+    },
     sendMessage: vi.fn(async (p: Sent) => {
       sent.push({ channelId: p.channelId, content: p.content, replyToId: p.replyToId })
       return { messageId: `rm_${p.channelId}_${nextId++}` }
@@ -147,6 +156,73 @@ describe('PortalConnector.getBotReplyChainDepth', () => {
     // Found, the persona's message would make it 2; five pages end the walk at 1.
     expect(await h.connector.getBotReplyChainDepth(CH, inbound(msg(5000, 'bot-a', 2)))).toBe(1)
     expect(h.client.fetchHistory).toHaveBeenCalledTimes(5)
+  })
+})
+
+/** A pinned message as list_pins returns it. */
+function pinned(n: number, content: string) {
+  return { ...msg(n, 'human'), content, cleanContent: content }
+}
+
+describe('PortalConnector pins', () => {
+  let h: ReturnType<typeof makeHarness>
+  afterEach(() => h?.cleanup())
+
+  it('pinMessage refuses, so a tool that pins to take effect reports that it didn\'t', async () => {
+    h = makeHarness()
+    await expect(h.connector.pinMessage(CH, 'rm_chan-1_5')).rejects.toThrow(/portal backend/)
+  })
+
+  it('a failed list_pins caches nothing, and the next read asks again', async () => {
+    h = makeHarness()
+    h.client.call.mockRejectedValueOnce(new Error('relay down') as never)
+    h.client.call.mockResolvedValueOnce({ messages: [pinned(10, '.config\n---\nmood: calm')] } as never)
+
+    expect(await h.connector.fetchPinnedConfigs(CH)).toEqual([])
+    expect(h.connector.getCachedPinnedConfigs(CH)).toBeNull()
+    expect(await h.connector.fetchPinnedConfigs(CH)).toEqual(['mood: calm'])
+    expect(h.client.call).toHaveBeenCalledTimes(2)
+  })
+
+  it('when list_pins requests overlap, the latest one\'s reply is kept', async () => {
+    h = makeHarness()
+    const replies: Array<(v: unknown) => void> = []
+    h.client.call.mockImplementation((() => new Promise((res) => replies.push(res))) as never)
+    await h.connector.start()
+
+    h.client.emit('event', { type: 'pins_update', channelId: CH })
+    h.client.emit('event', { type: 'pins_update', channelId: CH })
+    replies[1]!({ messages: [pinned(20, '.config\n---\nmood: newer')] })
+    await new Promise((r) => setTimeout(r, 0))
+    replies[0]!({ messages: [pinned(10, '.config\n---\nmood: older')] })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(h.connector.getCachedPinnedConfigs(CH)).toEqual(['mood: newer'])
+  })
+
+  it('a pins_update inside a thread refreshes the thread\'s pins', async () => {
+    h = makeHarness()
+    h.client.call.mockResolvedValue({ messages: [pinned(30, '.steer be brief')] } as never)
+    await h.connector.start()
+
+    h.client.emit('event', { type: 'pins_update', channelId: 'parent', threadId: 'thread-1' })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect((h.client.call.mock.calls[0] as any)[1]).toEqual({ channelId: 'thread-1' })
+    expect(h.connector.getCachedPinnedSteers('thread-1')).toHaveLength(1)
+    expect(h.connector.getCachedPinnedSteers('parent')).toBeNull()
+  })
+
+  it('a fresh ready drops the pin cache, since a gap\'s pins_update may be lost', async () => {
+    h = makeHarness()
+    h.client.call.mockResolvedValue({ messages: [pinned(40, '.sleep')] } as never)
+    await h.connector.start()
+    await h.connector.fetchPinnedSleeps(CH)
+    expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1)
+
+    h.client.emit('ready', {})
+
+    expect(h.connector.getCachedPinnedSleeps(CH)).toBeNull()
   })
 })
 

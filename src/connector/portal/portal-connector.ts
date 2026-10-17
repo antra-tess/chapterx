@@ -80,6 +80,9 @@ export class PortalConnector implements IConnector {
   private authorById = new Map<string, string>()
   /** channelId → tracked pins (bootstrapped via list_pins, refreshed on pins_update). */
   private pinnedByChannel = new Map<string, TrackedPin[]>()
+  /** channelId → the number of the latest list_pins request, so an older reply
+   *  that arrives after a newer one doesn't overwrite it. */
+  private pinRequests = new Map<string, number>()
   /** guildId → (roleId → name) with a fetch timestamp, for name-based auth. */
   private roleNameCache = new Map<string, { map: Map<string, string>; at: number }>()
 
@@ -101,6 +104,10 @@ export class PortalConnector implements IConnector {
 
   async start(): Promise<void> {
     this.client.on('event', (e) => this.onEvent(e))
+    // A fresh `ready` means the relay couldn't resume the session, so pins_update
+    // events in the gap may be lost: drop the pin cache and let each channel
+    // refill it on its next read. A resume replays the gap and keeps the cache.
+    this.client.on('ready', () => this.pinnedByChannel.clear())
     this.client.on('close', (info) =>
       logger.warn({ code: info.code, willReconnect: info.willReconnect }, 'portal connection closed'),
     )
@@ -121,7 +128,8 @@ export class PortalConnector implements IConnector {
   private onEvent(e: PortalEvent): void {
     if (e.type === 'message_create' || e.type === 'message_update') this.recordAuthor(e.message)
     // Keep the pin cache warm so the hot-path getCachedPinned* getters stay fresh.
-    if (e.type === 'pins_update') void this.bootstrapPins(e.channelId)
+    // A thread's pins are cached under the thread, as every other thread event is.
+    if (e.type === 'pins_update') void this.bootstrapPins(e.threadId ?? e.channelId)
     const ev = queueEventFromPortal(e, this.adapterCtx())
     if (ev) this.queue.push(ev)
   }
@@ -294,8 +302,11 @@ export class PortalConnector implements IConnector {
   }
 
   async pinMessage(channelId: string, messageId: string): Promise<void> {
-    // Portal has no pin-mutation RPC (read-only list_pins). No-op + warn.
+    // Portal has no pin-mutation RPC (list_pins is read-only). Callers such as
+    // the .sleep and config tools pin to make something take effect, so a silent
+    // success would tell them it had.
     logger.warn({ channelId, messageId }, 'portal: pinMessage unsupported (no pin-mutation RPC)')
+    throw new Error("Pinning isn't available on the portal backend: the relay has no pin RPC, so the message wasn't pinned.")
   }
 
   // ── Typing ──
@@ -428,14 +439,18 @@ export class PortalConnector implements IConnector {
 
   // ── Pins ──
 
-  /** Bootstrap (or refresh) a channel's pin cache via list_pins. */
+  /** Bootstrap (or refresh) a channel's pin cache via list_pins. When requests
+   *  overlap, only the latest one's reply is kept. A failed request caches
+   *  nothing, so the next read asks again. */
   private async bootstrapPins(channelId: string): Promise<void> {
+    const request = (this.pinRequests.get(channelId) ?? 0) + 1
+    this.pinRequests.set(channelId, request)
     try {
       const { messages } = await this.client.call('list_pins', { channelId })
+      if (this.pinRequests.get(channelId) !== request) return
       this.pinnedByChannel.set(channelId, messages.map(portalMessageToTrackedPin))
     } catch (err) {
       logger.warn({ err: (err as Error).message, channelId }, 'portal: list_pins failed')
-      if (!this.pinnedByChannel.has(channelId)) this.pinnedByChannel.set(channelId, [])
     }
   }
 

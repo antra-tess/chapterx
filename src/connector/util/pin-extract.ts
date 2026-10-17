@@ -7,8 +7,20 @@
 import type { TrackedPin, PinnedSteer } from '../types.js'
 import { pinAddressesBot, type BotIdentity } from '../../agent/pin-target.js'
 
+/** Oldest first. Pin ids are Discord snowflakes, compared as integers: ids gained
+ *  a digit in July 2022, so comparing them as strings misorders the two eras. An
+ *  id that isn't a number falls back to string order rather than failing the
+ *  extraction. */
 function sortById(pins: TrackedPin[]): TrackedPin[] {
-  return [...pins].sort((a, b) => a.id.localeCompare(b.id))
+  return [...pins].sort((a, b) => {
+    try {
+      const x = BigInt(a.id)
+      const y = BigInt(b.id)
+      return x < y ? -1 : x > y ? 1 : 0
+    } catch {
+      return a.id.localeCompare(b.id)
+    }
+  })
 }
 
 /** Identity + roles a connector resolves a pin target against. */
@@ -22,7 +34,8 @@ export interface PinMatchContext {
  * (its text, or a relay-resolved role/persona mention) addresses this bot, the
  * target is stripped so parseChannelConfig applies it as a bare config.
  * Otherwise the `target:` text is preserved for downstream botId/config-name
- * matching. Without `ctx`, behaves as the original (target text preserved).
+ * matching. Without `ctx`, nothing is matched here and every target's text is
+ * preserved.
  */
 export function extractConfigs(pins: TrackedPin[], ctx?: PinMatchContext): string[] {
   const configs: string[] = []

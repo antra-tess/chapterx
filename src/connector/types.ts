@@ -24,6 +24,9 @@ export interface ConnectorOptions {
  * needed to resolve .config / .steer / .sleep without re-hitting a pins endpoint.
  */
 export interface TrackedPin {
+  /** The pinned message's Discord snowflake, on both backends (the portal relay's
+   *  `nativeId`), so pins sort in time order. On the portal backend it isn't the
+   *  relay id the relay's message RPCs take. */
   id: string
   content: string
   authorId: string
