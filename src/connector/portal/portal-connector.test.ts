@@ -280,6 +280,24 @@ describe('PortalConnector pins', () => {
     expect(h.client.call).toHaveBeenCalledTimes(3)
   })
 
+  it('a load whose last request fails leaves the channel not current, even when an earlier one succeeded', async () => {
+    h = makeHarness()
+    const replies: Array<{ res: (v: unknown) => void; rej: (e: Error) => void }> = []
+    h.client.call.mockImplementation((() => new Promise((res, rej) => replies.push({ res, rej }))) as never)
+    await h.connector.start()
+    const read = h.connector.fetchPinnedSleeps(CH)
+    h.client.emit('event', { type: 'pins_update', channelId: CH }) // the load asks once more
+    replies[0]!.res({ messages: [pinned(40, '.sleep')] })
+    await new Promise((r) => setTimeout(r, 0))
+    replies[1]!.rej(new Error('relay down'))
+    await read
+
+    const again = h.connector.fetchPinnedSleeps(CH)
+    expect(h.client.call).toHaveBeenCalledTimes(3) // the next read asks again
+    replies[2]!.res({ messages: [] })
+    expect(await again).toEqual([])
+  })
+
   it('a resume neither drops nor reloads the pin cache', async () => {
     h = makeHarness()
     h.client.call.mockResolvedValue({ messages: [pinned(40, '.sleep')] } as never)
