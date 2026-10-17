@@ -541,6 +541,14 @@ export function scanMarkdown(text: string, start: MarkdownCarry = []): MarkdownC
  * chunk boundary and reopening it at the next. `startCarry` continues a
  * construct inherited from a previous message; `endCarry` reports the open
  * stack after the last chunk so callers can thread continuity across calls.
+ * A chunk with no content, that is, no text other than whitespace and a
+ * construct's opener or closer, is a message with nothing in it to show. So a
+ * cut at a newline comes after the chunk's first content, and the text's last
+ * content stays with the whitespace and closers after it: a paragraph break,
+ * trailing whitespace or a code block's fence lines aren't sent on their own.
+ * Whitespace and markup that fill nearly a chunk's length can still leave one,
+ * and so can pulling a cut back to keep a bridge's marker from fusing with the
+ * same character beside it, when the chunk's content sits among such characters.
  */
 export function splitPreservingMarkdown(
   text: string,
@@ -559,6 +567,18 @@ export function splitPreservingMarkdown(
   // Unmatched emphasis is never recorded in `constructs`, so it is left literal.
   const bridgeable = constructs
 
+  // Content: a character that isn't whitespace or part of a construct's opener
+  // or closer, which show nothing on their own. `lastContentEnd` is just past
+  // the text's last content, 0 if it has none.
+  const markup = new Uint8Array(text.length)
+  for (const c of bridgeable) {
+    if (c.openStart >= 0) markup.fill(1, c.openStart, c.contentStart)
+    markup.fill(1, c.contentEnd, c.closeEnd)
+  }
+  const isContent = (i: number): boolean => markup[i] === 0 && !/\s/.test(text[i]!)
+  let lastContentEnd = text.length
+  while (lastContentEnd > 0 && !isContent(lastContentEnd - 1)) lastContentEnd--
+
   // stackAt(pos): constructs straddling pos (opener before, closer after),
   // ordered outermost-first.
   const stackAt = (pos: number): OpenMark[] => {
@@ -571,6 +591,9 @@ export function splitPreservingMarkdown(
   const chunks: ChunkPiece[] = []
   let chunkStart = 0
   let inherited: OpenMark[] = startCarry.slice()
+  // The first content at or after chunkStart. Chunks only move forward, so it
+  // does too, and finding it costs one pass over the text in all.
+  let firstContent = 0
 
   // Reopener for an inherited stack, with a fence's info-string tail capped so
   // the reopener can never, on its own, crowd out maxLength. A fence is
@@ -653,9 +676,19 @@ export function splitPreservingMarkdown(
     // snapped cut are counted. `cut <= chunkStart + 1` escapes the pathological
     // case where the closers alone exceed maxLength.
     let end = Math.min(text.length, chunkStart + Math.max(1, maxLength - reopenLen))
+    if (firstContent < chunkStart) firstContent = chunkStart
+    while (firstContent < text.length && !isContent(firstContent)) firstContent++
     let cut = -1
     let closeStack: OpenMark[] = []
     for (let guard = 0; guard < 64; guard++) {
+      // A window that takes the text's last content, but not the whitespace and
+      // closers after it, would leave those to a chunk of their own. Leave the
+      // last content to the next chunk instead, when this one holds some before
+      // it. Checked on every pass, since shrinking to fit closers can bring a
+      // window that took the whole text back to one that stops short of it.
+      if (end < text.length && end >= lastContentEnd && firstContent < lastContentEnd - 1) {
+        end = lastContentEnd - 1
+      }
       if (end >= text.length) {
         cut = text.length
         // Final chunk: close only exclusive constructs (emphasis stays literal).
@@ -663,12 +696,15 @@ export function splitPreservingMarkdown(
       } else {
         // Prefer the latest newline within (chunkStart, end] that does not land
         // inside a non-fence construct (which would fragment it and risk a seam
-        // merge); keep it at this chunk's end so reconstruction is exact.
-        // Otherwise hard-split without bisecting a delimiter run.
+        // merge); keep it at this chunk's end so reconstruction is exact. A
+        // newline before any content would end a chunk with none, such as a
+        // paragraph break that starts the window, and so would every newline
+        // before it. Otherwise hard-split without bisecting a delimiter run.
         const body = text.slice(chunkStart, end)
         let nlCut = -1
         for (let nl = body.lastIndexOf('\n'); nl >= 0; nl = nl > 0 ? body.lastIndexOf('\n', nl - 1) : -1) {
           const candidate = chunkStart + nl + 1
+          if (candidate <= firstContent) break
           if (!straddlesNonFence(candidate)) {
             nlCut = candidate
             break
