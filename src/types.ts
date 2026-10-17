@@ -175,6 +175,14 @@ export interface BotConfig {
   // Identity
   name: string  // Name used in LLM context (prefill labels, stop sequences)
 
+  // Connector, read once at startup from the bot's own config file; the env var
+  // of the same name in capitals overrides each (see connector/bootstrap.ts)
+  connector_backend?: 'discord' | 'portal'  // Default: discord
+  portal_url?: string  // The portal relay's WebSocket URL
+  portal_creds_path?: string  // Where the persona's credentials are saved. Default: beside this config file
+  portal_desired_name?: string  // The persona's name when it enrolls. Default: BOT_NAME
+  portal_invite?: string  // The invite to enroll with, used when no credentials are saved
+
   // Model config
   prefill_thinking?: boolean  // If true, enable extended thinking
   debug_thinking?: boolean  // If true, send thinking content as dot-prefixed debug message
