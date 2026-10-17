@@ -331,3 +331,16 @@ describe('PortalConnector sending', () => {
     expect(second.endCarry).toEqual([])
   })
 })
+
+describe('PortalConnector.fetchContext when the relay fails', () => {
+  it('a failed fetch_history gives a shorter context, as on the Discord backend, instead of failing it', async () => {
+    const h = makeHarness()
+    try {
+      h.client.fetchHistory.mockRejectedValue(new Error('relay timeout') as never)
+      const ctx = await h.connector.fetchContext({ channelId: CH, depth: 10 })
+      expect(ctx.messages).toEqual([])
+    } finally {
+      h.cleanup()
+    }
+  })
+})

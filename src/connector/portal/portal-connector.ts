@@ -363,13 +363,27 @@ export class PortalConnector implements IConnector {
     return {
       botPersonaId: this.personaId,
       attachments: this.attachments,
+      // As DiscordConnector's fetch deps do, a failed fetch gives an empty batch
+      // or no message, so one RPC error shortens the context instead of failing it.
       fetchBatch: async (channelId, opts) => {
-        const { messages } = await this.client.fetchHistory({ channelId, before: opts.before, limit: opts.limit })
-        for (const m of messages) this.recordSeen(m)
-        return messages
+        try {
+          const { messages } = await this.client.fetchHistory({ channelId, before: opts.before, limit: opts.limit })
+          for (const m of messages) this.recordSeen(m)
+          return messages
+        } catch (err) {
+          logger.warn({ err: (err as Error).message, channelId, opts }, 'portal: fetch_history failed, returning an empty batch')
+          return []
+        }
       },
       snowflakeOf: (id) => this.snowflakeOf(id),
-      fetchSingle: (channelId, snowflake) => this.fetchSingleBySnowflake(channelId, snowflake),
+      fetchSingle: async (channelId, snowflake) => {
+        try {
+          return await this.fetchSingleBySnowflake(channelId, snowflake)
+        } catch (err) {
+          logger.warn({ err: (err as Error).message, channelId, snowflake }, 'portal: single fetch failed')
+          return null
+        }
+      },
       resolveChannelBySnowflake: (snowflake) => this.resolveChannelBySnowflake(snowflake),
       authorRoles: (pm) => this.authorRolesOf(pm),
       channelMeta: (channelId) => {

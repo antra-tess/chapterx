@@ -11,7 +11,7 @@ import type { DiscordContext, DiscordMessage } from '../../types.js'
 import type { FetchContextParams } from '../types.js'
 import { logger } from '../../utils/logger.js'
 import { authorOfMessage, containerOf } from './adapters.js'
-import { fetchPortalHistory, type PortalFetchDeps } from './history.js'
+import { fetchPortalHistory, isKeepable, type PortalFetchDeps } from './history.js'
 import type { AttachmentCache } from '../util/attachment-cache.js'
 
 const DISCORD_EPOCH = 1420070400000
@@ -111,7 +111,10 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
 
   // ── Stage 2: thread-parent assembly ──
   if (meta?.isThread && !historyDidClear && meta.parentId) {
-    const starterSnowflake = meta.native // thread id === starter message snowflake
+    // A thread started from a message has that message's snowflake as its id;
+    // a forum post or a thread made without one has no such message, and the
+    // starter fetch below finds nothing.
+    const starterSnowflake = meta.native
     const parentResult = await fetchPortalHistory(
       meta.parentId,
       starterSnowflake,
@@ -156,14 +159,18 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
     }
 
     if (firstIndex < 0 && oldest && anchor) {
-      const extendChannel = meta?.isThread && meta.parentId && oldest.nativeId === meta.native ? meta.parentId : channelId
+      // In a thread, once stage 2 has put parent messages in the window, the
+      // oldest is the starter or older, and both live in the parent channel.
+      const oldestInParent =
+        meta?.isThread && meta.parentId && meta.native && !snowflakeLT(meta.native, oldest.nativeId)
+      const extendChannel = oldestInParent ? meta.parentId! : channelId
       let extended = 0
       let before = oldest.nativeId
       while (extended < MAX_ANCHOR_EXTEND) {
         const batch = await deps.fetchBatch(extendChannel, { before, limit: 100 })
         if (batch.length === 0) break
         const sorted = [...batch].sort((a, b) => (snowflakeLT(a.nativeId, b.nativeId) ? -1 : 1))
-        messages = [...sorted, ...messages]
+        messages = [...sorted.filter(isKeepable), ...messages]
         extended += sorted.length
         firstIndex = messages.findIndex(isAnchor)
         if (firstIndex >= 0) break

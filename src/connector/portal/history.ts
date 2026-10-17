@@ -57,7 +57,7 @@ export function newestFirst<T extends { nativeId: string }>(messages: readonly T
 }
 
 /** Keep only real user/persona messages (drop relay system notices). */
-function isKeepable(pm: PortalMessage): boolean {
+export function isKeepable(pm: PortalMessage): boolean {
   return pm.author.kind !== 'system'
 }
 
@@ -140,15 +140,21 @@ async function processPortalHistoryCommand(
   deps: PortalFetchDeps,
   depth: number,
 ): Promise<PortalHistoryResult | null> {
+  // ── Bot targeting. If targeted and not us, skip. ──
+  // A leading user mention (`.history <@id>`) targets a Discord account, as the
+  // Discord engine reads it, and a persona has none, so it's never us.
+  if (/^\.history\s+<@!?\d+>/.test(msg.content)) return null
+  // A persona role-mention targets the personas it names.
+  if (msg.mentions.personas.length > 0 && !msg.mentions.personas.includes(deps.botPersonaId)) {
+    return null
+  }
+
   // ── Authorization (by role name) ──
+  // After targeting, since a role lookup is an RPC and a command aimed at
+  // someone else needs none.
   if (authorizedRoles.length > 0) {
     const roles = await deps.authorRoles(msg)
     if (!roles || !authorizedRoles.some((r) => roles.includes(r))) return null
-  }
-
-  // ── Bot targeting: persona role-mention. If targeted and not us, skip. ──
-  if (msg.mentions.personas.length > 0 && !msg.mentions.personas.includes(deps.botPersonaId)) {
-    return null
   }
 
   const parsed = parseHistoryCommand(msg.content)

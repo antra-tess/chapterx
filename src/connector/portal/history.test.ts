@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import type { PortalMessage } from '@animalabs/portal-protocol'
 import { fetchPortalHistory, type PortalFetchDeps, type PortalChannelRef } from './history.js'
 
@@ -146,6 +146,52 @@ describe('fetchPortalHistory', () => {
     const r = await fetchPortalHistory('c', undefined, undefined, 50, [], false, deps)
     expect(ids(r)).toEqual(['300'])
     expect(r.didClear).toBe(true)
+  })
+
+  it('skips a .history aimed at a Discord account by a leading user mention', async () => {
+    const deps = makeDeps({ c: [msg('c', '100'), msg('c', '200', '.history <@123456789012345678>'), msg('c', '300')] })
+    const r = await fetchPortalHistory('c', undefined, undefined, 50, [], false, deps)
+    expect(ids(r)).toEqual(['100', '300'])
+    expect(r.didClear).toBe(false)
+  })
+
+  it('applies a .history from an author whose roles include an authorized one', async () => {
+    const deps = { ...makeDeps({ c: [msg('c', '100'), msg('c', '200', '.history'), msg('c', '300')] }), authorRoles: async () => ['mod'] }
+    const r = await fetchPortalHistory('c', undefined, undefined, 50, ['admin', 'mod'], false, deps)
+    expect(ids(r)).toEqual(['300'])
+    expect(r.didClear).toBe(true)
+  })
+
+  it('skips a .history from an author whose roles include none of the authorized ones', async () => {
+    const deps = { ...makeDeps({ c: [msg('c', '100'), msg('c', '200', '.history'), msg('c', '300')] }), authorRoles: async () => ['member'] }
+    const r = await fetchPortalHistory('c', undefined, undefined, 50, ['admin', 'mod'], false, deps)
+    expect(ids(r)).toEqual(['100', '300'])
+  })
+
+  it('checks targeting before roles, so a .history aimed at another persona costs no role lookup', async () => {
+    const authorRoles = vi.fn(async () => ['mod'])
+    const other = { mentions: { personas: ['other-bot'], roles: [], users: [], everyone: false } }
+    const deps = { ...makeDeps({ c: [msg('c', '100'), msg('c', '200', '.history', other), msg('c', '300')] }, { botPersonaId: 'bot' }), authorRoles }
+    await fetchPortalHistory('c', undefined, undefined, 50, ['mod'], false, deps)
+    expect(authorRoles).not.toHaveBeenCalled()
+  })
+
+  it('orders a batch that arrives oldest first, and pages from its oldest message', async () => {
+    const all = ['100', '200', '300', '400', '500'].map((s) => msg('c', s))
+    const calls: Array<string | undefined> = []
+    const base = makeDeps({ c: all })
+    const deps = {
+      ...base,
+      async fetchBatch(channelId: string, opts: { before?: string; limit: number }) {
+        calls.push(opts.before)
+        return (await base.fetchBatch(channelId, opts)).reverse() // oldest first
+      },
+    }
+    const r = await fetchPortalHistory('c', undefined, undefined, 3, [], false, deps)
+    expect(ids(r)).toEqual(['300', '400', '500'])
+    const r2 = await fetchPortalHistory('c', '500', undefined, 4, [], false, { ...deps, fetchBatch: async (ch: string, o: { before?: string; limit: number }) => { calls.push(o.before); return (await base.fetchBatch(ch, { ...o, limit: Math.min(o.limit, 2) })).reverse() } })
+    expect(ids(r2)).toEqual(['200', '300', '400', '500'])
+    expect(calls.slice(1)).toEqual(['500', '300'])
   })
 
   it('skips .history when authorizedRoles set but roles unverifiable (P2 deps return null)', async () => {
