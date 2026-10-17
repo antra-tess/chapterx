@@ -166,14 +166,16 @@ class DiscordConnector {
 
 **Responsibilities**:
 - Buffer events from Discord Connector
-- Provide batching interface (return all Discord events until a non-Discord event)
+- Provide batching interface (consecutive events of one channel and one category, Discord or internal)
+- Restore events held during a channel's activation ahead of everything queued
 - Thread-safe push/poll operations
 
 **Interface**:
 ```typescript
 class EventQueue {
   push(event: Event): void  // Thread-safe
-  pollBatch(): Event[]      // Returns all consecutive Discord events
+  prepend(events: Event[]): void  // Restores held events ahead of everything queued
+  pollBatch(): Event[]      // Consecutive events of one channel and one category
   isEmpty(): boolean
 }
 

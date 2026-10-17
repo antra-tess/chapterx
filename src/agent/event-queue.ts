@@ -16,8 +16,18 @@ export class EventQueue {
   }
 
   /**
+   * Restore events ahead of everything still queued, keeping their order.
+   */
+  prepend(events: Event[]): void {
+    this.queue.unshift(...events)
+  }
+
+  /**
    * Poll a batch of events
-   * Returns all consecutive Discord events (same type category)
+   * Returns consecutive events for one channel and the same type category.
+   * AgentLoop processes a batch using its first event's channel, so mixing
+   * channels would route every later event through the wrong context. A
+   * channel belongs to one guild, so the channel decides the guild too.
    */
   pollBatch(): Event[] {
     if (this.queue.length === 0) {
@@ -46,7 +56,10 @@ export class EventQueue {
       }
 
       // Stop if we hit a different event category
-      if (this.isDiscordEvent(nextEvent) !== isDiscordEvent) {
+      if (
+        nextEvent.channelId !== firstEvent.channelId ||
+        this.isDiscordEvent(nextEvent) !== isDiscordEvent
+      ) {
         break
       }
 
@@ -81,4 +94,3 @@ export class EventQueue {
     return ['message', 'reaction', 'edit', 'delete'].includes(event.type)
   }
 }
-
