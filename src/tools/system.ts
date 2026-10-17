@@ -337,7 +337,8 @@ export class ToolSystem {
     // just before them that share the oldest one's trigger are earlier rounds
     // of the same activation. They come back with their prose and no result,
     // so the next context still shows that activation's rounds in order and
-    // covers every message it posted.
+    // covers every message its rounds posted. Its final answer is covered by
+    // no entry, so it stays in the history.
     const firstWithResult = Math.max(0, allEntries.length - 5)
     const oldestTrigger = allEntries[firstWithResult]?.call.messageId
     let firstEntry = firstWithResult
