@@ -99,6 +99,7 @@ export class DiscordConnector {
   // and stopTyping mutate it SYNCHRONOUSLY, so there is no window in which a
   // stop can be missed or a start can register behind one.
   private typingIntervals = new Map<string, NodeJS.Timeout>()
+  private closed = false
   private imageCache = new Map<string, CachedImage>()
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
   private urlMapPath: string  // Path to URL map file
@@ -1467,8 +1468,9 @@ export class DiscordConnector {
    * types forever with nothing in flight.
    *
    * TWO RULES HOLD THIS TOGETHER. Callers are fire-and-forget (agent/loop.ts
-   * does `startTyping(...).catch(() => {})` without awaiting it), so an
-   * activation can reach stopTyping while startTyping is still running.
+   * does `startTyping(...).catch(() => {})` without awaiting it), so if
+   * startTyping awaited anything before registering, an activation could
+   * reach stopTyping in between and find nothing to clear.
    *
    *   1. NEVER AWAIT BEFORE THE MAP WRITE. Registration must stay atomic with
    *      respect to stopTyping; an await above it reopens a window in which a
@@ -1478,12 +1480,21 @@ export class DiscordConnector {
    *      must be none before the registration.
    *   2. COMPARE THE HANDLE, NOT A COUNTER. The Timeout is the identity token:
    *      the runtime mints it and it cannot be re-derived, so "is this still
-   *      the channel's timer?" has no false positives. A numeric generation
-   *      can be re-minted and will eventually collide.
+   *      the channel's timer?" has no false positives. A counter can be reset
+   *      and then re-mint a value a pending start still holds, as close() once
+   *      did.
    *
    * Invariant: a typing timer exists if and only if it is in typingIntervals.
    */
   async startTyping(channelId: string): Promise<void> {
+    // close() runs during shutdown, before the remaining shutdown steps and
+    // process.exit, and an activation that began before the agent loop stopped
+    // can still reach here then. Refuse it, so no typing timer outlives close()
+    // and keeps using the client it destroys.
+    if (this.closed) {
+      return
+    }
+
     // Replace, never shadow: an interval evicted from the map while still
     // running can never be reached by stopTyping again.
     this.clearTypingInterval(channelId)
@@ -1809,7 +1820,8 @@ export class DiscordConnector {
     }
     this.typingIntervals.clear()
     // A tick still awaiting Discord finds its handle absent and returns without
-    // sending.
+    // sending, and the flag refuses any start after this.
+    this.closed = true
     // Clear cache maintenance intervals
     if (this.cacheStatsInterval) clearInterval(this.cacheStatsInterval)
     if (this.evictionInterval) clearInterval(this.evictionInterval)

@@ -6,12 +6,15 @@
  * stale UI state -- an interval is actively re-sending it, orphaned from the
  * connector's map and unreachable by stopTyping.
  *
- * These races are live rather than theoretical because callers are
- * fire-and-forget: agent/loop.ts calls `startTyping(...).catch(() => {})`
- * without awaiting it, so an activation can reach stopTyping while startTyping
- * is still running, and a start still pending from one activation could
- * register after the next one's start. (Activations on one channel don't
- * overlap: processBatch skips a channel already in activeChannels.)
+ * These races were live on main, where startTyping awaited the channel fetch
+ * and the first send before it registered its interval. Callers are
+ * fire-and-forget (agent/loop.ts calls `startTyping(...).catch(() => {})`
+ * without awaiting it), so an activation could reach stopTyping while
+ * startTyping was still waiting, and a start still pending from one activation
+ * could register after the next one's start. (Activations on one channel don't
+ * overlap: processBatch skips a channel already in activeChannels.) Now
+ * startTyping registers before any await, and what can still be pending is a
+ * tick's fetch and send.
  *
  * The invariant under test: a typing timer exists if and only if it is in
  * `typingIntervals`, and both start and stop mutate that map synchronously.
@@ -41,11 +44,12 @@ function makeHarness(opts: { fetchGate?: boolean } = {}) {
   const sendTyping = vi.fn().mockResolvedValue(undefined)
   const channel = { isTextBased: () => true, sendTyping }
 
-  // When gated, channels.fetch hangs until released -- this is what lets a test
-  // land stopTyping in the middle of startTyping's awaits.
-  let release: (() => void) | undefined
+  // When gated, each channels.fetch hangs until released -- this is what lets a
+  // test land a stop, a close or a second start while a tick awaits Discord.
+  // Each held fetch is kept apart, so a test can release the oldest alone.
+  const held: Array<() => void> = []
   const fetch = opts.fetchGate
-    ? vi.fn(() => new Promise((res) => { release = () => res(channel) }))
+    ? vi.fn(() => new Promise((res) => { held.push(() => res(channel)) }))
     : vi.fn().mockResolvedValue(channel)
 
   // destroy() is what close() calls; without it the harness throws and the
@@ -56,7 +60,8 @@ function makeHarness(opts: { fetchGate?: boolean } = {}) {
     connector,
     sendTyping,
     fetch,
-    release: () => release?.(),
+    release: () => { while (held.length > 0) held.shift()!() },
+    releaseOldest: () => held.shift()?.(),
     intervals: () => (connector as any).typingIntervals as Map<string, unknown>,
     cleanup: () => rmSync(tmpCache, { recursive: true, force: true }),
   }
@@ -64,7 +69,13 @@ function makeHarness(opts: { fetchGate?: boolean } = {}) {
 
 describe('typing indicator lifecycle', () => {
   let h: ReturnType<typeof makeHarness>
-  beforeEach(() => { vi.useFakeTimers() })
+  beforeEach(() => {
+    vi.useFakeTimers()
+    // close() logs at info level, and the logger can hold a timer of its own
+    // while it writes, which would make the timer counts below depend on the
+    // log file rather than on the connector.
+    vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+  })
   afterEach(() => { h?.cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 
   it('stops refreshing after stopTyping', async () => {
@@ -103,7 +114,6 @@ describe('typing indicator lifecycle', () => {
     h.release()                                    // the tick resumes and finds itself stopped
     await starting
 
-    h.sendTyping.mockClear()
     await vi.advanceTimersByTimeAsync(REFRESH_MS * 3)
     expect(h.sendTyping).not.toHaveBeenCalled()
   })
@@ -125,8 +135,9 @@ describe('typing indicator lifecycle', () => {
     expect(vi.getTimerCount()).toBe(baseline)
   })
 
-  it('still types while a request IS in flight', async () => {
-    // The control. A fix that simply never types would pass every test above.
+  it('keeps typing at each refresh until it is stopped', async () => {
+    // The control: an activation still running keeps its indicator. A fix that
+    // simply never types would pass every test above.
     h = makeHarness()
     await h.connector.startTyping(CH)
 
@@ -138,11 +149,13 @@ describe('typing indicator lifecycle', () => {
   it('a start whose first tick is still awaiting Discord at shutdown leaves no timer and sends nothing', async () => {
     // Shutdown is the sharpest ordering: a start's first tick is still awaiting
     // Discord when the connector closes, and a stop arrives after the close.
-    // Nothing in that sequence may leave a timer behind -- one that survives
-    // close() keeps typing through a dead client.
+    // Nothing in that sequence may leave a timer behind -- one that survived
+    // close() would keep fetching through the destroyed client until exit.
     h = makeHarness({ fetchGate: true })
+    const baseline = vi.getTimerCount()
 
     const starting = h.connector.startTyping(CH)   // registers; its first tick blocks in fetch
+    expect(h.fetch).toHaveBeenCalledTimes(1)
     await h.connector.close()                      // clears every timer and the map
     await h.connector.stopTyping(CH)               // finds nothing left to clear
     h.release()
@@ -150,6 +163,7 @@ describe('typing indicator lifecycle', () => {
 
     expect(h.intervals().size).toBe(0)
     await vi.advanceTimersByTimeAsync(REFRESH_MS * 3)
+    expect(vi.getTimerCount()).toBe(baseline)
     expect(h.sendTyping).not.toHaveBeenCalled()
   })
 
@@ -163,6 +177,7 @@ describe('typing indicator lifecycle', () => {
     h = makeHarness({ fetchGate: true })
 
     await h.connector.startTyping(CH)   // registers synchronously; tick blocks in fetch
+    expect(h.fetch).toHaveBeenCalledTimes(1)
     await h.connector.stopTyping(CH)    // stop wins the map
     h.release()                         // fetch resolves into a tick that was cancelled
     await vi.advanceTimersByTimeAsync(0)
@@ -174,6 +189,7 @@ describe('typing indicator lifecycle', () => {
     // close() clears the map as well as the timers: the tick in flight finds
     // its handle gone after the fetch, and sends nothing.
     h = makeHarness({ fetchGate: true })
+    const baseline = vi.getTimerCount()
 
     await h.connector.startTyping(CH)   // registers; its first tick blocks in fetch
     expect(h.fetch).toHaveBeenCalledTimes(1)
@@ -182,6 +198,43 @@ describe('typing indicator lifecycle', () => {
     await vi.advanceTimersByTimeAsync(0)
 
     expect(h.intervals().size).toBe(0)
+    expect(vi.getTimerCount()).toBe(baseline)
+    expect(h.sendTyping).not.toHaveBeenCalled()
+  })
+
+  it('a replacing start while the first tick awaits Discord leaves the replaced tick sending nothing', async () => {
+    // Pins the check after the fetch as an identity check: a stop or a close
+    // empties the map, but a replacing start leaves the channel's key in place
+    // with another handle, so only comparing the handle stops the old tick.
+    h = makeHarness({ fetchGate: true })
+
+    await h.connector.startTyping(CH)   // its first tick blocks in fetch
+    await h.connector.startTyping(CH)   // replaces it; its own first tick blocks too
+    expect(h.fetch).toHaveBeenCalledTimes(2)
+
+    h.releaseOldest()                   // only the replaced tick resumes
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.sendTyping).not.toHaveBeenCalled()
+
+    h.release()                         // the current tick resumes and sends
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.sendTyping).toHaveBeenCalledTimes(1)
+    expect(h.intervals().size).toBe(1)
+  })
+
+  it('refuses a start after close(): no timer is added and nothing is sent', async () => {
+    // An activation that began before the agent loop stopped can reach
+    // startTyping after close(), while shutdown still awaits its other steps.
+    h = makeHarness()
+    await h.connector.close()
+    const baseline = vi.getTimerCount()
+
+    await h.connector.startTyping(CH)
+    await vi.advanceTimersByTimeAsync(REFRESH_MS * 3)
+
+    expect(h.intervals().size).toBe(0)
+    expect(vi.getTimerCount()).toBe(baseline)
+    expect(h.fetch).not.toHaveBeenCalled()
     expect(h.sendTyping).not.toHaveBeenCalled()
   })
 
