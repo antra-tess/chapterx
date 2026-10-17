@@ -268,6 +268,12 @@ export class PortalConnector implements IConnector {
   isPortal(): boolean {
     return true
   }
+
+  /** A timer's or a deferred retry's event waits for its channel's pins as the
+   *  relay's events do (see deliver). */
+  enqueue(event: Event): void {
+    this.deliver(event)
+  }
   getBotUsername(): string | undefined {
     return this.displayName || undefined
   }

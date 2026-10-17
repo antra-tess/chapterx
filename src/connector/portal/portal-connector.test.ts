@@ -421,6 +421,50 @@ describe('PortalConnector events wait for their channel\'s pins', () => {
     return queued
   }
 
+  /** A timer's event, as the timer scheduler makes it. */
+  const timerEvent = (timerId: string) => ({
+    type: 'self_activation', channelId: CH, guildId: 'g', timestamp: new Date(),
+    data: { timerId, botId: 'glm52', contextNote: 'check back', scheduledAt: 0 },
+  })
+
+  /** The connector's queue, recording each timer's event with the sleep pins
+   *  the loop would read for its channel at the moment it arrives. */
+  function watchTimers() {
+    const queued: Array<{ timerId: string; sleeps: number | null }> = []
+    vi.spyOn((h.connector as any).queue, 'push').mockImplementation(((ev: { channelId: string; data: { timerId: string } }) => {
+      queued.push({ timerId: ev.data.timerId, sleeps: h.connector.getCachedPinnedSleeps(ev.channelId)?.length ?? null })
+    }) as never)
+    return queued
+  }
+
+  it('a timer\'s event waits for its channel\'s pins as the relay\'s events do, so the loop reads a .sleep pinned there', async () => {
+    h = makeHarness()
+    const replies: Array<(v: unknown) => void> = []
+    h.client.call.mockImplementation((() => new Promise((res) => replies.push(res))) as never)
+    const queued = watchTimers()
+    await h.connector.start()
+
+    h.connector.enqueue(timerEvent('t1') as never)
+    expect(queued).toEqual([])
+    expect(h.client.call).toHaveBeenCalledTimes(1)
+    replies[0]!({ messages: [pinned(40, '.sleep')] })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(queued).toEqual([{ timerId: 't1', sleeps: 1 }])
+  })
+
+  it('a timer\'s event in a channel whose pins are current is queued at once', async () => {
+    h = makeHarness()
+    const queued = watchTimers()
+    await h.connector.start()
+    await h.connector.fetchPinnedSleeps(CH)
+
+    h.connector.enqueue(timerEvent('t2') as never)
+
+    expect(queued).toEqual([{ timerId: 't2', sleeps: 0 }])
+    expect(h.client.call).toHaveBeenCalledTimes(1)
+  })
+
   it('a channel\'s first events wait, in order, for its pins, and later ones ask for nothing', async () => {
     h = makeHarness()
     const replies: Array<(v: unknown) => void> = []

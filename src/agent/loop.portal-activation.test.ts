@@ -180,6 +180,73 @@ describe('the sleep gate on the portal backend, with the real connector', () => 
       rmSync(tmpCache, { recursive: true, force: true })
     }
   })
+
+  it('a timer that fires after a start, in a channel with a .sleep pinned, doesn\'t wake the bot', async () => {
+    // The timer came due while the bot was down, so it fires as the bot starts,
+    // before any message in the channel has loaded its pins.
+    const tmpCache = mkdtempSync(join(tmpdir(), 'loop-portal-timer-'))
+    try {
+      const queue = new EventQueue()
+      const connector = new PortalConnector(queue, { url: 'ws://relay.invalid', token: 't', personaId: PERSONA, cacheDir: tmpCache })
+      const startedAt = new Date(Date.now() - 60_000).toISOString()
+      const sleepPin = pm({ id: 'rm_chan_100', nativeId: '100', content: `.sleep glm52\n---\nstarted_at: \"${startedAt}\"\nduration_seconds: 3600` })
+      ;(connector as any).client = {
+        on: () => undefined,
+        connect: async () => undefined,
+        call: vi.fn(async () => ({ messages: [sleepPin] })),
+        cache: { persona: { displayName: 'p' }, getChannel: () => undefined },
+      }
+      await connector.start()
+
+      connector.enqueue({
+        type: 'self_activation', channelId: 'chan', guildId: 'guild', timestamp: new Date(),
+        data: { timerId: 't1', botId: 'glm52', contextNote: 'check back', scheduledAt: Date.now() - 3_600_000 },
+      } as never)
+      await vi.waitFor(() => expect(queue.size()).toBe(1))
+
+      const loop = Object.create(AgentLoop.prototype)
+      Object.assign(loop, {
+        botId: 'glm52',
+        botUserId: PERSONA,
+        botMessageIds: new Set<string>(),
+        connector,
+        configSystem: { loadConfig: () => ({ max_bot_reply_chain_depth: 2, reply_on_random: 0 }) },
+        sleepState: new SleepState(connector, () => ({ botId: 'glm52' })),
+        answeredContextNewestId: new Map<string, string>(),
+      })
+      const debug = vi.spyOn(logger, 'debug').mockImplementation(() => undefined as never)
+      expect(await (loop as any).shouldActivate(queue.pollBatch(), 'chan', 'guild')).toBeUndefined()
+      expect(debug).toHaveBeenCalledWith(expect.anything(), 'Skipping self_activation — bot is sleeping')
+      debug.mockRestore()
+    } finally {
+      rmSync(tmpCache, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('deferred retries', () => {
+  it('a retry\'s event goes through the connector, so the portal connector can hold it for its channel\'s pins', async () => {
+    const enqueue = vi.fn()
+    const queue = new EventQueue()
+    const loop = Object.create(AgentLoop.prototype)
+    Object.assign(loop, {
+      botId: 'glm52',
+      queue,
+      connector: { enqueue },
+      configSystem: { loadBotConfigOnly: () => ({ deferred_retries: true }) },
+    })
+    vi.spyOn(logger, 'info').mockImplementation(() => undefined as never)
+    // One pass of the loop, then stop.
+    vi.spyOn(queue, 'pollBatch').mockImplementation(() => { loop.running = false; return [] })
+    await (loop as any).run()
+
+    const retry = { type: 'self_activation', channelId: 'chan', guildId: 'guild', timestamp: new Date(), data: { type: 'deferred_retry' } }
+    ;(loop as any).deferredQueue.onFire(retry)
+    ;(loop as any).deferredQueue.stop()
+
+    expect(enqueue).toHaveBeenCalledWith(retry)
+    vi.restoreAllMocks()
+  })
 })
 
 describe('Soma\'s key for a portal bot', () => {

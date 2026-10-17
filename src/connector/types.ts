@@ -10,7 +10,7 @@
  * than in discord/connector.ts) so the portal backend can reference them without
  * importing discord.js. connector.ts re-exports them for back-compat.
  */
-import type { DiscordContext } from '../types.js'
+import type { DiscordContext, Event } from '../types.js'
 import type { MarkdownCarry } from '../utils/discord-markdown.js'
 
 export interface ConnectorOptions {
@@ -101,6 +101,11 @@ export interface IConnector {
   // ── Lifecycle ──
   start(): Promise<void>
   close(): Promise<void>
+  /** Queue an event the connector didn't receive itself, such as a timer's or a
+   *  deferred retry's, as it queues its own. The portal connector holds a
+   *  channel's events until its pins are current, since the loop decides
+   *  whether to activate from them without waiting. */
+  enqueue(event: Event): void
 
   // ── Identity ──
   getBotUserId(): string | undefined

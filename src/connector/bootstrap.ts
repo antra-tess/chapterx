@@ -22,6 +22,8 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import { fileCredsStore, loadOrEnrollCreds } from '@animalabs/portal-client'
 import { logger } from '../utils/logger.js'
+import type { Event } from '../types.js'
+import type { IConnector } from './types.js'
 
 /** The connector keys of the bot's config file. Typed unknown because they come
  *  from YAML as written; resolveConnectorSettings checks them. */
@@ -175,4 +177,21 @@ export async function portalCredentials(url: string, source: PortalCredentialsSo
     'Enrolled a new portal persona and saved its credentials',
   )
   return creds
+}
+
+/**
+ * Start the connector, then the bot's timers. A timer that came due while the
+ * bot was down fires as the scheduler starts, so the scheduler starts once the
+ * connector can queue its events as it queues its own: on the portal backend,
+ * once the channel's pins have loaded, so that a `.sleep` pinned there holds.
+ */
+export async function startConnectorThenTimers(
+  connector: Pick<IConnector, 'start' | 'enqueue'>,
+  timers: { initialize(onTimerFire: (event: Event) => void): Promise<void> },
+): Promise<void> {
+  await connector.start()
+  await timers.initialize((event) => {
+    connector.enqueue(event)
+    logger.info({ type: event.type, channelId: event.channelId, timerId: event.data?.timerId }, 'Timer event queued')
+  })
 }

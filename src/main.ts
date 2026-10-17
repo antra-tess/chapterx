@@ -11,7 +11,7 @@ import { ChannelStateManager } from './agent/state-manager.js'
 import { DiscordConnector } from './discord/connector.js'
 import { PortalConnector } from './connector/portal/portal-connector.js'
 import type { IConnector } from './connector/types.js'
-import { resolveConnectorSettings, portalCredentials } from './connector/bootstrap.js'
+import { resolveConnectorSettings, portalCredentials, startConnectorThenTimers } from './connector/bootstrap.js'
 import { ConfigSystem } from './config/system.js'
 import { ContextBuilder } from './context/builder.js'
 import { ToolSystem } from './tools/system.js'
@@ -104,17 +104,8 @@ async function main() {
     const queue = new EventQueue()
     const stateManager = new ChannelStateManager()
 
-    // Initialize timer scheduler (for self-activation)
+    // Timer scheduler (for self-activation); it starts with the connector, below.
     const timerScheduler = createTimerScheduler(cachePath)
-    await timerScheduler.initialize((event) => {
-      // Push timer events to the queue for processing
-      queue.push(event)
-      logger.info({
-        type: event.type,
-        channelId: event.channelId,
-        timerId: event.data?.timerId,
-      }, 'Timer event pushed to queue')
-    })
     const contextBuilder = new ContextBuilder()
     const toolSystem = new ToolSystem(toolsPath)
 
@@ -147,7 +138,7 @@ async function main() {
       })
     }
 
-    await connector.start()
+    await startConnectorThenTimers(connector, timerScheduler)
 
     // Get bot's Discord identity
     const botUserId = connector.getBotUserId()

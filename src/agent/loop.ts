@@ -288,7 +288,9 @@ export class AgentLoop {
     const botConfig = this.configSystem.loadBotConfigOnly(this.botId)
     if (botConfig.deferred_retries) {
       this.deferredQueue = new DeferredQueue()
-      await this.deferredQueue.initialize(this.botId, (event) => this.queue.push(event))
+      // A retry's event goes through the connector, as a timer's does, so the
+      // portal connector can hold it until its channel's pins are current.
+      await this.deferredQueue.initialize(this.botId, (event) => this.connector.enqueue(event))
     }
 
     logger.info({ botId: this.botId, deferredRetries: !!botConfig.deferred_retries }, 'Agent loop started')

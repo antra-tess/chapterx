@@ -271,3 +271,20 @@ describe('fetchPinnedSteerMessages', () => {
     expect(steers).toEqual([{ content: '.steer human', authorId: USER }])
   })
 })
+
+describe('enqueue', () => {
+  it('queues an event the connector didn\'t receive at once, since its pins are on disk from the start', () => {
+    const tmpCache = mkdtempSync(join(tmpdir(), 'connector-enqueue-test-'))
+    try {
+      const queue = new EventQueue()
+      const connector = new DiscordConnector(queue, { token: 'fake', cacheDir: tmpCache, maxBackoffMs: 1000 })
+      const timer = { type: 'self_activation', channelId: CH, guildId: 'g', timestamp: new Date(), data: { timerId: 't1' } }
+
+      connector.enqueue(timer as never)
+
+      expect(queue.pollBatch()).toEqual([timer])
+    } finally {
+      rmSync(tmpCache, { recursive: true, force: true })
+    }
+  })
+})

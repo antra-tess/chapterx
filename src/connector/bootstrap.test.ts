@@ -22,7 +22,7 @@ vi.mock('@animalabs/portal-client', async (importOriginal) => ({
 }))
 
 import { loadOrEnrollCreds } from '@animalabs/portal-client'
-import { resolveConnectorSettings, portalCredentials, type ConnectorInputs } from './bootstrap.js'
+import { resolveConnectorSettings, portalCredentials, startConnectorThenTimers, type ConnectorInputs } from './bootstrap.js'
 import { logger } from '../utils/logger.js'
 
 const inputs = (over: Partial<ConnectorInputs> = {}): ConnectorInputs => ({
@@ -197,5 +197,32 @@ describe('portalCredentials', () => {
     expect(creds).toEqual({ personaId: 'new-persona', token: 'new-token' })
     expect(loadOrEnrollCreds).toHaveBeenCalledWith({ url: 'wss://relay', credsPath, invite: 'inv', desiredName: 'glm52' })
     expect(info).toHaveBeenCalledWith(expect.objectContaining({ personaId: 'new-persona' }), 'Enrolled a new portal persona and saved its credentials')
+  })
+})
+
+describe('startConnectorThenTimers', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('starts the timers once the connector has started, and queues a missed timer\'s event through the connector', async () => {
+    vi.spyOn(logger, 'info').mockImplementation(() => undefined as never)
+    const order: string[] = []
+    const missed = { type: 'self_activation', channelId: 'chan', guildId: 'g', timestamp: new Date(), data: { timerId: 't1' } }
+    const connector = {
+      // The connector has started once its start resolves, after a connection.
+      start: vi.fn(() => new Promise<void>((resolve) => setTimeout(() => { order.push('connector started'); resolve() }, 0))),
+      enqueue: vi.fn((event: { data: { timerId: string } }) => { order.push(`queued ${event.data.timerId}`) }),
+    }
+    // A timer that came due while the bot was down fires as the scheduler starts.
+    const timers = {
+      initialize: vi.fn(async (onTimerFire: (event: any) => void) => {
+        order.push('timers started')
+        onTimerFire(missed)
+      }),
+    }
+
+    await startConnectorThenTimers(connector as never, timers)
+
+    expect(order).toEqual(['connector started', 'timers started', 'queued t1'])
+    expect(connector.enqueue).toHaveBeenCalledWith(missed)
   })
 })
