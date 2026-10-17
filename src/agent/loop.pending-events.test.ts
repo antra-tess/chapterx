@@ -335,6 +335,25 @@ describe('AgentLoop active-channel event buffering', () => {
     expect(soma.slice(1)).toEqual([{ channelId: 'channel', reason: 'mention', triggeringMessageId: '99' }])
   })
 
+  it('marks the context of a generation the model refuses, as of any it answers', async () => {
+    const harness = makeLoop(['allowed'])
+    const { loop, soma } = harness
+    const refusal = async () => ({
+      completion: { content: [], stopReason: 'refusal' },
+      toolCallIds: [],
+      preambleMessageIds: [],
+      sentMessageIds: [],
+      messageContexts: {},
+    })
+    loop.executeWithNativeTools = refusal
+    loop.executeWithInlineTools = refusal
+    const inContext = message('channel', '99', { content: '<@bot-user> hi', mentionsBot: true })
+
+    await loop.processBatch(await activationHolding(harness, [inContext]))
+
+    expect(soma.slice(1)).toEqual([])
+  })
+
   it('marks nothing when the activation\'s fetch fails', async () => {
     const { loop, queue, soma, setFetchContext } = makeLoop(['allowed'])
     let failFetch!: () => void
@@ -408,7 +427,10 @@ describe('AgentLoop active-channel event buffering', () => {
     for (const event of events) await loop.processBatch([event])
 
     expect(loop.pendingChannelEvents.get('channel').events).toEqual(events.slice(100))
-    expect(warn).toHaveBeenCalledTimes(2)
+    expect(warn.mock.calls.map((call) => call[0])).toEqual([
+      { channelId: 'channel', dropped: 1, droppedTypes: ['message'], kept: 500 },
+      { channelId: 'channel', dropped: 100, droppedTypes: ['message'], kept: 500 },
+    ])
   })
 
   it('decides each channel\'s events with that channel, polled from one queue', async () => {
