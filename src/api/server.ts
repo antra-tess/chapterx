@@ -14,20 +14,13 @@ import type { DiscordMessage } from '../types.js'
  * The API speaks Discord message ids: it takes them from Discord URLs and returns
  * them. On the portal backend a fetched message's `id` is the relay's id and its
  * snowflake is `nativeId`, so read each message by its snowflake, and a reply's
- * target too when it's among the messages. On the Discord backend, where there's
- * no `nativeId`, this changes nothing.
+ * target by `referencedNativeId`. A target whose snowflake the connector doesn't
+ * know is left out rather than given as a relay id. On the Discord backend,
+ * where there's no `nativeId`, this changes nothing.
  */
 export function withDiscordIds(messages: DiscordMessage[]): DiscordMessage[] {
-  const snowflakeOf = new Map(messages.map((m) => [m.id, m.nativeId ?? m.id]))
   return messages.map((m) =>
-    m.nativeId === undefined
-      ? m
-      : {
-          ...m,
-          id: m.nativeId,
-          referencedMessage:
-            m.referencedMessage === undefined ? undefined : (snowflakeOf.get(m.referencedMessage) ?? m.referencedMessage),
-        },
+    m.nativeId === undefined ? m : { ...m, id: m.nativeId, referencedMessage: m.referencedNativeId },
   )
 }
 

@@ -326,6 +326,31 @@ describe('PortalConnector message bookkeeping', () => {
     expect(pushed[0].data.author.id).toBe('a1')
   })
 
+  it('remembers at most 50,000 messages, forgetting the one seen longest ago first', () => {
+    h = makeHarness()
+    const remember = (id: string, n: number) => (h.connector as any).remember(id, { authorId: 'u', nativeId: String(n) })
+    const seen = (h.connector as any).seen as Map<string, unknown>
+    for (let n = 0; n <= 50_000; n++) remember(`rm_${n}`, n)
+
+    expect(seen.size).toBe(50_000)
+    expect(seen.has('rm_0')).toBe(false)
+
+    remember('rm_1', 1) // seen again: now the newest
+    remember('rm_new', 50_001)
+    expect(seen.has('rm_1')).toBe(true)
+    expect(seen.has('rm_2')).toBe(false)
+  })
+
+  it('looks an id up in what it has seen before taking an all-digit id as a snowflake', () => {
+    h = makeHarness()
+    ;(h.connector as any).remember('12345', { authorId: 'u', nativeId: '999' })
+    const snowflakeOf = (id: string) => (h.connector as any).snowflakeOf(id)
+
+    expect(snowflakeOf('12345')).toBe('999') // an all-digit relay id it has seen
+    expect(snowflakeOf('777')).toBe('777') // an all-digit id it hasn't: a snowflake from a URL
+    expect(snowflakeOf('rm_chan-1_1')).toBeUndefined()
+  })
+
   it('a deleted message is forgotten, so a context anchor it was isn\'t extended to', async () => {
     h = makeHarness()
     let all = Array.from({ length: 30 }, (_, i) => msg(i + 1, 'human'))
@@ -456,6 +481,18 @@ describe('PortalConnector member roles, reactions and typing', () => {
 
     expect(await h.connector.fetchMemberRoles('u9', 'g')).toBeNull()
     expect(info).toHaveBeenCalledWith(expect.objectContaining({ userId: 'u9', membersAvailable: false }), expect.stringContaining('partial roster'))
+  })
+
+  it('logs why a member\'s roles are unverified when a complete roster doesn\'t list them', async () => {
+    h = makeHarness()
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined as never)
+    h.client.call.mockResolvedValue({ members: [{ userId: 'u1', roles: [] }], membersAvailable: true } as never)
+
+    expect(await h.connector.fetchMemberRoles('u9', 'g')).toBeNull()
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'u9', membersAvailable: true }),
+      expect.stringContaining('not among those list_members returned'),
+    )
   })
 
   it('reactToLatestMessage keeps a relay error to itself, as the Discord backend\'s does', async () => {

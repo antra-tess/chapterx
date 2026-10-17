@@ -39,10 +39,13 @@ function stripPortalRolePrefix(text: string): string {
 }
 
 /** Full PortalMessage → DiscordMessage. Uses portal's resolved `cleanContent`;
- *  adds the `<reply:@name>` prefix for non-bot authors (matching convertMessage). */
+ *  adds the `<reply:@name>` prefix for non-bot authors (matching convertMessage).
+ *  A reply's target snowflake comes from the messages at hand, or else from
+ *  `snowflakeOf`, the connector's memory. */
 export function portalMessageToDiscordMessage(
   pm: PortalMessage,
   messageMap: Map<string, PortalMessage>,
+  snowflakeOf?: (messageId: string) => string | undefined,
 ): DiscordMessage {
   const a = authorOfMessage(pm)
   let content = stripPortalRolePrefix(pm.cleanContent || pm.content)
@@ -71,6 +74,9 @@ export function portalMessageToDiscordMessage(
     reactions: pm.reactions.map((r) => ({ emoji: r.emoji, count: r.count })),
     mentions: pm.mentions.users,
     referencedMessage: pm.replyToId,
+    referencedNativeId: pm.replyToId
+      ? (messageMap.get(pm.replyToId)?.nativeId ?? snowflakeOf?.(pm.replyToId))
+      : undefined,
   }
 }
 
@@ -188,7 +194,7 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
   // ── Convert + filter ──
   const messageMap = new Map(messages.map((m) => [m.id, m]))
   const discordMessages = messages
-    .map((m) => portalMessageToDiscordMessage(m, messageMap))
+    .map((m) => portalMessageToDiscordMessage(m, messageMap, deps.snowflakeOf))
     .filter((m) => m.content || m.attachments.length > 0)
 
   // ── Stage 4: attachments (newest-first so the image cap keeps recent ones) ──

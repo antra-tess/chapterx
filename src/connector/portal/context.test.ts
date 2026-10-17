@@ -112,6 +112,16 @@ describe('buildPortalContext and message ids', () => {
     expect(d.id).toBe('rm_chan_42')
     expect(d.nativeId).toBe('42')
   })
+
+  it('gives a reply its target\'s snowflake from the messages at hand, or from the connector\'s memory', () => {
+    const target = pm({ id: 'rm_chan_40', nativeId: '40' })
+    const map = new Map([[target.id, target]])
+    const known = (id: string) => ({ rm_chan_30: '30' } as Record<string, string>)[id]
+
+    expect(portalMessageToDiscordMessage(pm({ replyToId: 'rm_chan_40' }), map, known).referencedNativeId).toBe('40')
+    expect(portalMessageToDiscordMessage(pm({ replyToId: 'rm_chan_30' }), map, known).referencedNativeId).toBe('30')
+    expect(portalMessageToDiscordMessage(pm({ replyToId: 'rm_chan_20' }), map, known).referencedNativeId).toBeUndefined()
+  })
 })
 
 describe('portalMessageToDiscordMessage reply prefix', () => {

@@ -68,8 +68,11 @@ function isTextBasedType(type?: string): boolean {
   return type === 'text' || type === 'thread'
 }
 
-/** How many messages `seen` remembers. */
-const SEEN_CAP = 5000
+/** How many messages `seen` remembers, across every channel. An entry is a few
+ *  dozen bytes, and the reply-chain walk alone can add 500 in one check, so the
+ *  cap is set high enough that a quiet channel's context anchor isn't pushed out
+ *  by busy ones in ordinary use. */
+const SEEN_CAP = 50_000
 /** How far back the reply-chain walk pages for a message it replies to, in pages
  *  of 100. The protocol has no fetch by id, so this bounds the RPCs one check
  *  can cost; a link older than this ends the walk, as a deleted message does on
@@ -87,11 +90,15 @@ export class PortalConnector implements IConnector {
   private attachments: AttachmentCache
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>()
   /**
-   * Messages this process has seen, by relay id: from events, from history it
-   * fetched, and from its own sends. Deletes and reactions carry only a relay
-   * id, so this is where their message's author comes from; and the relay id is
-   * opaque, so this is where a message's snowflake comes from when the context
-   * pipeline needs one. A message from before this process started isn't here.
+   * Messages this process has seen, by relay id: from events and from history it
+   * fetched, with their author and snowflake, and from its own sends, with their
+   * author only, since a send's result carries no snowflake (the relay doesn't
+   * send a persona its own messages, so a sent message's snowflake arrives when
+   * it's next fetched). Deletes and reactions carry only a relay id, so this is
+   * where their message's author comes from; and the relay id is opaque, so this
+   * is where a message's snowflake comes from when the context pipeline needs
+   * one. A message from before this process started, or one it no longer
+   * remembers (SEEN_CAP), isn't here.
    */
   private seen = new Map<string, { authorId: string; nativeId?: string }>()
   /** channelId → tracked pins (bootstrapped via list_pins, refreshed on pins_update). */
@@ -191,12 +198,12 @@ export class PortalConnector implements IConnector {
     }
   }
 
-  /** A message id's Discord snowflake: an id that is all digits already is one
-   *  (the API passes snowflakes from Discord URLs); a relay id is looked up in
-   *  what this process has seen, since its format isn't the protocol's to
-   *  promise. Undefined when neither says. */
+  /** A message id's Discord snowflake: a relay id is looked up in what this
+   *  process has seen, since its format isn't the protocol's to promise, and an
+   *  id it hasn't seen that is all digits is taken as a snowflake already (the
+   *  API passes them from Discord URLs). Undefined when neither says. */
   private snowflakeOf(id: string): string | undefined {
-    return /^\d+$/.test(id) ? id : this.seen.get(id)?.nativeId
+    return this.seen.get(id)?.nativeId ?? (/^\d+$/.test(id) ? id : undefined)
   }
 
   // ── Identity ──
@@ -631,7 +638,13 @@ export class PortalConnector implements IConnector {
     try {
       // One list_members call returns at most 1,000 members, and the protocol
       // has no lookup by user id. When the relay's roster is partial
-      // (membersAvailable false), a member in it still has their roles read.
+      // (membersAvailable false: its member cache holds only message authors, as
+      // without the members intent; portal-relay discord-bot.ts membersComplete),
+      // a member in it still has their roles read. They're the relay's cache of
+      // the member, which each message of theirs refreshes, so a command's author
+      // is judged by their current roles, and a steer pin's author who hasn't
+      // spoken since a role change by their last ones. Denying everyone instead
+      // made role gates unusable on such a relay.
       const { members, membersAvailable } = await this.client.call('list_members', { guildId, limit: 1000 })
       const member = members.find((m) => m.userId === userId)
       if (!member) {

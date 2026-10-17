@@ -30,10 +30,15 @@ describe('withDiscordIds', () => {
   it('reads portal messages by their snowflakes, and a reply\'s target too', () => {
     const out = withDiscordIds([
       dm({ id: 'rm_c_100', nativeId: '100' }),
-      dm({ id: 'rm_c_101', nativeId: '101', referencedMessage: 'rm_c_100' }),
+      dm({ id: 'rm_c_101', nativeId: '101', referencedMessage: 'rm_c_100', referencedNativeId: '100' }),
     ])
     expect(out.map((m) => m.id)).toEqual(['100', '101'])
     expect(out[1]!.referencedMessage).toBe('100')
+  })
+
+  it('leaves out a reply\'s target whose snowflake isn\'t known, rather than give its relay id', () => {
+    const [out] = withDiscordIds([dm({ id: 'rm_c_101', nativeId: '101', referencedMessage: 'rm_c_7' })])
+    expect(out!.referencedMessage).toBeUndefined()
   })
 
   it('leaves Discord messages as they are', () => {

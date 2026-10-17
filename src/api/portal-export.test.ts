@@ -80,17 +80,23 @@ async function startOverHistory(all: ReturnType<typeof msg>[]) {
 const url = (n: number) => `https://discord.com/channels/${GUILD}/${CHANNEL}/${n}`
 
 describe('POST /api/messages/export on the portal backend', () => {
-  it('trims to `first` and returns Discord snowflakes, a reply\'s target included', async () => {
-    const post = await startOverHistory([100, 101, 102, 103, 104, 105, 106].map((n) => msg(n, n === 104 ? 103 : undefined)))
+  it('trims to `first` and returns Discord snowflakes, reply targets included', async () => {
+    // 104 replies inside the range, 105 to a message fetched but trimmed off,
+    // and 103 to one the connector never saw.
+    const replies: Record<number, number> = { 104: 103, 105: 101, 103: 7 }
+    const post = await startOverHistory([100, 101, 102, 103, 104, 105, 106].map((n) => msg(n, replies[n])))
 
     const res = await post({ last: url(105), first: url(102) })
     const body = await res.json()
+    const byId = (id: string) => body.messages.find((m: { id: string }) => m.id === id)
 
     expect(res.status).toBe(200)
     expect(body.messages.map((m: { id: string }) => m.id)).toEqual(['102', '103', '104', '105'])
     expect(body.metadata.firstMessageId).toBe('102')
     expect(body.metadata.lastMessageId).toBe('105')
-    expect(body.messages.find((m: { id: string }) => m.id === '104').referencedMessageId).toBe('103')
+    expect(byId('104').referencedMessageId).toBe('103')
+    expect(byId('105').referencedMessageId).toBe('101')
+    expect(byId('103').referencedMessageId).toBeUndefined()
     expect(JSON.stringify(body)).not.toContain('rm_')
   })
 })

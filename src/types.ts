@@ -493,6 +493,9 @@ export interface DiscordMessage {
   /** The Discord snowflake, when `id` isn't one: on the portal backend `id` is
    *  the relay's message id. Absent on the Discord backend. */
   nativeId?: string
+  /** With `nativeId`: the snowflake of the message `referencedMessage` names,
+   *  when the connector knows it. */
+  referencedNativeId?: string
 }
 
 export interface DiscordAttachment {
