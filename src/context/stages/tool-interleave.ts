@@ -10,28 +10,14 @@ import type {
   DiscordMessage,
 } from '../../types.js'
 import { logger } from '../../utils/logger.js'
-
-/** Normalize visible Discord text for legacy tool-cache coverage inference. */
-function normalizeVisibleToolText(text: string): string {
-  return text
-    .replace(/^\s*<reply:@[^>]+>\s*/, '')
-    .replace(/<thinking>[\s\S]*?<\/thinking>/g, '')
-    .replace(/<function_calls>[\s\S]*?<\/function_calls>/g, '')
-    .replace(/<function_results>[\s\S]*?<\/function_results>/g, '')
-    .replace(/System:\s*<results>[\s\S]*?<\/results>/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
+import { toolOutputText } from '../../tools/output-text.js'
 
 /**
- * Find Discord messages that are genuinely reconstructed by cached tool-call
- * completion text.
+ * Find the Discord messages that cached tool-call completion text reconstructs,
+ * which the next context shows through the cached exchange instead.
  *
- * New cache entries state this explicitly via coveredMessageIds. For older
- * entries, infer conservatively by checking that the visible Discord text is
- * actually present in originalCompletionText. This repairs old native-tool
- * entries that incorrectly marked their post-tool final answer as covered even
- * though the cache retained only the pre-tool preamble.
+ * Each entry names them in coveredMessageIds. An entry written before that
+ * field existed covers all its botMessageIds.
  */
 export function collectCoveredToolMessageIds(
   toolCacheWithResults: Array<{ call: ToolCall; result: any }>,
@@ -46,25 +32,9 @@ export function collectCoveredToolMessageIds(
     // history window, suppressing the surviving Discord response would lose it.
     if (!messagesById.has(entry.call.messageId)) continue
 
-    const explicitIds = entry.call.coveredMessageIds
-    if (explicitIds !== undefined) {
-      const botMessageIds = new Set(entry.call.botMessageIds || [])
-      for (const id of explicitIds) {
-        if (botMessageIds.has(id) && messagesById.has(id)) covered.add(id)
-      }
-      continue
-    }
-
-    const completionText = normalizeVisibleToolText(entry.call.originalCompletionText || '')
-    if (!completionText) continue
-
-    for (const id of entry.call.botMessageIds || []) {
-      const message = messagesById.get(id)
-      if (!message) continue
-      const visibleText = normalizeVisibleToolText(message.content || '')
-      if (visibleText && completionText.includes(visibleText)) {
-        covered.add(id)
-      }
+    const botMessageIds = new Set(entry.call.botMessageIds || [])
+    for (const id of entry.call.coveredMessageIds ?? botMessageIds) {
+      if (botMessageIds.has(id) && messagesById.has(id)) covered.add(id)
     }
   }
 
@@ -73,11 +43,16 @@ export function collectCoveredToolMessageIds(
 
 /**
  * Format tool cache entries as bot-completion and system-result messages.
- * Several tools can share one model completion, so identical adjacent completion
- * text is emitted once followed by each distinct result.
+ * The tool calls of one model round share its completion, so it is emitted
+ * once, followed by each result. A round is known by the messages its
+ * completion covers; an entry that covers none, or was written before coverage
+ * was recorded, is known by its trigger and text, so adjacent identical
+ * completions are emitted once. An entry whose result was left out (an earlier
+ * round of an activation the cache's five-result window cuts through) shows
+ * its completion alone.
  */
 export function formatToolUseWithResults(
-  toolCacheWithResults: Array<{call: ToolCall, result: any}>,
+  toolCacheWithResults: Array<{call: ToolCall, result: any, resultOmitted?: boolean}>,
   botName: string
 ): ParticipantMessage[] {
   const messages: ParticipantMessage[] = []
@@ -85,10 +60,13 @@ export function formatToolUseWithResults(
 
   for (const entry of toolCacheWithResults) {
     const completionText = entry.call.originalCompletionText || ''
-    const completionKey = `${entry.call.messageId}\0${completionText}`
+    const coveredMessageIds = entry.call.coveredMessageIds
+    const completionKey = coveredMessageIds !== undefined && coveredMessageIds.length > 0
+      ? `covers\0${coveredMessageIds.join('\0')}`
+      : `${entry.call.messageId}\0${completionText}`
     if (completionText && completionKey !== previousCompletionKey) {
       // Bot's message with original completion text (includes XML tool call for
-      // inline tools; native entries contain their visible pre-tool preamble).
+      // inline tools; a native entry holds the prose its round posted).
       messages.push({
         participant: botName,
         content: [{ type: 'text', text: completionText }],
@@ -97,6 +75,7 @@ export function formatToolUseWithResults(
       })
     }
     previousCompletionKey = completionKey
+    if (entry.resultOmitted) continue
 
     // Tool result message from SYSTEM (not bot)
     // Result can be: string (legacy), { output, images } (new format), or other object
@@ -110,9 +89,7 @@ export function formatToolUseWithResults(
       const output = entry.result.output
       const outputText = entry.result.error
         ? `Error executing ${entry.call.name}: ${entry.result.error}`
-        : typeof output === 'string'
-          ? output
-          : JSON.stringify(output) ?? String(output)
+        : toolOutputText(output)
       resultContent.push({ type: 'text', text: outputText })
 
       // Add MCP images to context

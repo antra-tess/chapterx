@@ -673,11 +673,11 @@ describe('mergeConsecutiveParticipantMessages', () => {
 // ============================================================================
 
 describe('collectCoveredToolMessageIds', () => {
-  it('keeps a legacy native-tool final answer when only the preamble was cached', () => {
+  it('covers every bot message of an entry written before coverage was recorded', () => {
     const messages = [
       makeDiscordMessage({ id: 'msg-trigger', content: 'respond and save the note' }),
-      makeDiscordMessage({ id: 'preamble', content: '<reply:@rat> Let me save that note first.' }),
-      makeDiscordMessage({ id: 'final', content: 'rat — malformed thoughts becoming bird flu.' }),
+      makeDiscordMessage({ id: 'preamble', content: 'Let me save that note first.' }),
+      makeDiscordMessage({ id: 'final', content: 'Saved.' }),
     ]
     const toolCache = [{
       call: makeToolCall({
@@ -687,7 +687,7 @@ describe('collectCoveredToolMessageIds', () => {
       result: 'saved',
     }]
 
-    expect([...collectCoveredToolMessageIds(toolCache, messages)]).toEqual(['preamble'])
+    expect([...collectCoveredToolMessageIds(toolCache, messages)]).toEqual(['preamble', 'final'])
   })
 
   it('uses explicit coverage, including an intentionally empty subset', () => {
@@ -812,6 +812,92 @@ describe('formatToolUseWithResults', () => {
 
     const trigger = makeParticipantMessage({ messageId: 'trigger-msg' })
     expect(interleaveToolMessages([trigger], formatted)).toEqual([trigger, ...formatted])
+  })
+
+  it('emits each round of one trigger once, even when two rounds posted the same prose', () => {
+    const round = (id: string, posted: string[]) => makeToolCall({
+      id,
+      name: 'lookup',
+      messageId: 'trigger-msg',
+      originalCompletionText: 'Let me check.',
+      botMessageIds: ['round-1', 'round-2', 'final'],
+      coveredMessageIds: posted,
+    })
+    const toolCache = [
+      { call: round('first-a', ['round-1']), result: { output: 'a' } },
+      { call: round('first-b', ['round-1']), result: { output: 'b' } },
+      { call: round('second', ['round-2']), result: { output: 'c' } },
+    ]
+
+    const formatted = formatToolUseWithResults(toolCache, 'TestBot')
+
+    expect(formatted.map(message => message.participant)).toEqual([
+      'TestBot',
+      'System<[lookup]',
+      'System<[lookup]',
+      'TestBot',
+      'System<[lookup]',
+    ])
+  })
+
+  it('shows a tool that returned nothing as "(no output)"', () => {
+    const toolCache = [{
+      call: makeToolCall({ name: 'quiet' }),
+      result: { output: undefined },
+    }]
+
+    const result = formatToolUseWithResults(toolCache, 'TestBot')
+
+    expect(textOf(result[1])).toBe('(no output)')
+  })
+
+  it('shows an output JSON cannot hold as String() gives it', () => {
+    const toolCache = [{
+      call: makeToolCall({ name: 'count' }),
+      result: { output: 10n },
+    }]
+
+    const result = formatToolUseWithResults(toolCache, 'TestBot')
+
+    expect(textOf(result[1])).toBe('10')
+  })
+
+  it('shows an entry whose result was left out as its completion alone', () => {
+    const toolCache = [
+      { call: makeToolCall({ id: 'early', name: 'lookup', originalCompletionText: 'First.', coveredMessageIds: ['b1'] }), result: undefined, resultOmitted: true },
+      { call: makeToolCall({ id: 'late', name: 'lookup', originalCompletionText: 'Second.', coveredMessageIds: ['b2'] }), result: { output: 'found' } },
+    ]
+
+    const formatted = formatToolUseWithResults(toolCache, 'TestBot')
+
+    expect(formatted.map((message) => `${message.participant}: ${textOf(message)}`)).toEqual([
+      'TestBot: First.',
+      'TestBot: Second.',
+      'System<[lookup]: found',
+    ])
+  })
+
+  it('tells apart entries that cover no message by their trigger and text', () => {
+    const uncovered = (id: string, text: string) => makeToolCall({
+      id,
+      name: 'lookup',
+      messageId: 'trigger-msg',
+      originalCompletionText: text,
+      coveredMessageIds: [],
+    })
+    const toolCache = [
+      { call: uncovered('first', 'One thing.'), result: { output: 'a' } },
+      { call: uncovered('second', 'Another thing.'), result: { output: 'b' } },
+    ]
+
+    const formatted = formatToolUseWithResults(toolCache, 'TestBot')
+
+    expect(formatted.map(message => message.participant)).toEqual([
+      'TestBot',
+      'System<[lookup]',
+      'TestBot',
+      'System<[lookup]',
+    ])
   })
 
   it('restores cached tool errors as error text', () => {
@@ -1509,6 +1595,58 @@ describe('buildContext (integration)', () => {
     const toolResultIdx = pMsgs.findIndex(m => m.participant === 'System<[web_search]')
     expect(toolCallIdx).toBeGreaterThan(0)
     expect(toolResultIdx).toBe(toolCallIdx + 1)
+  })
+
+  it('keeps the rounds of an activation the cache window cut through in Discord\'s order', async () => {
+    const rounds = [1, 2, 3, 4, 5, 6, 7]
+    const history = [
+      makeDiscordMessage({ id: 'u1', content: 'check the server' }),
+      ...rounds.map((round) => makeBotMessage('BotUser', `Round ${round}.`, { id: `b${round}` })),
+      makeBotMessage('BotUser', 'Found it.', { id: 'final' }),
+    ]
+    const botMessageIds = [...rounds.map((round) => `b${round}`), 'final']
+    // As the cache loads it: the five-result window keeps rounds 3 to 7 with
+    // their results, and rounds 1 and 2 with their prose alone.
+    const toolCache = rounds.map((round) => ({
+      call: makeToolCall({
+        id: `call-${round}`,
+        name: 'lookup',
+        messageId: 'u1',
+        originalCompletionText: `Round ${round}.`,
+        coveredMessageIds: [`b${round}`],
+        botMessageIds,
+      }),
+      result: round <= 2 ? undefined : { output: `result ${round}` },
+      resultOmitted: round <= 2 ? true : undefined,
+    }))
+    const covered = collectCoveredToolMessageIds(toolCache, history)
+
+    const result = await builder.buildContext({
+      discordContext: makeDiscordContext(history.filter((message) => !covered.has(message.id))),
+      toolCacheWithResults: toolCache,
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config: makeConfig({ name: 'Bot' }),
+      botDiscordUsername: 'BotUser',
+    })
+
+    expect(result.request.messages.map((message) => `${message.participant}: ${textOf(message)}`)).toEqual([
+      'alice: check the server',
+      'Bot: Round 1.',
+      'Bot: Round 2.',
+      'Bot: Round 3.',
+      'System<[lookup]: result 3',
+      'Bot: Round 4.',
+      'System<[lookup]: result 4',
+      'Bot: Round 5.',
+      'System<[lookup]: result 5',
+      'Bot: Round 6.',
+      'System<[lookup]: result 6',
+      'Bot: Round 7.',
+      'System<[lookup]: result 7',
+      'Bot: Found it.',
+      'Bot: ',
+    ])
   })
 
   it('skips tool interleaving when preserve_thinking_context is enabled', async () => {

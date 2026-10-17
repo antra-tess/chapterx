@@ -9,6 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { ToolDefinition, ToolCall, ToolResult, ToolError, MCPServerConfig } from '../types.js'
 import { logger } from '../utils/logger.js'
+import { toolOutputText } from './output-text.js'
 import { availablePlugins, PluginTool, PluginContext, ToolPlugin } from './plugins/index.js'
 
 export class ToolSystem {
@@ -253,7 +254,7 @@ export class ToolSystem {
     botId: string, 
     channelId: string,
     existingMessageIds?: Set<string>
-  ): Promise<Array<{call: ToolCall, result: any}>> {
+  ): Promise<Array<{call: ToolCall, result: any, resultOmitted?: boolean}>> {
     const dirPath = join(this.toolCacheDir, botId, channelId)
 
     if (!existsSync(dirPath)) {
@@ -302,9 +303,7 @@ export class ToolSystem {
           
           // Truncate large results to prevent context bloat
           let result = entry.result.output
-          const resultStr = typeof result === 'string'
-            ? result
-            : JSON.stringify(result) ?? String(result)
+          const resultStr = toolOutputText(result)
           if (resultStr.length > 2000) {
             result = resultStr.substring(0, 2000) + '\n...[truncated]'
           }
@@ -334,15 +333,31 @@ export class ToolSystem {
       }
     }
 
-    // Limit to last 5 tool calls to prevent context bloat
-    const limitedEntries = allEntries.slice(-5)
+    // Limit to the last 5 tool results to prevent context bloat. The entries
+    // just before them that share the oldest one's trigger are earlier rounds
+    // of the same activation. They come back with their prose and no result,
+    // so the next context still shows that activation's rounds in order and
+    // covers every message it posted.
+    const firstWithResult = Math.max(0, allEntries.length - 5)
+    const oldestTrigger = allEntries[firstWithResult]?.call.messageId
+    let firstEntry = firstWithResult
+    while (firstEntry > 0 && allEntries[firstEntry - 1]!.call.messageId === oldestTrigger) firstEntry--
+    const limitedEntries = [
+      ...allEntries.slice(firstEntry, firstWithResult).map((entry) => ({
+        call: entry.call,
+        result: undefined,
+        resultOmitted: true,
+      })),
+      ...allEntries.slice(firstWithResult),
+    ]
 
     logger.debug({ 
       botId, 
       channelId, 
       total: allEntries.length,
       filtered: filteredCount,
-      returned: limitedEntries.length
+      returned: limitedEntries.length,
+      withoutResults: firstWithResult - firstEntry,
     }, 'Loaded tool cache with results')
 
     return limitedEntries
@@ -728,7 +743,7 @@ export class ToolSystem {
         messageId: call.messageId,
         originalCompletionText: call.originalCompletionText,
         botMessageIds: call.botMessageIds,  // May be undefined, will be updated later
-        coveredMessageIds: call.coveredMessageIds,  // May be undefined, will be updated later
+        coveredMessageIds: call.coveredMessageIds,  // A native call's own; others get theirs later
       },
       result: {
         output: result.output,
@@ -747,15 +762,16 @@ export class ToolSystem {
   }
 
   /**
-   * Update tool cache entries with liveness anchors and the subset of Discord
-   * messages whose visible text is reconstructed by originalCompletionText.
+   * Update tool cache entries with liveness anchors and, for entries that don't
+   * carry their own, the subset of Discord messages whose visible text is
+   * reconstructed by originalCompletionText.
    */
   async updateBotMessageIds(
     botId: string,
     channelId: string,
     toolCallIds: string[],
     botMessageIds: string[],
-    coveredMessageIds: string[] = botMessageIds
+    coveredMessageIds: string[]
   ): Promise<void> {
     if (toolCallIds.length === 0 || botMessageIds.length === 0) return
     
