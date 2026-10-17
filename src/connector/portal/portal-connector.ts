@@ -408,7 +408,7 @@ export class PortalConnector implements IConnector {
     // the .sleep and config tools pin to make something take effect, so a silent
     // success would tell them it had.
     logger.warn({ channelId, messageId }, 'portal: pinMessage unsupported (no pin-mutation RPC)')
-    throw new Error("A bot on the portal backend can't pin messages; someone in the channel can pin the message in Discord instead")
+    throw new Error("A bot on the portal backend can't pin messages; someone allowed to pin messages in the channel can pin the message in Discord instead")
   }
 
   // ── Typing ──
