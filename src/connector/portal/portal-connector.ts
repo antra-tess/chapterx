@@ -322,9 +322,15 @@ export class PortalConnector implements IConnector {
   }
 
   async reactToLatestMessage(channelId: string, emoji: string): Promise<void> {
-    const { messages } = await this.client.fetchHistory({ channelId, limit: 1 })
-    const latest = messages[0]
-    if (latest) await this.client.react(latest.id, emoji, false)
+    // Best effort, as on DiscordConnector: the loop calls this after refusing an
+    // `m continue` and returns right after, so a relay error mustn't escape.
+    try {
+      const { messages } = await this.client.fetchHistory({ channelId, limit: 1 })
+      const latest = messages[0]
+      if (latest) await this.client.react(latest.id, emoji, false)
+    } catch (err) {
+      logger.warn({ err: (err as Error).message, channelId, emoji }, 'portal: failed to react to the latest message')
+    }
   }
 
   async pinMessage(channelId: string, messageId: string): Promise<void> {
@@ -339,7 +345,10 @@ export class PortalConnector implements IConnector {
 
   async startTyping(channelId: string): Promise<void> {
     if (this.typingIntervals.has(channelId)) return
-    const fire = () => this.client.call('set_typing', { channelId }).catch(() => {})
+    const fire = () =>
+      this.client
+        .call('set_typing', { channelId })
+        .catch((err) => logger.debug({ err: (err as Error).message, channelId }, 'portal: set_typing failed'))
     fire()
     this.typingIntervals.set(channelId, setInterval(fire, TYPING_REFRESH_MS))
   }
@@ -564,10 +573,20 @@ export class PortalConnector implements IConnector {
 
   async fetchMemberRoles(userId: string, guildId: string): Promise<string[] | null> {
     try {
+      // One list_members call returns at most 1,000 members, and the protocol
+      // has no lookup by user id. When the relay's roster is partial
+      // (membersAvailable false), a member in it still has their roles read.
       const { members, membersAvailable } = await this.client.call('list_members', { guildId, limit: 1000 })
-      if (!membersAvailable) return null
       const member = members.find((m) => m.userId === userId)
-      if (!member) return null
+      if (!member) {
+        logger.info(
+          { userId, guildId, listed: members.length, membersAvailable },
+          membersAvailable
+            ? 'portal: member not among those list_members returned, so their roles are unverified'
+            : "portal: member not in the relay's partial roster, so their roles are unverified",
+        )
+        return null
+      }
       const names = await this.rolesFor(guildId)
       return member.roles.map((id) => names.get(id)).filter((n): n is string => !!n)
     } catch (err) {

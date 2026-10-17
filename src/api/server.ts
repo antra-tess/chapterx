@@ -137,6 +137,17 @@ export class ApiServer {
     })
   }
 
+  /** The routes that read discord.js's own client answer 501 on the portal
+   *  backend, which has none. Returns whether it refused. */
+  private refusedOnPortal(res: Response, what: string): boolean {
+    if (!this.connector.isPortal()) return false
+    res.status(501).json({
+      error: 'Not Implemented',
+      message: `${what} needs the Discord backend's own gateway client, and this bot runs on the portal backend.`,
+    })
+    return true
+  }
+
   private setupRoutes(): void {
     // Health check
     this.app.get('/health', (_req: Request, res: Response) => {
@@ -202,6 +213,8 @@ export class ApiServer {
           return
         }
 
+        if (this.refusedOnPortal(res, 'User lookup')) return
+
         const guildId = req.query.guildId as string | undefined
         const userInfo = await this.getUserInfo(userId, guildId)
         res.json(userInfo)
@@ -234,6 +247,8 @@ export class ApiServer {
           })
           return
         }
+
+        if (this.refusedOnPortal(res, 'Avatar lookup')) return
 
         const size = req.query.size ? parseInt(req.query.size as string) : 128
         const avatarUrl = await this.getUserAvatar(userId, size)
@@ -280,11 +295,9 @@ export class ApiServer {
           return
         }
 
+        if (this.refusedOnPortal(res, 'Channel listing')) return
+
         const client = (this.connector as any).client
-        if (!client) {
-          res.status(501).json({ error: 'Not Implemented', message: 'channel listing requires the discord backend' })
-          return
-        }
         const guilds = guildIdFilter
           ? [client.guilds.cache.get(guildIdFilter)].filter(Boolean)
           : Array.from(client.guilds.cache.values())
@@ -604,7 +617,6 @@ export class ApiServer {
 
   private async getUserInfo(userId: string, guildId?: string): Promise<any> {
     const client = (this.connector as any).client
-    if (!client) throw new Error('user lookup requires the discord backend (portal mode)')
 
     // Fetch user from Discord
     let user
@@ -656,7 +668,6 @@ export class ApiServer {
 
   private async getUserAvatar(userId: string, size: number = 128): Promise<string | null> {
     const client = (this.connector as any).client
-    if (!client) throw new Error('avatar lookup requires the discord backend (portal mode)')
 
     try {
       const user = await client.users.fetch(userId)

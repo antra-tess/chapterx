@@ -15,6 +15,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { PortalConnector } from './portal-connector.js'
 import { EventQueue } from '../../agent/event-queue.js'
+import { logger } from '../../utils/logger.js'
 
 const CH = 'chan-1'
 
@@ -342,5 +343,49 @@ describe('PortalConnector.fetchContext when the relay fails', () => {
     } finally {
       h.cleanup()
     }
+  })
+})
+
+describe('PortalConnector member roles, reactions and typing', () => {
+  let h: ReturnType<typeof makeHarness>
+  afterEach(() => { h?.cleanup(); vi.restoreAllMocks() })
+
+  it('reads a member\'s roles from a partial roster when the member is in it', async () => {
+    h = makeHarness()
+    h.client.call.mockImplementation((async (method: string) =>
+      method === 'list_members'
+        ? { members: [{ userId: 'u1', roles: ['r1'] }], membersAvailable: false }
+        : { roles: [{ id: 'r1', name: 'mod' }] }) as never)
+
+    expect(await h.connector.fetchMemberRoles('u1', 'g')).toEqual(['mod'])
+  })
+
+  it('logs why a member\'s roles are unverified when the member isn\'t listed', async () => {
+    h = makeHarness()
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined as never)
+    h.client.call.mockResolvedValue({ members: [{ userId: 'u1', roles: [] }], membersAvailable: false } as never)
+
+    expect(await h.connector.fetchMemberRoles('u9', 'g')).toBeNull()
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ userId: 'u9', membersAvailable: false }), expect.stringContaining('partial roster'))
+  })
+
+  it('reactToLatestMessage keeps a relay error to itself, as the Discord backend\'s does', async () => {
+    h = makeHarness()
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined as never)
+    h.client.fetchHistory.mockRejectedValue(new Error('relay down') as never)
+
+    await expect(h.connector.reactToLatestMessage(CH, '🚫')).resolves.toBeUndefined()
+  })
+
+  it('a failed set_typing is logged, not thrown', async () => {
+    h = makeHarness()
+    const debug = vi.spyOn(logger, 'debug').mockImplementation(() => undefined as never)
+    h.client.call.mockRejectedValue(new Error('relay down') as never)
+
+    await h.connector.startTyping(CH)
+    await new Promise((r) => setTimeout(r, 0))
+    await h.connector.stopTyping(CH)
+
+    expect(debug).toHaveBeenCalledWith(expect.objectContaining({ channelId: CH }), 'portal: set_typing failed')
   })
 })
