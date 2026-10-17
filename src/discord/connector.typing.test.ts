@@ -7,9 +7,11 @@
  * connector's map and unreachable by stopTyping.
  *
  * These races are live rather than theoretical because callers are
- * fire-and-forget: agent/loop.ts calls `startTyping(...).catch(() => {})`, and
- * processBatch never awaits its activationPromise, so two activations on one
- * channel overlap freely.
+ * fire-and-forget: agent/loop.ts calls `startTyping(...).catch(() => {})`
+ * without awaiting it, so an activation can reach stopTyping while startTyping
+ * is still running, and a start still pending from one activation could
+ * register after the next one's start. (Activations on one channel don't
+ * overlap: processBatch skips a channel already in activeChannels.)
  *
  * The invariant under test: a typing timer exists if and only if it is in
  * `typingIntervals`, and both start and stop mutate that map synchronously.
@@ -23,6 +25,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { DiscordConnector } from './connector.js'
 import { EventQueue } from '../agent/event-queue.js'
+import { logger } from '../utils/logger.js'
 
 const CH = '100000000000000001'
 const REFRESH_MS = 8000
@@ -52,6 +55,7 @@ function makeHarness(opts: { fetchGate?: boolean } = {}) {
   return {
     connector,
     sendTyping,
+    fetch,
     release: () => release?.(),
     intervals: () => (connector as any).typingIntervals as Map<string, unknown>,
     cleanup: () => rmSync(tmpCache, { recursive: true, force: true }),
@@ -61,7 +65,7 @@ function makeHarness(opts: { fetchGate?: boolean } = {}) {
 describe('typing indicator lifecycle', () => {
   let h: ReturnType<typeof makeHarness>
   beforeEach(() => { vi.useFakeTimers() })
-  afterEach(() => { h?.cleanup(); vi.useRealTimers() })
+  afterEach(() => { h?.cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 
   it('stops refreshing after stopTyping', async () => {
     h = makeHarness()
@@ -74,8 +78,8 @@ describe('typing indicator lifecycle', () => {
   })
 
   it('a second startTyping does not orphan the first interval', async () => {
-    // Two overlapping activations on one channel. An interval dropped from the
-    // map while still running keeps sending typing forever, and no stopTyping
+    // Two starts on one channel before a stop. An interval dropped from the
+    // map while still running keeps its timer alive forever, and no stopTyping
     // can reach it again.
     h = makeHarness()
     await h.connector.startTyping(CH)
@@ -87,15 +91,16 @@ describe('typing indicator lifecycle', () => {
     expect(h.sendTyping).not.toHaveBeenCalled()
   })
 
-  it('a stopTyping during startTyping wins, rather than being overtaken', async () => {
+  it('a stopTyping while the first tick awaits Discord wins, rather than being overtaken', async () => {
     // THE "typing forever with nothing in flight" CASE. A fast activation
-    // finishes and calls stopTyping while a start is still awaiting Discord.
-    // The stop must win; it must not be silently overtaken.
+    // finishes and calls stopTyping while the start's first tick is still
+    // awaiting Discord. The stop must win; it must not be silently overtaken.
     h = makeHarness({ fetchGate: true })
 
-    const starting = h.connector.startTyping(CH)   // blocks inside channels.fetch
-    await h.connector.stopTyping(CH)               // lands first; map is empty
-    h.release()                                    // start resumes and registers
+    const starting = h.connector.startTyping(CH)   // registers; its first tick blocks in channels.fetch
+    await h.connector.stopTyping(CH)               // clears the timer the start registered
+    expect(h.fetch).toHaveBeenCalledTimes(1)
+    h.release()                                    // the tick resumes and finds itself stopped
     await starting
 
     h.sendTyping.mockClear()
@@ -108,8 +113,8 @@ describe('typing indicator lifecycle', () => {
     // the map no longer holds, so `typingIntervals.size === 0` cannot detect
     // one. Only the timer count can.
     h = makeHarness()
-    // The connector opens 2 timers of its own at construction, so the absolute
-    // count is not the signal -- the DELTA is.
+    // Constructing the connector opens timers too (2 in this harness), so the
+    // absolute count is not the signal -- the DELTA is.
     const baseline = vi.getTimerCount()
 
     await h.connector.startTyping(CH)
@@ -130,21 +135,20 @@ describe('typing indicator lifecycle', () => {
     expect(h.sendTyping.mock.calls.length).toBeGreaterThanOrEqual(3)
   })
 
-  it('a start still pending at shutdown never installs a timer', async () => {
-    // Shutdown is the sharpest ordering: a start is still awaiting Discord when
-    // the connector closes, and a stop arrives after the close. Nothing in that
-    // sequence may leave a timer behind -- one that survives close() sends
-    // typing through a dead client forever.
+  it('a start whose first tick is still awaiting Discord at shutdown leaves no timer and sends nothing', async () => {
+    // Shutdown is the sharpest ordering: a start's first tick is still awaiting
+    // Discord when the connector closes, and a stop arrives after the close.
+    // Nothing in that sequence may leave a timer behind -- one that survives
+    // close() keeps typing through a dead client.
     h = makeHarness({ fetchGate: true })
 
-    const starting = h.connector.startTyping(CH)   // generation 1, blocks in fetch
-    await h.connector.close()                      // clears intervals + generations
-    await h.connector.stopTyping(CH)               // must NOT be able to re-mint 1
+    const starting = h.connector.startTyping(CH)   // registers; its first tick blocks in fetch
+    await h.connector.close()                      // clears every timer and the map
+    await h.connector.stopTyping(CH)               // finds nothing left to clear
     h.release()
     await starting
 
     expect(h.intervals().size).toBe(0)
-    h.sendTyping.mockClear()
     await vi.advanceTimersByTimeAsync(REFRESH_MS * 3)
     expect(h.sendTyping).not.toHaveBeenCalled()
   })
@@ -154,8 +158,8 @@ describe('typing indicator lifecycle', () => {
     // TIMERS; this one watches a single stray SEND, and nothing else would
     // notice if the re-check disappeared. Note its limit: sending is
     // asynchronous and cannot be un-sent, so a stop can always land mid-send.
-    // The check narrows that window rather than closing it, leaving at most one
-    // indicator, which Discord expires by itself in ~10s.
+    // The check narrows that window rather than closing it, leaving at most the
+    // indicators already in flight, each of which Discord expires in ~10s.
     h = makeHarness({ fetchGate: true })
 
     await h.connector.startTyping(CH)   // registers synchronously; tick blocks in fetch
@@ -164,5 +168,64 @@ describe('typing indicator lifecycle', () => {
     await vi.advanceTimersByTimeAsync(0)
 
     expect(h.sendTyping).not.toHaveBeenCalled()
+  })
+
+  it('a first tick still awaiting Discord when close() runs sends nothing, with no stop after the close', async () => {
+    // close() clears the map as well as the timers: the tick in flight finds
+    // its handle gone after the fetch, and sends nothing.
+    h = makeHarness({ fetchGate: true })
+
+    await h.connector.startTyping(CH)   // registers; its first tick blocks in fetch
+    expect(h.fetch).toHaveBeenCalledTimes(1)
+    await h.connector.close()
+    h.release()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(h.intervals().size).toBe(0)
+    expect(h.sendTyping).not.toHaveBeenCalled()
+  })
+
+  it('a fetch that rejects is caught, logged, and tried again at the next refresh', async () => {
+    // Nothing awaits a tick, so its catch is all that keeps a failed refresh
+    // from becoming an unhandled rejection.
+    h = makeHarness()
+    h.fetch.mockRejectedValue(new Error('Discord is unavailable'))
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+
+    await h.connector.startTyping(CH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.fetch).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ channelId: CH }), 'Failed to refresh typing')
+
+    await vi.advanceTimersByTimeAsync(REFRESH_MS)
+    expect(h.fetch).toHaveBeenCalledTimes(2)
+    expect(h.intervals().size).toBe(1)
+  })
+
+  it('a sendTyping that rejects is caught, logged, and tried again at the next refresh', async () => {
+    h = makeHarness()
+    h.sendTyping.mockRejectedValue(new Error('Missing Permissions'))
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+
+    await h.connector.startTyping(CH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.sendTyping).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ channelId: CH }), 'Failed to refresh typing')
+
+    await vi.advanceTimersByTimeAsync(REFRESH_MS)
+    expect(h.sendTyping).toHaveBeenCalledTimes(2)
+  })
+
+  it('sends the first indicator at once, not at the first refresh', async () => {
+    h = makeHarness()
+
+    await h.connector.startTyping(CH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.sendTyping).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(REFRESH_MS - 1)
+    expect(h.sendTyping).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(h.sendTyping).toHaveBeenCalledTimes(2)
   })
 })

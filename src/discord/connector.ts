@@ -99,7 +99,6 @@ export class DiscordConnector {
   // and stopTyping mutate it SYNCHRONOUSLY, so there is no window in which a
   // stop can be missed or a start can register behind one.
   private typingIntervals = new Map<string, NodeJS.Timeout>()
-  private closed = false
   private imageCache = new Map<string, CachedImage>()
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
   private urlMapPath: string  // Path to URL map file
@@ -1468,8 +1467,8 @@ export class DiscordConnector {
    * types forever with nothing in flight.
    *
    * TWO RULES HOLD THIS TOGETHER. Callers are fire-and-forget (agent/loop.ts
-   * does `startTyping(...).catch(() => {})`, and processBatch never awaits its
-   * activationPromise), so starts and stops for one channel genuinely overlap.
+   * does `startTyping(...).catch(() => {})` without awaiting it), so an
+   * activation can reach stopTyping while startTyping is still running.
    *
    *   1. NEVER AWAIT BEFORE THE MAP WRITE. Registration must stay atomic with
    *      respect to stopTyping; an await above it reopens a window in which a
@@ -1485,29 +1484,22 @@ export class DiscordConnector {
    * Invariant: a typing timer exists if and only if it is in typingIntervals.
    */
   async startTyping(channelId: string): Promise<void> {
-    if (this.closed) {
-      return
-    }
-
     // Replace, never shadow: an interval evicted from the map while still
     // running can never be reached by stopTyping again.
     this.clearTypingInterval(channelId)
 
     const tick = async (): Promise<void> => {
-      // Identity check, not a value check. If this handle is no longer the
-      // channel's registered timer, we were stopped or replaced.
-      if (this.typingIntervals.get(channelId) !== interval) {
-        return
-      }
       try {
         const channel = await this.client.channels.fetch(channelId) as TextChannel
         if (!channel || !channel.isTextBased()) {
           return
         }
-        // Re-checked after the await: a stop can land inside a network
-        // round-trip. This narrows that window rather than closing it --
-        // sending is asynchronous and cannot be un-sent -- so the residual is
-        // one stray indicator, which Discord expires by itself in ~10s.
+        // Identity check, not a value check, after the await: a stop or a
+        // replacing start can land inside a network round-trip. This narrows
+        // that window rather than closing it -- sending is asynchronous and
+        // cannot be un-sent, and setInterval doesn't wait for a slow tick --
+        // so the residual is a stray indicator from each refresh already in
+        // flight, which Discord expires by itself in ~10s.
         if (this.typingIntervals.get(channelId) !== interval) {
           return
         }
@@ -1817,9 +1809,7 @@ export class DiscordConnector {
     }
     this.typingIntervals.clear()
     // A tick still awaiting Discord finds its handle absent and returns without
-    // sending. The flag refuses starts arriving after close, which would
-    // otherwise type through a dead client.
-    this.closed = true
+    // sending.
     // Clear cache maintenance intervals
     if (this.cacheStatsInterval) clearInterval(this.cacheStatsInterval)
     if (this.evictionInterval) clearInterval(this.evictionInterval)

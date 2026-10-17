@@ -158,7 +158,7 @@ class DiscordConnector {
 - Discord typing expires after 10s
 - Refresh every 8s while active
 - Track active typing per channel
-- Clean up on stopTyping or error
+- Clean up on stopTyping or close; a refresh that fails is tried again at the next one
 
 ### 2. Event Queue
 
