@@ -236,6 +236,42 @@ describe('AgentLoop active-channel event buffering', () => {
     expect(queue.pollBatch()).toEqual([mention])
   })
 
+  it('requeues a mention behind an m get_context, which is answered without an activation', async () => {
+    const { loop, queue, soma, deleted } = makeLoop()
+    const dumped: string[] = []
+    loop.handleGetContext = async (_channelId: string, _guildId: string, _count: number | undefined, messageId: string) => {
+      dumped.push(messageId)
+    }
+    const command = message('channel', '241', { content: 'm get_context <@bot-user>', mentionsBot: true })
+    const mention = message('channel', '242', { content: '<@bot-user> hi', mentionsBot: true })
+
+    await loop.processBatch([command, mention])
+
+    expect(dumped).toEqual(['241'])
+    expect(deleted).toEqual(['241'])
+    expect(soma).toEqual([])
+    expect(queue.pollBatch()).toEqual([mention])
+  })
+
+  it('requeues a mention behind a continuation reaction the bot rejects', async () => {
+    const { loop, queue, soma } = makeLoop()
+    const config = loop.configSystem.loadConfig()
+    loop.configSystem = { loadConfig: () => ({ ...config, supports_continuation: false }) }
+    const reaction: Event = {
+      type: 'reaction',
+      channelId: 'channel',
+      guildId: 'guild',
+      data: { emoji: '⏩', userId: 'person', messageId: '251', messageAuthorId: BOT_USER },
+      timestamp: new Date('2026-09-01T12:00:00Z'),
+    }
+    const mention = message('channel', '252', { content: '<@bot-user> hi', mentionsBot: true })
+
+    await loop.processBatch([reaction, mention])
+
+    expect(soma).toEqual([])
+    expect(queue.pollBatch()).toEqual([mention])
+  })
+
   it('holds an m command sent during a generation, and deletes and runs it only at its replay', async () => {
     const { loop, queue, soma, deleted } = makeLoop()
     loop.activeChannels.add('channel')
