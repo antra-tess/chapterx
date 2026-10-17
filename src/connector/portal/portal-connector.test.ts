@@ -424,6 +424,21 @@ describe('PortalConnector events wait for their channel\'s pins', () => {
     ])
   })
 
+  it('a pins_update asks at once, even while a failed channel backs off', async () => {
+    h = makeHarness()
+    h.client.call.mockRejectedValueOnce(new Error('relay down') as never)
+    h.client.call.mockResolvedValueOnce({ messages: [pinned(40, '.sleep')] } as never)
+    await h.connector.start()
+    h.client.emit('event', message(5))
+    await new Promise((r) => setTimeout(r, 0))
+
+    h.client.emit('event', { type: 'pins_update', channelId: CH })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(h.client.call).toHaveBeenCalledTimes(2)
+    expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1)
+  })
+
   it('a fresh ready ends a failed channel\'s back-off, so its next event waits for a new load', async () => {
     h = makeHarness()
     h.client.call.mockRejectedValueOnce(new Error('relay down') as never)
