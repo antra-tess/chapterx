@@ -79,6 +79,10 @@ const SEEN_CAP = 50_000
  *  would fetch it by id and count on, so a longer chain is counted up to here. */
 const CHAIN_PAGES = 5
 const TYPING_REFRESH_MS = 8000
+/** How long after a channel's list_pins fails before its events or lookups ask
+ *  again. A channel whose list_pins is refused (no READ_HISTORY) or failing then
+ *  costs one request in this time, not one per message or lookup. */
+const PIN_RETRY_MS = 30_000
 /** The split target for one message, as DiscordConnector uses: under Discord's
  *  2000-character limit, with room for the splitter's synthetic closers. */
 const MESSAGE_CHUNK_CHARS = 1800
@@ -105,13 +109,16 @@ export class PortalConnector implements IConnector {
    *  without waiting (getCachedPinned*) when it decides whether to activate: a
    *  .sleep, and the channel's pinned config. */
   private pinnedByChannel = new Map<string, TrackedPin[]>()
-  /** The channels whose cached pins are current: loaded on this connection, with
-   *  the load each pins_update since asked for done too. A fresh `ready` empties
-   *  it, since a pins_update in the gap may be lost. */
+  /** The channels whose cached pins are current: loaded during this session,
+   *  which a resume continues, with the load each pins_update since asked for
+   *  done too. A fresh `ready` empties it, since a pins_update in the gap may be
+   *  lost. */
   private pinsCurrent = new Set<string>()
-  /** The channels whose last load failed. Their events don't wait for another
-   *  load; a read, a pins_update or the next fresh `ready` asks again. */
-  private pinsFailed = new Set<string>()
+  /** channelId → when its last load failed. For PIN_RETRY_MS after that, its
+   *  events go on and its lookups answer from the cache without asking again;
+   *  after it, the next event or lookup asks again. A pins_update asks at once,
+   *  and a fresh `ready` empties it. */
+  private pinFailedAt = new Map<string, number>()
   /** channelId → the list_pins load in progress. A refresh asked for while one
    *  is in progress makes it load once more when its reply lands, so replies
    *  apply in the order they were asked for, and everyone waiting on the load
@@ -148,7 +155,7 @@ export class PortalConnector implements IConnector {
     // gone out on the old connection. A resume replays the gap and needs nothing.
     this.client.on('ready', () => {
       this.pinsCurrent.clear()
-      this.pinsFailed.clear()
+      this.pinFailedAt.clear()
       for (const load of this.pinLoads.values()) load.again = true
     })
     this.client.on('close', (info) =>
@@ -163,6 +170,8 @@ export class PortalConnector implements IConnector {
   async close(): Promise<void> {
     for (const t of this.typingIntervals.values()) clearInterval(t)
     this.typingIntervals.clear()
+    // Events waiting for their channel's pins are dropped, not queued after close.
+    this.heldEvents.clear()
     this.client.close()
   }
 
@@ -186,7 +195,8 @@ export class PortalConnector implements IConnector {
    *  start or a fresh `ready`), or a load of them is in progress (after a
    *  pins_update, say), the channel's events wait, in order, for that load. If
    *  it fails, they go on, read against whatever pins are cached, and the
-   *  channel's later events don't wait for another. */
+   *  channel's events don't wait for another load until PIN_RETRY_MS has
+   *  passed. */
   private deliver(ev: Event): void {
     const channelId = ev.channelId
     const held = this.heldEvents.get(channelId)
@@ -194,7 +204,7 @@ export class PortalConnector implements IConnector {
       held.push(ev)
       return
     }
-    const settled = this.pinsCurrent.has(channelId) || this.pinsFailed.has(channelId)
+    const settled = this.pinsCurrent.has(channelId) || this.pinsBackingOff(channelId)
     if (settled && !this.pinLoads.has(channelId)) {
       this.queue.push(ev)
       return
@@ -581,12 +591,18 @@ export class PortalConnector implements IConnector {
 
   // ── Pins ──
 
+  /** Whether a channel's last load failed less than PIN_RETRY_MS ago. */
+  private pinsBackingOff(channelId: string): boolean {
+    const failedAt = this.pinFailedAt.get(channelId)
+    return failedAt !== undefined && Date.now() - failedAt < PIN_RETRY_MS
+  }
+
   /** Load a channel's pins with list_pins, one request at a time per channel
    *  (see pinLoads). `refresh` is for a change that may have come after a load in
    *  progress asked: it makes that load ask once more. Without it, a caller just
    *  waits for the load in progress. The channel's pins are current when the
    *  load's last request succeeds. When it fails, the cache keeps what it had,
-   *  and the channel is marked failed (see pinsFailed). */
+   *  and the failure's time is kept (see pinFailedAt). */
   private loadPins(channelId: string, refresh: boolean): Promise<void> {
     const inProgress = this.pinLoads.get(channelId)
     if (inProgress) {
@@ -612,10 +628,10 @@ export class PortalConnector implements IConnector {
         this.pinLoads.delete(channelId)
         if (loaded) {
           this.pinsCurrent.add(channelId)
-          this.pinsFailed.delete(channelId)
+          this.pinFailedAt.delete(channelId)
         } else {
           this.pinsCurrent.delete(channelId)
-          this.pinsFailed.add(channelId)
+          this.pinFailedAt.set(channelId, Date.now())
         }
       }
     })()
@@ -623,12 +639,13 @@ export class PortalConnector implements IConnector {
     return load.done
   }
 
-  /** A channel's pins for a reader that can wait: loaded first when they aren't
-   *  current, and after any load in progress. When the load fails, the answer is
-   *  the pins cached before, or none, with list_pins' warning in the log, and the
-   *  next read asks again. */
+  /** A channel's pins for a reader that can wait: after any load in progress,
+   *  and loaded first when they aren't current, unless the last load failed less
+   *  than PIN_RETRY_MS ago. When the load fails, or is backing off, the answer
+   *  is the pins cached before, or none. */
   private async ensurePins(channelId: string): Promise<TrackedPin[]> {
-    if (!this.pinsCurrent.has(channelId) || this.pinLoads.has(channelId)) await this.loadPins(channelId, false)
+    const stale = !this.pinsCurrent.has(channelId) && !this.pinsBackingOff(channelId)
+    if (stale || this.pinLoads.has(channelId)) await this.loadPins(channelId, false)
     return this.pinnedByChannel.get(channelId) ?? []
   }
 
