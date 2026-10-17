@@ -69,12 +69,14 @@ async function startOverHistory(all: ReturnType<typeof msg>[]) {
   server = new ApiServer({ port: 0, bearerToken: 'secret' }, connector)
   await server.start()
   const port = (server as any).server.address().port as number
-  return (body: unknown) =>
+  const post = (body: unknown) =>
     fetch(`http://127.0.0.1:${port}/api/messages/export`, {
       method: 'POST',
       headers: { Authorization: 'Bearer secret', 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
+  post.get = (path: string) => fetch(`http://127.0.0.1:${port}${path}`, { headers: { Authorization: 'Bearer secret' } })
+  return post
 }
 
 const url = (n: number) => `https://discord.com/channels/${GUILD}/${CHANNEL}/${n}`
@@ -97,6 +99,29 @@ describe('POST /api/messages/export on the portal backend', () => {
     expect(byId('104').referencedMessageId).toBe('103')
     expect(byId('105').referencedMessageId).toBe('101')
     expect(byId('103').referencedMessageId).toBeUndefined()
+    expect(JSON.stringify(body)).not.toContain('rm_')
+  })
+
+  it('gives a persona-authored message the persona\'s id as its author\'s id, since a persona has no Discord account', async () => {
+    const persona = { ...msg(103), author: { kind: 'persona', personaId: 'persona-p', displayName: 'p', avatarUrl: '' } }
+    const post = await startOverHistory([msg(101), msg(102), persona, msg(104)])
+
+    const body = await (await post({ last: url(104), first: url(102) })).json()
+
+    expect(body.messages.find((m: { id: string }) => m.id === '103').author.id).toBe('persona-p')
+  })
+})
+
+describe('GET /api/channels/:channelId/latest on the portal backend', () => {
+  it('returns Discord snowflakes as message ids', async () => {
+    const api = await startOverHistory([100, 101, 102, 103].map((n) => msg(n, n === 103 ? 101 : undefined)))
+
+    const res = await api.get(`/api/channels/${CHANNEL}/latest?messages=3`)
+    const body = await res.json()
+
+    expect(res.status).toBe(200)
+    expect(body.messages.map((m: { id: string }) => m.id)).toEqual(['101', '102', '103'])
+    expect(body.messages[2].referencedMessageId).toBe('101')
     expect(JSON.stringify(body)).not.toContain('rm_')
   })
 })
