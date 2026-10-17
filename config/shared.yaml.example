@@ -10,7 +10,7 @@ vendors:
       - "claude-3-opus-20240229"
       - "claude-3-5-haiku-20241022"
   
-  # aws-bedrock:
+  # bedrock:
   #   config:
   #     aws_access_key: "AKIA..."
   #     aws_secret_key: "..."

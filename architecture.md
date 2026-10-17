@@ -1192,7 +1192,7 @@ vendors:
       - "claude-3-5-sonnet-20241022"
       - "claude-3-opus-20240229"
   
-  aws-bedrock:
+  bedrock:
     config:
       aws_access_key: "AKIA..."
       aws_secret_key: "..."
@@ -1211,7 +1211,7 @@ vendors:
 
 ### Discord Retries
 - Exponential backoff: 1s, 2s, 4s, 8s, ..., max
-- Configurable max backoff (default 32s)
+- Max backoff 32s, fixed in `src/main.ts`
 - Apply to all Discord API calls
 - Log rate limit hits
 

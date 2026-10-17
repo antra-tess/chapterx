@@ -68,10 +68,3 @@ reply_on_random: 500  # Random reply: 1/N chance per message (default 500 = 0.2%
 #   enabled: true
 #   url: "http://localhost:3100/api/v1"
 #   # token: "..."  # Optional: uses SOMA_TOKEN env var if not set
-
-# Membrane integration (experimental)
-# When enabled, uses the membrane library for LLM calls instead of built-in providers.
-# This provides unified handling of prefill transforms, caching, and provider routing.
-# Requires the membrane npm package to be installed.
-# use_membrane: true
-
