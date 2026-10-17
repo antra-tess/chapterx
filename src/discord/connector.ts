@@ -94,10 +94,11 @@ export interface SentMessageChunk {
 
 export class DiscordConnector {
   private client: Client
-  // The ONE piece of typing state. Invariant, and the whole safety argument:
-  // a typing timer exists if and only if it is in this map. Both startTyping
-  // and stopTyping mutate it SYNCHRONOUSLY, so there is no window in which a
-  // stop can be missed or a start can register behind one.
+  // The typing timers, one per channel. Invariant, and the whole argument
+  // against the start/stop races: a typing timer exists if and only if it is
+  // in this map. Both startTyping and stopTyping mutate it SYNCHRONOUSLY, so
+  // there is no window in which a stop can be missed or a start can register
+  // behind one. `closed` refuses any start once close() has begun.
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private closed = false
   private imageCache = new Map<string, CachedImage>()
@@ -1480,9 +1481,8 @@ export class DiscordConnector {
    *      must be none before the registration.
    *   2. COMPARE THE HANDLE, NOT A COUNTER. The Timeout is the identity token:
    *      the runtime mints it and it cannot be re-derived, so "is this still
-   *      the channel's timer?" has no false positives. A counter can be reset
-   *      and then re-mint a value a pending start still holds, as close() once
-   *      did.
+   *      the channel's timer?" has no false positives. A counter that can be
+   *      reset could re-mint a value a pending start still holds.
    *
    * Invariant: a typing timer exists if and only if it is in typingIntervals.
    */
@@ -1819,8 +1819,9 @@ export class DiscordConnector {
       clearInterval(interval)
     }
     this.typingIntervals.clear()
-    // A tick still awaiting Discord finds its handle absent and returns without
-    // sending, and the flag refuses any start after this.
+    // A tick still awaiting its channel fetch finds its handle absent and
+    // returns without sending (a send already in flight can't be un-sent),
+    // and the flag refuses any start after this.
     this.closed = true
     // Clear cache maintenance intervals
     if (this.cacheStatsInterval) clearInterval(this.cacheStatsInterval)

@@ -6,8 +6,8 @@
  * stale UI state -- an interval is actively re-sending it, orphaned from the
  * connector's map and unreachable by stopTyping.
  *
- * These races were live on main, where startTyping awaited the channel fetch
- * and the first send before it registered its interval. Callers are
+ * These races were live before this change, when startTyping awaited the
+ * channel fetch and the first send before it registered its interval. Callers are
  * fire-and-forget (agent/loop.ts calls `startTyping(...).catch(() => {})`
  * without awaiting it), so an activation could reach stopTyping while
  * startTyping was still waiting, and a start still pending from one activation
@@ -33,7 +33,7 @@ import { logger } from '../utils/logger.js'
 const CH = '100000000000000001'
 const REFRESH_MS = 8000
 
-function makeHarness(opts: { fetchGate?: boolean } = {}) {
+function makeHarness(opts: { fetchGate?: boolean; destroyGate?: boolean } = {}) {
   const tmpCache = mkdtempSync(join(tmpdir(), 'connector-typing-test-'))
   const connector = new DiscordConnector(new EventQueue(), {
     token: 'fake',
@@ -45,7 +45,7 @@ function makeHarness(opts: { fetchGate?: boolean } = {}) {
   const channel = { isTextBased: () => true, sendTyping }
 
   // When gated, each channels.fetch hangs until released -- this is what lets a
-  // test land a stop, a close or a second start while a tick awaits Discord.
+  // test land a stop, a close or a second start while a tick awaits its fetch.
   // Each held fetch is kept apart, so a test can release the oldest alone.
   const held: Array<() => void> = []
   const fetch = opts.fetchGate
@@ -54,7 +54,13 @@ function makeHarness(opts: { fetchGate?: boolean } = {}) {
 
   // destroy() is what close() calls; without it the harness throws and the
   // test fails for a reason that has nothing to do with the code under test.
-  ;(connector as any).client = { channels: { fetch }, destroy: async () => {} }
+  // When destroyGate is set, destroy() hangs until releaseDestroy(), so a test
+  // can start typing while close() is still awaiting it.
+  let destroyHeld: (() => void) | undefined
+  const destroy = opts.destroyGate
+    ? () => new Promise<void>((res) => { destroyHeld = res })
+    : async () => {}
+  ;(connector as any).client = { channels: { fetch }, destroy }
 
   return {
     connector,
@@ -62,6 +68,7 @@ function makeHarness(opts: { fetchGate?: boolean } = {}) {
     fetch,
     release: () => { while (held.length > 0) held.shift()!() },
     releaseOldest: () => held.shift()?.(),
+    releaseDestroy: () => destroyHeld?.(),
     intervals: () => (connector as any).typingIntervals as Map<string, unknown>,
     cleanup: () => rmSync(tmpCache, { recursive: true, force: true }),
   }
@@ -107,6 +114,7 @@ describe('typing indicator lifecycle', () => {
     // finishes and calls stopTyping while the start's first tick is still
     // awaiting Discord. The stop must win; it must not be silently overtaken.
     h = makeHarness({ fetchGate: true })
+    const baseline = vi.getTimerCount()
 
     const starting = h.connector.startTyping(CH)   // registers; its first tick blocks in channels.fetch
     await h.connector.stopTyping(CH)               // clears the timer the start registered
@@ -115,6 +123,8 @@ describe('typing indicator lifecycle', () => {
     await starting
 
     await vi.advanceTimersByTimeAsync(REFRESH_MS * 3)
+    expect(h.intervals().size).toBe(0)
+    expect(vi.getTimerCount()).toBe(baseline)
     expect(h.sendTyping).not.toHaveBeenCalled()
   })
 
@@ -135,7 +145,7 @@ describe('typing indicator lifecycle', () => {
     expect(vi.getTimerCount()).toBe(baseline)
   })
 
-  it('keeps typing at each refresh until it is stopped', async () => {
+  it('keeps refreshing the indicator while nothing stops it', async () => {
     // The control: an activation still running keeps its indicator. A fix that
     // simply never types would pass every test above.
     h = makeHarness()
@@ -146,9 +156,9 @@ describe('typing indicator lifecycle', () => {
     expect(h.sendTyping.mock.calls.length).toBeGreaterThanOrEqual(3)
   })
 
-  it('a start whose first tick is still awaiting Discord at shutdown leaves no timer and sends nothing', async () => {
+  it('a start whose first tick is still awaiting its channel fetch at shutdown leaves no timer and sends nothing', async () => {
     // Shutdown is the sharpest ordering: a start's first tick is still awaiting
-    // Discord when the connector closes, and a stop arrives after the close.
+    // its channel fetch when the connector closes, and a stop arrives after it.
     // Nothing in that sequence may leave a timer behind -- one that survived
     // close() would keep fetching through the destroyed client until exit.
     h = makeHarness({ fetchGate: true })
@@ -168,9 +178,8 @@ describe('typing indicator lifecycle', () => {
   })
 
   it('does not send typing after a stop that landed mid-fetch', async () => {
-    // Pins the post-await identity re-check. Every other test here watches
-    // TIMERS; this one watches a single stray SEND, and nothing else would
-    // notice if the re-check disappeared. Note its limit: sending is
+    // Pins the post-await identity re-check against a stop, by watching for a
+    // single stray SEND. Note its limit: sending is
     // asynchronous and cannot be un-sent, so a stop can always land mid-send.
     // The check narrows that window rather than closing it, leaving at most the
     // indicators already in flight, each of which Discord expires in ~10s.
@@ -185,7 +194,7 @@ describe('typing indicator lifecycle', () => {
     expect(h.sendTyping).not.toHaveBeenCalled()
   })
 
-  it('a first tick still awaiting Discord when close() runs sends nothing, with no stop after the close', async () => {
+  it('a first tick still awaiting its channel fetch when close() runs sends nothing, with no stop after the close', async () => {
     // close() clears the map as well as the timers: the tick in flight finds
     // its handle gone after the fetch, and sends nothing.
     h = makeHarness({ fetchGate: true })
@@ -202,7 +211,7 @@ describe('typing indicator lifecycle', () => {
     expect(h.sendTyping).not.toHaveBeenCalled()
   })
 
-  it('a replacing start while the first tick awaits Discord leaves the replaced tick sending nothing', async () => {
+  it('a replacing start while the first tick awaits its channel fetch leaves the replaced tick sending nothing', async () => {
     // Pins the check after the fetch as an identity check: a stop or a close
     // empties the map, but a replacing start leaves the channel's key in place
     // with another handle, so only comparing the handle stops the old tick.
@@ -220,6 +229,23 @@ describe('typing indicator lifecycle', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(h.sendTyping).toHaveBeenCalledTimes(1)
     expect(h.intervals().size).toBe(1)
+  })
+
+  it('refuses a start while close() is still awaiting the client\'s destroy', async () => {
+    // The flag is set before close() awaits destroy(), so a start that lands
+    // during that await is refused too.
+    h = makeHarness({ destroyGate: true })
+
+    const closing = h.connector.close()           // clears the timers, then awaits destroy()
+    const baseline = vi.getTimerCount()
+    await h.connector.startTyping(CH)
+    await vi.advanceTimersByTimeAsync(REFRESH_MS)
+
+    expect(h.intervals().size).toBe(0)
+    expect(vi.getTimerCount()).toBe(baseline)
+    expect(h.fetch).not.toHaveBeenCalled()
+    h.releaseDestroy()
+    await closing
   })
 
   it('refuses a start after close(): no timer is added and nothing is sent', async () => {
