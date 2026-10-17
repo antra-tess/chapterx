@@ -11,6 +11,32 @@ import type { Activation, Completion, MessageContext } from '../../activation/in
 import type { ContextInjection } from '../../tools/plugins/types.js'
 import { logger } from '../../utils/logger.js'
 
+function stripBridgeOpen(text: string, bridgeOpen?: string): string {
+  if (!bridgeOpen) return text
+  if (text.startsWith(bridgeOpen)) return text.slice(bridgeOpen.length)
+
+  // Fence reopeners include an info string. Discord fetch normalization can
+  // rewrite mentions/emojis in that info string, so match the marker line by
+  // fence marker instead of requiring byte-for-byte equality.
+  const marker = /^(`{3,}|~{3,}).*\n$/.exec(bridgeOpen)?.[1]
+  if (!marker) return text
+
+  const lineEnd = text.indexOf('\n')
+  if (lineEnd < 0) return text
+  const firstLine = text.slice(0, lineEnd)
+  const actualMarker = /^(`{3,}|~{3,})/.exec(firstLine)?.[1]
+  if (actualMarker === marker) {
+    return text.slice(lineEnd + 1)
+  }
+  return text
+}
+
+function stripBridgeClose(text: string, bridgeClose?: string): string {
+  if (!bridgeClose) return text
+  if (text.endsWith(bridgeClose)) return text.slice(0, text.length - bridgeClose.length)
+  return text
+}
+
 /**
  * Inject activation completions into participant messages.
  * - Replaces bot message content with full completion text (including thinking)
@@ -116,10 +142,15 @@ export function injectActivationCompletions(
 
       // Prepend prefix and append suffix to existing content
       // This preserves the Discord message content while wrapping with invisible context
-      const existingText = msg.content
+      let existingText = msg.content
         .filter(c => c.type === 'text')
         .map(c => (c as { type: 'text'; text: string }).text)
         .join('')
+
+      // Strip synthetic markdown bridge strings (added when this response was
+      // split mid-construct) so the model sees its original unbroken markdown.
+      existingText = stripBridgeOpen(existingText, context.bridgeOpen)
+      existingText = stripBridgeClose(existingText, context.bridgeClose)
 
       const newText = (context.prefix || '') + existingText + (context.suffix || '')
       msg.content = [{ type: 'text', text: newText }]

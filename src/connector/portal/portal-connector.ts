@@ -12,8 +12,8 @@ import type { PortalMessage, PortalEvent } from '@animalabs/portal-protocol'
 import { EventQueue } from '../../agent/event-queue.js'
 import type { DiscordContext } from '../../types.js'
 import { logger } from '../../utils/logger.js'
-import type { IConnector, FetchContextParams, TrackedPin, PinnedSteer } from '../types.js'
-import { splitContent } from '../util/split.js'
+import type { IConnector, FetchContextParams, TrackedPin, PinnedSteer, SentMessageChunk } from '../types.js'
+import { splitPreservingMarkdown, type MarkdownCarry } from '../../utils/discord-markdown.js'
 import { queueEventFromPortal, authorOfMessage, type AdapterCtx } from './adapters.js'
 import { AttachmentCache } from '../util/attachment-cache.js'
 import { buildPortalContext, type ContextDeps } from './context.js'
@@ -60,6 +60,9 @@ function isTextBasedType(type?: string): boolean {
 
 const AUTHOR_CAP = 5000
 const TYPING_REFRESH_MS = 8000
+/** The split target for one message, as DiscordConnector uses: under Discord's
+ *  2000-character limit, with room for the splitter's synthetic closers. */
+const MESSAGE_CHUNK_CHARS = 1800
 
 export class PortalConnector implements IConnector {
   private client: PortalClient
@@ -154,21 +157,40 @@ export class PortalConnector implements IConnector {
   // ── Send ──
 
   async sendMessage(channelId: string, content: string, replyToMessageId?: string): Promise<string[]> {
+    const { chunks } = splitPreservingMarkdown(normalizeOutgoingMentions(content), MESSAGE_CHUNK_CHARS)
     const ids: string[] = []
-    const chunks = splitContent(normalizeOutgoingMentions(content))
     for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i]!
-      // The relay resolves a thread id passed as channelId into parent+thread.
-      // Only the first chunk replies to the trigger (matches DiscordConnector);
-      // forwarding replyToId on every chunk piles replies on the original message.
-      const { messageId } = await this.client.sendMessage({
-        channelId,
-        content: chunk,
-        replyToId: i === 0 ? replyToMessageId : undefined,
-      })
-      ids.push(messageId)
+      ids.push(await this.sendChunk(channelId, chunks[i]!.text, i === 0 ? replyToMessageId : undefined))
     }
     return ids
+  }
+
+  async sendSegmentChunks(
+    channelId: string,
+    content: string,
+    replyToMessageId: string | undefined,
+    startCarry: MarkdownCarry,
+  ): Promise<{ chunks: SentMessageChunk[]; endCarry: MarkdownCarry }> {
+    const { chunks, endCarry } = splitPreservingMarkdown(
+      normalizeOutgoingMentions(content),
+      MESSAGE_CHUNK_CHARS,
+      startCarry,
+    )
+    const sent: SentMessageChunk[] = []
+    for (let i = 0; i < chunks.length; i++) {
+      const piece = chunks[i]!
+      const id = await this.sendChunk(channelId, piece.text, i === 0 ? replyToMessageId : undefined)
+      sent.push({ id, bridgeOpen: piece.bridgeOpen, bridgeClose: piece.bridgeClose })
+    }
+    return { chunks: sent, endCarry }
+  }
+
+  /** Send one pre-sized chunk. The relay resolves a thread id passed as channelId
+   *  into parent and thread. Only a response's first chunk replies to the trigger,
+   *  as on DiscordConnector, so replies don't pile up on the original message. */
+  private async sendChunk(channelId: string, content: string, replyToId?: string): Promise<string> {
+    const { messageId } = await this.client.sendMessage({ channelId, content, replyToId })
+    return messageId
   }
 
   async sendMessageWithAttachment(

@@ -50,6 +50,11 @@ export interface Completion {
 export interface MessageContext {
   prefix: string
   suffix?: string
+  // Synthetic markdown delimiters added when a response was split mid-construct:
+  // bridgeOpen prepended (reopener), bridgeClose appended (closer). Stripped
+  // during context reconstruction. See src/utils/discord-markdown.ts.
+  bridgeOpen?: string
+  bridgeClose?: string
 }
 
 export interface Activation {

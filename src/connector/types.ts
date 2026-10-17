@@ -11,6 +11,7 @@
  * importing discord.js. connector.ts re-exports them for back-compat.
  */
 import type { DiscordContext } from '../types.js'
+import type { MarkdownCarry } from '../utils/discord-markdown.js'
 
 export interface ConnectorOptions {
   token: string
@@ -39,6 +40,14 @@ export interface PinnedSteer {
   authorId: string
   mentionedPersonaIds?: string[]
   mentionedRoleIds?: string[]
+}
+
+/** A sent message plus the synthetic markdown bridge strings injected into it
+ *  (so the caller can record them for later context stripping). */
+export interface SentMessageChunk {
+  id: string
+  bridgeOpen?: string
+  bridgeClose?: string
 }
 
 export interface FetchContextParams {
@@ -128,6 +137,19 @@ export interface IConnector {
 
   // ── Send ──
   sendMessage(channelId: string, content: string, replyToMessageId?: string): Promise<string[]>
+  /**
+   * Send one response segment as one or more messages, split markdown-aware so a
+   * construct open at a chunk boundary is closed in one message and reopened in
+   * the next. `startCarry` continues a construct inherited from a previous send;
+   * the result gives each sent message with its bridge strings, and the carry
+   * after the last one. Used by AgentLoop.sendSegments.
+   */
+  sendSegmentChunks(
+    channelId: string,
+    content: string,
+    replyToMessageId: string | undefined,
+    startCarry: MarkdownCarry,
+  ): Promise<{ chunks: SentMessageChunk[]; endCarry: MarkdownCarry }>
   sendMessageWithAttachment(
     channelId: string,
     content: string,

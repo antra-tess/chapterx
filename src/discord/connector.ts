@@ -19,14 +19,15 @@ import {
 } from '../types.js'
 import { logger } from '../utils/logger.js'
 import { retryDiscord } from '../utils/retry.js'
+import { splitPreservingMarkdown, type MarkdownCarry } from '../utils/discord-markdown.js'
 import {
   fetchChannelMessages,
   type FetchDeps,
 } from './context-fetch.js'
-import type { IConnector, ConnectorOptions, TrackedPin, FetchContextParams, PinnedSteer } from '../connector/types.js'
+import type { IConnector, ConnectorOptions, TrackedPin, FetchContextParams, PinnedSteer, SentMessageChunk } from '../connector/types.js'
 
 // Re-exported from connector/types.ts for back-compat with existing imports.
-export type { ConnectorOptions, TrackedPin, FetchContextParams, PinnedSteer }
+export type { ConnectorOptions, TrackedPin, FetchContextParams, PinnedSteer, SentMessageChunk }
 
 /** Extract mentioned role ids from a discord.js-ish message `mentions` object. */
 function extractMentionedRoleIds(
@@ -48,7 +49,13 @@ function snowflakeToTimestamp(id: string): number {
 
 export class DiscordConnector implements IConnector {
   private client: Client
+  // The typing timers, one per channel. Invariant, and the whole argument
+  // against the start/stop races: a typing timer exists if and only if it is
+  // in this map. Both startTyping and stopTyping mutate it SYNCHRONOUSLY, so
+  // there is no window in which a stop can be missed or a start can register
+  // behind one. `closed` refuses any start once close() has begun.
   private typingIntervals = new Map<string, NodeJS.Timeout>()
+  private closed = false
   private imageCache = new Map<string, CachedImage>()
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
   private urlMapPath: string  // Path to URL map file
@@ -1082,37 +1089,87 @@ export class DiscordConnector implements IConnector {
       // Split message if too long
       const chunks = this.splitMessage(resolvedContent, 1800)
       const messageIds: string[] = []
-
       for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i]!
-        const options: any = {}
-        
-        // First chunk replies to the triggering message
-        if (i === 0 && replyToMessageId) {
-          try {
-            options.reply = { messageReference: replyToMessageId }
-            options.allowedMentions = { repliedUser: false }
-            const sent = await channel.send({ content: chunk, ...options })
-            messageIds.push(sent.id)
-          } catch (error: any) {
-            // If reply fails (message deleted), send without reply
-            if (error.code === 10008 || error.message?.includes('Unknown message')) {
-              logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
-              const sent = await channel.send({ content: chunk })
-              messageIds.push(sent.id)
-            } else {
-              throw error
-            }
-          }
-        } else {
-          const sent = await channel.send({ content: chunk, ...options })
-          messageIds.push(sent.id)
-        }
+        messageIds.push(await this.sendChunk(channel, chunks[i]!, i === 0 ? replyToMessageId : undefined))
       }
 
       logger.debug({ channelId, chunks: chunks.length, messageIds, replyTo: replyToMessageId }, 'Sent message')
       return messageIds
     }, this.options.maxBackoffMs)
+  }
+
+  /**
+   * Send a response segment as one or more Discord messages, splitting it
+   * markdown-aware AFTER mention/emoji resolution — so resolution can never push
+   * a chunk past the limit and trigger an unrecorded re-split. Returns one
+   * record per sent message (with the synthetic bridge strings injected into it)
+   * plus the open-construct carry after the last message. `startCarry` continues
+   * a construct inherited from a previous send. Used by AgentLoop.sendSegments.
+   */
+  async sendSegmentChunks(
+    channelId: string,
+    content: string,
+    replyToMessageId: string | undefined,
+    startCarry: MarkdownCarry,
+  ): Promise<{ chunks: SentMessageChunk[]; endCarry: MarkdownCarry }> {
+    const { channel, chunks, endCarry } = await retryDiscord(async () => {
+      const channel = await this.client.channels.fetch(channelId) as TextChannel
+
+      if (!channel || !channel.isTextBased()) {
+        throw new DiscordError(`Channel ${channelId} not found`)
+      }
+
+      let resolvedContent = await this.resolveMentions(content, channelId)
+      if (channel.guild) {
+        resolvedContent = this.resolveEmojis(resolvedContent, channel.guild)
+      }
+
+      const { chunks, endCarry } = splitPreservingMarkdown(resolvedContent, 1800, startCarry)
+      return { channel, chunks, endCarry }
+    }, this.options.maxBackoffMs)
+
+    const sent: SentMessageChunk[] = []
+    for (let i = 0; i < chunks.length; i++) {
+      const piece = chunks[i]!
+      const id = await retryDiscord(
+        () => this.sendChunk(channel, piece.text, i === 0 ? replyToMessageId : undefined),
+        this.options.maxBackoffMs,
+      )
+      sent.push({ id, bridgeOpen: piece.bridgeOpen, bridgeClose: piece.bridgeClose })
+    }
+
+    logger.debug({ channelId, chunks: sent.length, replyTo: replyToMessageId }, 'Sent markdown segment')
+    return { chunks: sent, endCarry }
+  }
+
+  /** Send a single pre-sized chunk, replying to a target if given (falling back
+   *  to a plain send if the target was deleted). Returns the sent message ID. */
+  private async sendChunk(channel: TextChannel, content: string, replyToMessageId?: string): Promise<string> {
+    // Splitting targets 1800 chars; a chunk over Discord's 2000 hard limit means
+    // the markdown splitter hit its pathological escape (closers alone exceed the
+    // budget). Surface it rather than let the send 400 silently.
+    if (content.length > 2000) {
+      logger.warn({ channelId: channel.id, length: content.length }, 'Chunk exceeds Discord message limit')
+    }
+    if (replyToMessageId) {
+      try {
+        const sent = await channel.send({
+          content,
+          reply: { messageReference: replyToMessageId },
+          allowedMentions: { repliedUser: false },
+        })
+        return sent.id
+      } catch (error: any) {
+        if (error.code === 10008 || error.message?.includes('Unknown message')) {
+          logger.warn({ replyToMessageId, channelId: channel.id }, 'Reply target deleted, sending without reply')
+          const sent = await channel.send({ content })
+          return sent.id
+        }
+        throw error
+      }
+    }
+    const sent = await channel.send({ content })
+    return sent.id
   }
 
   /**
@@ -1364,33 +1421,80 @@ export class DiscordConnector implements IConnector {
 
   /**
    * Start typing indicator (refreshes every 8 seconds)
+   *
+   * Discord's typing state expires after ~10s, so the indicator persists only
+   * because of the refresh interval below. An orphaned interval is therefore
+   * indistinguishable, to a user, from a request that never finishes: the bot
+   * types forever with nothing in flight.
+   *
+   * TWO RULES HOLD THIS TOGETHER. Callers are fire-and-forget (agent/loop.ts
+   * does `startTyping(...).catch(() => {})` without awaiting it), so if
+   * startTyping awaited anything before registering, an activation could
+   * reach stopTyping in between and find nothing to clear.
+   *
+   *   1. NEVER AWAIT BEFORE THE MAP WRITE. Registration must stay atomic with
+   *      respect to stopTyping; an await above it reopens a window in which a
+   *      stop clears an empty map and this interval registers behind it. The
+   *      method stays `async` only so `.catch()` callers keep working -- an
+   *      async function runs synchronously until its first await, and there
+   *      must be none before the registration.
+   *   2. COMPARE THE HANDLE, NOT A COUNTER. The Timeout is the identity token:
+   *      the runtime mints it and it cannot be re-derived, so "is this still
+   *      the channel's timer?" has no false positives. A counter that can be
+   *      reset could re-mint a value a pending start still holds.
+   *
+   * Invariant: a typing timer exists if and only if it is in typingIntervals.
    */
   async startTyping(channelId: string): Promise<void> {
-    const channel = await this.client.channels.fetch(channelId) as TextChannel
-
-    if (!channel || !channel.isTextBased()) {
+    // close() runs during shutdown, before the remaining shutdown steps and
+    // process.exit, and an activation that began before the agent loop stopped
+    // can still reach here then. Refuse it, so no typing timer outlives close()
+    // and keeps using the client it destroys.
+    if (this.closed) {
       return
     }
 
-    // Send initial typing
-    await channel.sendTyping()
+    // Replace, never shadow: an interval evicted from the map while still
+    // running can never be reached by stopTyping again.
+    this.clearTypingInterval(channelId)
 
-    // Set up interval to refresh
-    const interval = setInterval(async () => {
+    const tick = async (): Promise<void> => {
       try {
+        const channel = await this.client.channels.fetch(channelId) as TextChannel
+        if (!channel || !channel.isTextBased()) {
+          return
+        }
+        // Identity check, not a value check, after the await: a stop or a
+        // replacing start can land inside a network round-trip. This narrows
+        // that window rather than closing it -- sending is asynchronous and
+        // cannot be un-sent, and setInterval doesn't wait for a slow tick --
+        // so the residual is a stray indicator from each refresh already in
+        // flight, which Discord expires by itself in ~10s.
+        if (this.typingIntervals.get(channelId) !== interval) {
+          return
+        }
         await channel.sendTyping()
       } catch (error) {
         logger.warn({ error, channelId }, 'Failed to refresh typing')
       }
-    }, 8000)
+    }
 
+    const interval = setInterval(tick, 8000)
     this.typingIntervals.set(channelId, interval)
+    void tick()
   }
 
   /**
    * Stop typing indicator
+   *
+   * Synchronous with respect to the map, so it always wins: no pending start
+   * holds state that could let it register afterwards.
    */
   async stopTyping(channelId: string): Promise<void> {
+    this.clearTypingInterval(channelId)
+  }
+
+  private clearTypingInterval(channelId: string): void {
     const interval = this.typingIntervals.get(channelId)
     if (interval) {
       clearInterval(interval)
@@ -1673,6 +1777,11 @@ export class DiscordConnector implements IConnector {
     for (const interval of this.typingIntervals.values()) {
       clearInterval(interval)
     }
+    this.typingIntervals.clear()
+    // A tick still awaiting its channel fetch finds its handle absent and
+    // returns without sending (a send already in flight can't be un-sent),
+    // and the flag refuses any start after this.
+    this.closed = true
     // Clear cache maintenance intervals
     if (this.cacheStatsInterval) clearInterval(this.cacheStatsInterval)
     if (this.evictionInterval) clearInterval(this.evictionInterval)
@@ -2787,41 +2896,13 @@ export class DiscordConnector implements IConnector {
     }
   }
 
+  /**
+   * Split a message into Discord-sized chunks without breaking markdown.
+   * A per-message safety net: splitPreservingMarkdown closes any fence/inline
+   * code left open in the final chunk, so each chunk renders on its own.
+   * Cross-message continuity is the caller's job (AgentLoop.sendSegments).
+   */
   private splitMessage(content: string, maxLength: number): string[] {
-    if (content.length <= maxLength) {
-      return [content]
-    }
-
-    const chunks: string[] = []
-    let currentChunk = ''
-
-    const lines = content.split('\n')
-
-    for (const line of lines) {
-      if (currentChunk.length + line.length + 1 > maxLength) {
-        if (currentChunk) {
-          chunks.push(currentChunk)
-          currentChunk = ''
-        }
-
-        // If single line is too long, split it
-        if (line.length > maxLength) {
-          for (let i = 0; i < line.length; i += maxLength) {
-            chunks.push(line.substring(i, i + maxLength))
-          }
-        } else {
-          currentChunk = line
-        }
-      } else {
-        currentChunk += (currentChunk ? '\n' : '') + line
-      }
-    }
-
-    if (currentChunk) {
-      chunks.push(currentChunk)
-    }
-
-    return chunks
+    return splitPreservingMarkdown(content, maxLength).chunks.map((c) => c.text)
   }
 }
-
