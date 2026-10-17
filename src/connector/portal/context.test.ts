@@ -63,6 +63,7 @@ function depsOver(all: PortalMessage[], known: Record<string, string> = {}) {
     authorRoles: async () => null,
     channelMeta: () => ({ guildId: 'guild', isThread: false }),
     snowflakeOf: (id) => (/^\d+$/.test(id) ? id : known[id]),
+    seenSnowflakeOf: (id) => known[id],
     attachments: {} as ContextDeps['attachments'],
   }
   return { deps, fetchBatch, fetchSingle }
@@ -177,6 +178,7 @@ describe('buildPortalContext in a thread', () => {
       authorRoles: async () => null,
       channelMeta: (ch) => (ch === 'thr' ? { guildId: 'g', isThread: true, parentId: 'par', native: '50' } : { guildId: 'g', isThread: false }),
       snowflakeOf: (id) => ({ rm_par_10: '10' } as Record<string, string>)[id],
+      seenSnowflakeOf: (id) => ({ rm_par_10: '10' } as Record<string, string>)[id],
       attachments: {} as ContextDeps['attachments'],
     }
     const ctx = await buildPortalContext({ channelId: 'thr', depth: 6, firstMessageId: 'rm_par_10' }, deps)

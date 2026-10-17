@@ -41,7 +41,7 @@ function stripPortalRolePrefix(text: string): string {
 /** Full PortalMessage → DiscordMessage. Uses portal's resolved `cleanContent`;
  *  adds the `<reply:@name>` prefix for non-bot authors (matching convertMessage).
  *  A reply's target snowflake comes from the messages at hand, or else from
- *  `snowflakeOf`, the connector's memory. */
+ *  `snowflakeOf`, the connector's memory of the messages it has seen. */
 export function portalMessageToDiscordMessage(
   pm: PortalMessage,
   messageMap: Map<string, PortalMessage>,
@@ -84,9 +84,14 @@ export interface ContextDeps extends PortalFetchDeps {
   attachments: AttachmentCache
   /** Channel meta from the client cache. */
   channelMeta(channelId: string): { guildId: string; isThread: boolean; parentId?: string; native?: string } | null
-  /** A message id's Discord snowflake, or undefined when it isn't known: a relay
-   *  id is opaque, so the connector answers from the messages it has seen. */
+  /** The Discord snowflake of an id fetchContext was given: a relay id the
+   *  connector has seen, or an id it hasn't seen that is all digits, which the
+   *  API passes from Discord URLs. Undefined when neither says. */
   snowflakeOf(messageId: string): string | undefined
+  /** The Discord snowflake of a relay id, from the messages the connector has
+   *  seen, or undefined: the protocol calls the id opaque, so its form says
+   *  nothing. */
+  seenSnowflakeOf(relayId: string): string | undefined
 }
 
 const MAX_ANCHOR_GAP_MS = 24 * 60 * 60 * 1000
@@ -198,7 +203,7 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
   // ── Convert + filter ──
   const messageMap = new Map(messages.map((m) => [m.id, m]))
   const discordMessages = messages
-    .map((m) => portalMessageToDiscordMessage(m, messageMap, deps.snowflakeOf))
+    .map((m) => portalMessageToDiscordMessage(m, messageMap, deps.seenSnowflakeOf))
     .filter((m) => m.content || m.attachments.length > 0)
 
   // ── Stage 4: attachments (newest-first so the image cap keeps recent ones) ──

@@ -489,7 +489,9 @@ export interface DiscordMessage {
   }>
   authorRoles?: string[]  // Guild role names (populated from member.roles)
   mentions: string[]  // User IDs
-  referencedMessage?: string  // Reply to message ID
+  /** The id of the message this one replies to, in the same id space as `id`:
+   *  the relay's message id on the portal backend, a snowflake on Discord. */
+  referencedMessage?: string
   /** The Discord snowflake, when `id` isn't one: on the portal backend `id` is
    *  the relay's message id. Absent on the Discord backend. */
   nativeId?: string

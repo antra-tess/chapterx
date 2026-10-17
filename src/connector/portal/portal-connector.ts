@@ -68,15 +68,15 @@ function isTextBasedType(type?: string): boolean {
   return type === 'text' || type === 'thread'
 }
 
-/** How many messages `seen` remembers, across every channel. An entry is a few
- *  dozen bytes, and the reply-chain walk alone can add 500 in one check, so the
- *  cap is set high enough that a quiet channel's context anchor isn't pushed out
- *  by busy ones in ordinary use. */
+/** How many messages `seen` remembers, across every channel: at a few dozen
+ *  bytes an entry, a few megabytes. Events, fetched history and the reply-chain
+ *  walk (up to 500 messages a check) all add to it, and a message pushed out by
+ *  newer ones has no known author or snowflake. */
 const SEEN_CAP = 50_000
 /** How far back the reply-chain walk pages for a message it replies to, in pages
  *  of 100. The protocol has no fetch by id, so this bounds the RPCs one check
- *  can cost; a link older than this ends the walk, as a deleted message does on
- *  the Discord backend. */
+ *  can cost. A link older than this ends the walk, where the Discord backend
+ *  would fetch it by id and count on, so a longer chain is counted up to here. */
 const CHAIN_PAGES = 5
 const TYPING_REFRESH_MS = 8000
 /** The split target for one message, as DiscordConnector uses: under Discord's
@@ -227,12 +227,18 @@ export class PortalConnector implements IConnector {
     }
   }
 
-  /** A message id's Discord snowflake: a relay id is looked up in what this
-   *  process has seen, since its format isn't the protocol's to promise, and an
-   *  id it hasn't seen that is all digits is taken as a snowflake already (the
-   *  API passes them from Discord URLs). Undefined when neither says. */
+  /** A relay id's Discord snowflake, from the messages this process has seen:
+   *  the protocol calls the id opaque, so its form says nothing. */
+  private seenSnowflakeOf(id: string): string | undefined {
+    return this.seen.get(id)?.nativeId
+  }
+
+  /** The Discord snowflake of an id the loop or the API gave fetchContext: a
+   *  relay id this process has seen, or an id it hasn't seen that is all digits,
+   *  which the API passes from Discord URLs. Undefined when neither says. */
   private snowflakeOf(id: string): string | undefined {
-    return this.seen.get(id)?.nativeId ?? (/^\d+$/.test(id) ? id : undefined)
+    if (this.seen.has(id)) return this.seenSnowflakeOf(id)
+    return /^\d+$/.test(id) ? id : undefined
   }
 
   // ── Identity ──
@@ -449,6 +455,7 @@ export class PortalConnector implements IConnector {
         }
       },
       snowflakeOf: (id) => this.snowflakeOf(id),
+      seenSnowflakeOf: (id) => this.seenSnowflakeOf(id),
       fetchSingle: async (channelId, snowflake) => {
         try {
           return await this.fetchSingleBySnowflake(channelId, snowflake)

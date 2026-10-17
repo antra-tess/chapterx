@@ -450,11 +450,25 @@ describe('PortalConnector message bookkeeping', () => {
   it('looks an id up in what it has seen before taking an all-digit id as a snowflake', () => {
     h = makeHarness()
     ;(h.connector as any).remember('12345', { authorId: 'u', nativeId: '999' })
+    ;(h.connector as any).remember('55555', { authorId: 'persona-p' }) // a send of its own: no snowflake
     const snowflakeOf = (id: string) => (h.connector as any).snowflakeOf(id)
 
     expect(snowflakeOf('12345')).toBe('999') // an all-digit relay id it has seen
+    expect(snowflakeOf('55555')).toBeUndefined() // seen, with no snowflake known
     expect(snowflakeOf('777')).toBe('777') // an all-digit id it hasn't: a snowflake from a URL
     expect(snowflakeOf('rm_chan-1_1')).toBeUndefined()
+  })
+
+  it('gives a reply no target snowflake for a relay id it never saw, whatever the id\'s form', async () => {
+    h = makeHarness()
+    const reply = { ...msg(20, 'human'), replyToId: '987654321' } // an all-digit relay id
+    h.client.fetchHistory.mockImplementation(historyOf([msg(19, 'human'), reply]) as any)
+
+    const ctx = await h.connector.fetchContext({ channelId: CH, depth: 5 })
+    const out = ctx.messages.find((m) => m.id === `rm_${CH}_20`)!
+
+    expect(out.referencedMessage).toBe('987654321')
+    expect(out.referencedNativeId).toBeUndefined()
   })
 
   it('a deleted message is forgotten, so a context anchor it was isn\'t extended to', async () => {
