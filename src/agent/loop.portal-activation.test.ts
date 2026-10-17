@@ -21,6 +21,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import type { PortalEvent, PortalMessage } from '@animalabs/portal-protocol'
 import { AgentLoop } from './loop.js'
+import { logger } from '../utils/logger.js'
 import { EventQueue } from './event-queue.js'
 import { queueEventFromPortal, type AdapterCtx } from '../connector/portal/adapters.js'
 import { PortalConnector } from '../connector/portal/portal-connector.js'
@@ -133,13 +134,91 @@ describe('shouldActivate for portal events', () => {
   })
 })
 
-describe('somaBotKey', () => {
-  it('keys a portal persona by its EMS bot name and an account bot by its Discord user id', () => {
+describe('Soma\'s key for a portal bot', () => {
+  function somaLoop() {
+    const somaClient = {
+      checkAndDeduct: vi.fn(async () => ({ allowed: true, cost: 1, balanceAfter: 9, transactionId: 'tx' })),
+      trackMessage: vi.fn(async () => undefined),
+    }
     const loop = Object.create(AgentLoop.prototype)
-    Object.assign(loop, { botId: 'glm52', botUserId: '123456789012345678', connector: { isPortal: () => true } })
-    expect((loop as any).somaBotKey()).toBe('glm52')
+    Object.assign(loop, {
+      botId: 'glm52',
+      botUserId: PERSONA,
+      somaClient,
+      connector: { isPortal: () => true, fetchPinnedConfigs: async () => [] },
+      configSystem: { loadConfig: () => ({ soma: { enabled: true, url: 'http://soma.invalid' } }) },
+    })
+    return { loop: loop as any, somaClient }
+  }
+
+  it('keys a portal persona by its EMS bot name and an account bot by its Discord user id', () => {
+    const { loop } = somaLoop()
+    expect(loop.somaBotKey()).toBe('glm52')
     loop.connector = { isPortal: () => false }
-    expect((loop as any).somaBotKey()).toBe('123456789012345678')
+    loop.botUserId = '123456789012345678'
+    expect(loop.somaBotKey()).toBe('123456789012345678')
+  })
+
+  it('charges a portal trigger under the EMS bot name', async () => {
+    const { loop, somaClient } = somaLoop()
+    const ev = event(pm(), true, ['role_mention'])
+
+    expect(await loop.checkSomaCredits([ev], 'chan', 'guild', 'mention', 'rm_chan_200')).toEqual({ status: 'allowed', transactionId: 'tx' })
+    expect(somaClient.checkAndDeduct).toHaveBeenCalledWith(expect.objectContaining({ botId: 'glm52', userId: 'u1' }))
+  })
+
+  it('tracks the replies to a human\'s trigger under the same key it charges', async () => {
+    const { loop, somaClient } = somaLoop()
+    const trigger = { id: 'rm_chan_200', author: { id: 'u1', bot: false } }
+
+    await loop.trackSomaMessages(['rm_chan_201', 'rm_chan_202'], 'rm_chan_200', [trigger], 'chan', 'guild')
+
+    expect(somaClient.trackMessage).toHaveBeenCalledTimes(2)
+    expect(somaClient.trackMessage).toHaveBeenCalledWith(expect.objectContaining({ botId: 'glm52', triggerUserId: 'u1', messageId: 'rm_chan_201' }))
+  })
+
+  it('logs the key Soma was asked about when the bot isn\'t configured there', async () => {
+    const { loop, somaClient } = somaLoop()
+    somaClient.checkAndDeduct.mockResolvedValue({ allowed: false, reason: 'bot_not_configured' } as never)
+    loop.connector.addReaction = vi.fn(async () => undefined)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined as never)
+
+    await loop.checkSomaCredits([event(pm(), true, ['role_mention'])], 'chan', 'guild', 'mention', 'rm_chan_200')
+
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ botId: 'glm52' }), expect.stringContaining('bot not configured'))
+    warn.mockRestore()
+  })
+})
+
+describe('shouldActivate: the continuation emoji on the portal backend', () => {
+  function reactionLoop(continuation: string) {
+    const loop = Object.create(AgentLoop.prototype)
+    Object.assign(loop, {
+      botId: 'glm52',
+      botUserId: PERSONA,
+      botMessageIds: new Set<string>(),
+      connector: fakeConnector(0),
+      configSystem: { loadConfig: () => ({ max_bot_reply_chain_depth: 2, reply_on_random: 0, continuation_emoji: continuation }) },
+      sleepState: { sleepPinsForBot: () => [], isSleeping: () => false, observeMessage: () => undefined },
+    })
+    return (events: unknown[]) => (loop as any).shouldActivate(events, 'chan', 'guild') as Promise<boolean>
+  }
+  const onPersonaMessage: AdapterCtx = { ...ctx, authorOf: () => PERSONA }
+  const reaction = (emoji: string) =>
+    queueEventFromPortal(
+      {
+        type: 'reaction_add',
+        channelId: 'chan',
+        messageId: 'rm_chan_150',
+        reaction: { emoji, count: 1, kind: 'native', by: [{ kind: 'user', id: 'u1', name: 'alice' }] },
+      } as PortalEvent,
+      onPersonaMessage,
+    )!
+
+  it('matches a custom emoji configured by name or as portal\'s name:id', async () => {
+    expect(await reactionLoop('blobcat')([reaction('blobcat:112233445566778899')])).toBe(true)
+    expect(await reactionLoop('blobcat:112233445566778899')([reaction('blobcat:112233445566778899')])).toBe(true)
+    expect(await reactionLoop('blobdog')([reaction('blobcat:112233445566778899')])).toBe(false)
   })
 })
 

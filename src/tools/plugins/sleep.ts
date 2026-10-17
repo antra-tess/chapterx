@@ -8,6 +8,7 @@
 
 import type { ToolPlugin, PluginContext } from './types.js'
 import { logger } from '../../utils/logger.js'
+import { asSentence } from './error-text.js'
 
 /**
  * Parse a human-friendly duration string into seconds.
@@ -115,9 +116,8 @@ const sleepPlugin: ToolPlugin = {
         } catch (error) {
           logger.error({ error, messageId: sleepMsgId }, 'Failed to pin .sleep message')
           // Say why: on Discord that's usually the channel's 50-pin limit, and on
-          // the portal backend nothing can pin.
-          const reason = error instanceof Error ? error.message : String(error)
-          return `Error: .sleep message sent but could not pin it (${reason}). Sleep is NOT active.`
+          // the portal backend the bot can't pin at all.
+          return `Error: the .sleep message was sent, but pinning it failed, so sleep is NOT active. ${asSentence(error)} Calling go_to_sleep again would send another .sleep message.`
         }
 
         // React — purely cosmetic, don't fail the whole operation

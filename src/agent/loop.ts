@@ -35,6 +35,7 @@ import type { ChannelSteering } from '../steering/index.js'
 import { SleepState } from './sleep.js'
 import { pinAddressesBot } from './pin-target.js'
 import { finalStepThinkingBlocks, loadThinkingBlocks, persistThinkingBlocks, type ThinkingBlock } from './thinking-cache.js'
+import { emojiName } from '../utils/emoji.js'
 // Use any for Membrane type to avoid version mismatch issues between
 // our local interface and the actual membrane package
 type Membrane = any
@@ -897,7 +898,7 @@ export class AgentLoop {
     // (Soma can't handle this since the bot isn't registered)
     if (result.reason === 'bot_not_configured') {
       logger.warn({
-        botId: this.botUserId,
+        botId: this.somaBotKey(),
         serverId: guildId,
         triggerType: triggerReason,
       }, 'Soma: bot not configured, activation blocked')
@@ -984,6 +985,37 @@ export class AgentLoop {
   private findTriggeringMessageEvent(events: Event[]): (Event & { data: any }) | undefined {
     return events.find((event) => event.type === 'message' && !this.isSystemDiscordMessage(event.data))
       || events.find((event) => event.type === 'message')
+  }
+
+  /** Register the bot's sent messages with Soma for reaction rewards, when a
+   *  human's message triggered the activation. */
+  private async trackSomaMessages(
+    sentMessageIds: string[],
+    triggeringMessageId: string | undefined,
+    contextMessages: Array<{ id: string; author?: { id?: string; bot?: boolean } }>,
+    channelId: string,
+    guildId: string,
+  ): Promise<void> {
+    if (!this.somaClient || sentMessageIds.length === 0 || !triggeringMessageId) return
+    // Find the triggering user from the discord context
+    const triggeringMessage = contextMessages.find(m => m.id === triggeringMessageId)
+    const triggerUserId = triggeringMessage?.author?.id
+    if (!triggerUserId || triggeringMessage?.author?.bot) return
+
+    for (const messageId of sentMessageIds) {
+      try {
+        await this.somaClient.trackMessage({
+          messageId,
+          channelId,
+          serverId: guildId,
+          botId: this.somaBotKey(),
+          triggerUserId,
+          triggerMessageId: triggeringMessageId,
+        })
+      } catch (trackError) {
+        logger.warn({ trackError, messageId }, 'Failed to track message for Soma')
+      }
+    }
   }
 
   /** The bot's key in Soma, for charging and for tracking its messages alike.
@@ -1299,7 +1331,7 @@ export class AgentLoop {
 
         // Check if emoji matches configured continuation emoji and is on bot's own message
         if (config.continuation_emoji
-          && reaction.emoji === config.continuation_emoji
+          && reaction.emoji === emojiName(config.continuation_emoji)
           && reaction.messageAuthorId === this.botUserId) {
           logger.debug({ messageId: reaction.messageId, emoji: reaction.emoji, userId: reaction.userId },
             'Activated by continuation emoji on bot message')
@@ -2278,29 +2310,7 @@ export class AgentLoop {
       }
 
       // Track bot messages for Soma reaction rewards
-      // Only track if we have a triggering user and sent messages
-      if (this.somaClient && sentMessageIds.length > 0 && triggeringMessageId) {
-        // Find the triggering user from the discord context
-        const triggeringMessage = discordContext.messages.find(m => m.id === triggeringMessageId)
-        const triggerUserId = triggeringMessage?.author?.id
-        
-        if (triggerUserId && !triggeringMessage?.author?.bot) {
-          for (const messageId of sentMessageIds) {
-            try {
-              await this.somaClient.trackMessage({
-                messageId,
-                channelId,
-                serverId: guildId,
-                botId: this.somaBotKey(),
-                triggerUserId,
-                triggerMessageId: triggeringMessageId,
-              })
-            } catch (trackError) {
-              logger.warn({ trackError, messageId }, 'Failed to track message for Soma')
-            }
-          }
-        }
-      }
+      await this.trackSomaMessages(sentMessageIds, triggeringMessageId, discordContext.messages, channelId, guildId)
 
       logger.info({ channelId, tokens: completion.usage, didRoll: contextResult.didRoll }, 'Activation complete')
     } catch (error) {

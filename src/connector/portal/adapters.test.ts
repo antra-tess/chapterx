@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { PortalMessage, PortalEvent } from '@animalabs/portal-protocol'
-import { inboundFromPortal, queueEventFromPortal, authorOfMessage, containerOf, emojiName, type AdapterCtx } from './adapters.js'
+import { inboundFromPortal, queueEventFromPortal, authorOfMessage, containerOf, type AdapterCtx } from './adapters.js'
+import { emojiName } from '../../utils/emoji.js'
 
 const BOT = 'persona_bot'
 

@@ -9,6 +9,7 @@
 import type { PortalMessage, PortalEvent } from '@animalabs/portal-protocol'
 import type { Event } from '../../types.js'
 import type { InboundMessage } from '../types.js'
+import { emojiName } from '../../utils/emoji.js'
 
 /** Context the event adapter needs that isn't on the event itself. */
 export interface AdapterCtx {
@@ -22,14 +23,6 @@ export interface AdapterCtx {
 /** The immediate channel a message lives in (thread when threaded). */
 export function containerOf(pm: { channelId: string; threadId?: string }): string {
   return pm.threadId ?? pm.channelId
-}
-
-/** A reaction's emoji as the loop compares it: discord.js gives a custom emoji's
- *  bare name, and portal carries a custom emoji as `name:id` (a unicode emoji as
- *  itself), so keep the name and drop the id. */
-export function emojiName(emoji: string): string {
-  const custom = /^([^:]+):\d+$/.exec(emoji)
-  return custom ? custom[1]! : emoji
 }
 
 /** Resolve a PortalMessage author to a discord.js-ish `{id,username,bot}`. */

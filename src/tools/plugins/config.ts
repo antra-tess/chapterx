@@ -5,6 +5,7 @@
  */
 
 import { ToolPlugin } from './types.js'
+import { asSentence } from './error-text.js'
 
 const plugin: ToolPlugin = {
   name: 'config',
@@ -114,7 +115,12 @@ const plugin: ToolPlugin = {
           // Send and pin the config message
           const messageIds = await context.sendMessage(configMessage)
           if (messageIds.length > 0 && context.pinMessage) {
-            await context.pinMessage(messageIds[0]!)
+            try {
+              await context.pinMessage(messageIds[0]!)
+            } catch (err) {
+              // A .config takes effect only once it's pinned.
+              return `Error: the .config message was sent, but pinning it failed, so ${key} is unchanged. ${asSentence(err)} Calling set_config again would send another .config message.`
+            }
           }
           
           return `Config change pinned. ${key} will update on next message.`
