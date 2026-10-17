@@ -77,7 +77,7 @@ describe('buildPortalContext and message ids', () => {
     const ctx = await buildPortalContext({ channelId: 'chan', depth: 5, targetMessageId: '10' }, deps)
 
     expect(fetchSingle).toHaveBeenCalledWith('chan', '10')
-    expect(ctx.messages.map((m) => m.nativeId)).toEqual(['6', '7', '8', '9', '10'])
+    expect(ctx.messages.map((m) => m.id)).toEqual(['rm_chan_6', 'rm_chan_7', 'rm_chan_8', 'rm_chan_9', 'rm_chan_10'])
   })
 
   it('extends back to an anchor whose snowflake it knows, and trims to it', async () => {
@@ -88,13 +88,22 @@ describe('buildPortalContext and message ids', () => {
     expect(ctx.inheritanceInfo?.cacheAnchorTrimmed).toBe(true)
   })
 
+  it('leaves relay system notices out of the messages it extends back over', async () => {
+    const all = numbered(1, 30).map((m) => (m.nativeId === '18' ? { ...m, author: { kind: 'system' as const } } : m))
+    const { deps } = depsOver(all, { rm_chan_15: '15' })
+    const ctx = await buildPortalContext({ channelId: 'chan', depth: 10, firstMessageId: 'rm_chan_15' }, deps)
+
+    expect(ctx.messages[0]!.id).toBe('rm_chan_15')
+    expect(ctx.messages.map((m) => m.id)).not.toContain('rm_chan_18')
+  })
+
   it('leaves an anchor it can\'t date alone, rather than parse the relay id', async () => {
     // rm_chan_15 is outside the window and wasn't seen by this process.
     const { deps, fetchBatch } = depsOver(numbered(1, 30))
     const ctx = await buildPortalContext({ channelId: 'chan', depth: 10, firstMessageId: 'rm_chan_15' }, deps)
 
     expect(fetchBatch).toHaveBeenCalledTimes(1)
-    expect(ctx.messages[0]!.nativeId).toBe('21')
+    expect(ctx.messages[0]!.id).toBe('rm_chan_21')
     expect(ctx.inheritanceInfo?.cacheAnchorTrimmed).toBeUndefined()
   })
 

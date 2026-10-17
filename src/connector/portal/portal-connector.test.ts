@@ -421,8 +421,35 @@ describe('PortalConnector.fetchContext with a target message', () => {
 
     const ctx = await h.connector.fetchContext({ channelId: CH, depth: 5, targetMessageId: '10' })
 
-    expect(ctx.messages.map((m) => m.nativeId)).toEqual(['6', '7', '8', '9', '10'])
+    expect(ctx.messages.map((m) => m.id)).toEqual([6, 7, 8, 9, 10].map((n) => `rm_${CH}_${n}`))
     expect(h.client.fetchHistory).toHaveBeenCalledWith(expect.objectContaining({ before: '11', limit: 1 }))
+  })
+
+  it('a failed fetch of the target leaves it out instead of failing the context', async () => {
+    h = makeHarness()
+    const serve = historyOf(Array.from({ length: 20 }, (_, i) => msg(i + 1, 'human')))
+    h.client.fetchHistory.mockImplementation((async (p: { before?: string; limit: number }) => {
+      if (p.limit === 1) throw new Error('relay timeout')
+      return serve(p)
+    }) as any)
+
+    const ctx = await h.connector.fetchContext({ channelId: CH, depth: 5, targetMessageId: '10' })
+
+    expect(ctx.messages.map((m) => m.id)).toEqual([5, 6, 7, 8, 9].map((n) => `rm_${CH}_${n}`))
+  })
+
+  it('extends back to an anchor only by a snowflake it has seen, never by parsing the relay id', async () => {
+    h = makeHarness()
+    h.client.fetchHistory.mockImplementation(historyOf(Array.from({ length: 30 }, (_, i) => msg(i + 1, 'human'))) as any)
+
+    // A fresh connector hasn't seen message 15, so the anchor can't be dated.
+    const unseen = await h.connector.fetchContext({ channelId: CH, depth: 10, firstMessageId: `rm_${CH}_15` })
+    expect(unseen.messages[0]!.id).toBe(`rm_${CH}_21`)
+
+    // Once a fetch has seen it, the context extends back to it.
+    await h.connector.fetchContext({ channelId: CH, depth: 20 })
+    const seen = await h.connector.fetchContext({ channelId: CH, depth: 10, firstMessageId: `rm_${CH}_15` })
+    expect(seen.messages[0]!.id).toBe(`rm_${CH}_15`)
   })
 
   it('takes nothing for a target the channel no longer holds, rather than the message before it', async () => {
@@ -432,6 +459,6 @@ describe('PortalConnector.fetchContext with a target message', () => {
 
     const ctx = await h.connector.fetchContext({ channelId: CH, depth: 5, targetMessageId: '10' })
 
-    expect(ctx.messages.map((m) => m.nativeId)).toEqual(['5', '6', '7', '8', '9'])
+    expect(ctx.messages.map((m) => m.id)).toEqual([5, 6, 7, 8, 9].map((n) => `rm_${CH}_${n}`))
   })
 })
