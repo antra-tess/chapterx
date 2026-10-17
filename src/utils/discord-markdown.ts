@@ -541,8 +541,11 @@ export function scanMarkdown(text: string, start: MarkdownCarry = []): MarkdownC
  * chunk boundary and reopening it at the next. `startCarry` continues a
  * construct inherited from a previous message; `endCarry` reports the open
  * stack after the last chunk so callers can thread continuity across calls.
- * A cut at a newline is never taken where it would leave a chunk holding only
- * whitespace, a message with nothing in it to show.
+ * Where the text allows, every chunk holds some of its content, that is, text
+ * other than whitespace and a construct's opener or closer: a chunk with none,
+ * such as a paragraph break on its own or an empty code block, is a message
+ * with nothing in it to show. A run of whitespace and markup nearly as long as
+ * a chunk can still make one.
  */
 export function splitPreservingMarkdown(
   text: string,
@@ -560,6 +563,18 @@ export function splitPreservingMarkdown(
   // fence/inline-code span (open or closed), and inherited-carry constructs.
   // Unmatched emphasis is never recorded in `constructs`, so it is left literal.
   const bridgeable = constructs
+
+  // Content: a character that isn't whitespace or part of a construct's opener
+  // or closer, which show nothing on their own. `lastContentEnd` is just past
+  // the text's last content, 0 if it has none.
+  const markup = new Uint8Array(text.length)
+  for (const c of bridgeable) {
+    if (c.openStart >= 0) markup.fill(1, c.openStart, c.contentStart)
+    markup.fill(1, c.contentEnd, c.closeEnd)
+  }
+  const isContent = (i: number): boolean => markup[i] === 0 && !/\s/.test(text[i]!)
+  let lastContentEnd = text.length
+  while (lastContentEnd > 0 && !isContent(lastContentEnd - 1)) lastContentEnd--
 
   // stackAt(pos): constructs straddling pos (opener before, closer after),
   // ordered outermost-first.
@@ -655,6 +670,14 @@ export function splitPreservingMarkdown(
     // snapped cut are counted. `cut <= chunkStart + 1` escapes the pathological
     // case where the closers alone exceed maxLength.
     let end = Math.min(text.length, chunkStart + Math.max(1, maxLength - reopenLen))
+    let firstContent = chunkStart
+    while (firstContent < text.length && !isContent(firstContent)) firstContent++
+    // A window that takes the text's last content, but not the whitespace and
+    // closers after it, would leave those to a chunk of their own. Leave the
+    // last content to the next chunk instead, when this one holds some before it.
+    if (end < text.length && end >= lastContentEnd && firstContent < lastContentEnd - 1) {
+      end = lastContentEnd - 1
+    }
     let cut = -1
     let closeStack: OpenMark[] = []
     for (let guard = 0; guard < 64; guard++) {
@@ -665,15 +688,16 @@ export function splitPreservingMarkdown(
       } else {
         // Prefer the latest newline within (chunkStart, end] that does not land
         // inside a non-fence construct (which would fragment it and risk a seam
-        // merge) and leaves this chunk more than whitespace; keep it at this
-        // chunk's end so reconstruction is exact. A paragraph break that starts
-        // a window would otherwise be sent alone, as a blank message.
-        // Otherwise hard-split without bisecting a delimiter run.
+        // merge); keep it at this chunk's end so reconstruction is exact. A
+        // newline before any content would end a chunk with none, such as a
+        // paragraph break that starts the window, and so would every newline
+        // before it. Otherwise hard-split without bisecting a delimiter run.
         const body = text.slice(chunkStart, end)
         let nlCut = -1
         for (let nl = body.lastIndexOf('\n'); nl >= 0; nl = nl > 0 ? body.lastIndexOf('\n', nl - 1) : -1) {
           const candidate = chunkStart + nl + 1
-          if (!straddlesNonFence(candidate) && /\S/.test(body.slice(0, nl + 1))) {
+          if (candidate <= firstContent) break
+          if (!straddlesNonFence(candidate)) {
             nlCut = candidate
             break
           }
