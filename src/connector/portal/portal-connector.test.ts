@@ -389,3 +389,28 @@ describe('PortalConnector member roles, reactions and typing', () => {
     expect(debug).toHaveBeenCalledWith(expect.objectContaining({ channelId: CH }), 'portal: set_typing failed')
   })
 })
+
+describe('PortalConnector.fetchContext with a target message', () => {
+  let h: ReturnType<typeof makeHarness>
+  afterEach(() => h?.cleanup())
+
+  it('ends the context at a target given as a snowflake, fetching it as the one message before the next snowflake', async () => {
+    h = makeHarness()
+    h.client.fetchHistory.mockImplementation(historyOf(Array.from({ length: 20 }, (_, i) => msg(i + 1, 'human'))) as any)
+
+    const ctx = await h.connector.fetchContext({ channelId: CH, depth: 5, targetMessageId: '10' })
+
+    expect(ctx.messages.map((m) => m.nativeId)).toEqual(['6', '7', '8', '9', '10'])
+    expect(h.client.fetchHistory).toHaveBeenCalledWith(expect.objectContaining({ before: '11', limit: 1 }))
+  })
+
+  it('takes nothing for a target the channel no longer holds, rather than the message before it', async () => {
+    h = makeHarness()
+    const all = Array.from({ length: 20 }, (_, i) => msg(i + 1, 'human')).filter((m) => m.nativeId !== '10')
+    h.client.fetchHistory.mockImplementation(historyOf(all) as any)
+
+    const ctx = await h.connector.fetchContext({ channelId: CH, depth: 5, targetMessageId: '10' })
+
+    expect(ctx.messages.map((m) => m.nativeId)).toEqual(['5', '6', '7', '8', '9'])
+  })
+})
