@@ -183,9 +183,10 @@ export class PortalConnector implements IConnector {
 
   /** Queue an event once its channel's pins are current, since the loop decides
    *  whether to activate from them without waiting. When they aren't (after a
-   *  start or a fresh `ready`), the channel's events wait, in order, for one
-   *  list_pins. If it fails, they go on, read against whatever pins are cached,
-   *  and the channel's later events don't wait again. */
+   *  start or a fresh `ready`), or a load of them is in progress (after a
+   *  pins_update, say), the channel's events wait, in order, for that load. If
+   *  it fails, they go on, read against whatever pins are cached, and the
+   *  channel's later events don't wait for another. */
   private deliver(ev: Event): void {
     const channelId = ev.channelId
     const held = this.heldEvents.get(channelId)
@@ -193,7 +194,8 @@ export class PortalConnector implements IConnector {
       held.push(ev)
       return
     }
-    if (this.pinsCurrent.has(channelId) || this.pinsFailed.has(channelId)) {
+    const settled = this.pinsCurrent.has(channelId) || this.pinsFailed.has(channelId)
+    if (settled && !this.pinLoads.has(channelId)) {
       this.queue.push(ev)
       return
     }

@@ -371,6 +371,25 @@ describe('PortalConnector events wait for their channel\'s pins', () => {
     expect(h.client.call).toHaveBeenCalledTimes(2)
   })
 
+  it('an event after a pins_update waits for the pins it announced', async () => {
+    h = makeHarness()
+    const replies: Array<(v: unknown) => void> = []
+    h.client.call.mockImplementation((() => new Promise((res) => replies.push(res))) as never)
+    const queued = watchQueue()
+    await h.connector.start()
+    h.client.emit('event', message(5))
+    replies[0]!({ messages: [] })
+    await new Promise((r) => setTimeout(r, 0))
+
+    h.client.emit('event', { type: 'pins_update', channelId: CH }) // a .sleep was just pinned
+    h.client.emit('event', message(6))
+    expect(queued).toHaveLength(1)
+    replies[1]!({ messages: [pinned(40, '.sleep')] })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(queued[1]).toEqual({ id: `rm_${CH}_6`, sleeps: 1 })
+  })
+
   it('a fresh ready asks for nothing at once, and a channel\'s next event waits for its pins again', async () => {
     // A pins_update lost in the gap: the .sleep was unpinned while the session was down.
     h = makeHarness()
