@@ -20,8 +20,10 @@ export interface ChainLink {
  * from one bot count as one turn. So a human's message scores 0, and a bot's
  * reply to a bot's reply to a human scores 2.
  *
- * This is DiscordConnector.getBotReplyChainDepth's rule; the portal connector
- * walks by it too, so the limit means the same on both backends.
+ * This is DiscordConnector.getBotReplyChainDepth's rule, and the portal
+ * connector walks by it. Discord fetches any link by id; portal finds each link
+ * in the channel's history, back to a bound (its CHAIN_PAGES), so there a chain
+ * whose links reach further back is counted up to that bound.
  */
 export async function replyChainDepth(
   start: ChainLink,

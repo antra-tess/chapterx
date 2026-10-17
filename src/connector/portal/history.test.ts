@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { PortalMessage } from '@animalabs/portal-protocol'
-import { fetchPortalHistory, type PortalFetchDeps, type PortalChannelRef } from './history.js'
+import { fetchPortalHistory, newestFirst, type PortalFetchDeps, type PortalChannelRef } from './history.js'
 
 /** Build a PortalMessage with snowflake `nativeId` and relay id `rm_<chan>_<sf>`. */
 function msg(chan: string, sf: string, content = 'hi', over: Partial<PortalMessage> = {}): PortalMessage {
@@ -212,5 +212,14 @@ describe('fetchPortalHistory', () => {
     const r = await fetchPortalHistory('c', '300', undefined, 50, [], false, deps)
     // from 300 backward (inclusive): 100,200,300 — not 400
     expect(ids(r)).toEqual(['100', '200', '300'])
+  })
+})
+
+describe('newestFirst', () => {
+  it('orders snowflakes from before and after July 2022 by time, not as strings', () => {
+    const older = { nativeId: '999999999999999999' } // 18 digits
+    const newer = { nativeId: '1000000000000000001' } // 19 digits
+    expect(newestFirst([older, newer])).toEqual([newer, older])
+    expect(newestFirst([newer, older])).toEqual([newer, older])
   })
 })

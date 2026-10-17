@@ -156,6 +156,24 @@ describe('PortalConnector.getBotReplyChainDepth', () => {
     expect(h.client.fetchHistory).toHaveBeenCalledTimes(1)
   })
 
+  it('ends the walk when the channel\'s history runs out, without paging on', async () => {
+    h = makeHarness()
+    h.client.fetchHistory.mockImplementation(historyOf(Array.from({ length: 30 }, (_, i) => msg(i + 1, 'human'))) as any)
+
+    // The link is to a message the channel no longer has.
+    expect(await h.connector.getBotReplyChainDepth(CH, inbound(msg(40, 'bot-a', 35)))).toBe(1)
+    expect(h.client.fetchHistory).toHaveBeenCalledTimes(2) // a page, then an empty one
+  })
+
+  it('stops at a relay system notice, as the Discord walk stops at a message no bot wrote', async () => {
+    h = makeHarness()
+    const notice = { ...msg(2, 'human', 1), author: { kind: 'system' } }
+    const all = [msg(1, 'bot-a'), notice, msg(3, 'persona', 2)]
+    h.client.fetchHistory.mockImplementation(historyOf(all as any) as any)
+
+    expect(await h.connector.getBotReplyChainDepth(CH, inbound(msg(4, 'bot-a', 3)))).toBe(2)
+  })
+
   it('stops paging after five pages and ends the walk there', async () => {
     h = makeHarness()
     const filler = Array.from({ length: 600 }, (_, i) => msg(1000 + i, 'human'))

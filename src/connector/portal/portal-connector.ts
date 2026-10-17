@@ -526,9 +526,14 @@ export class PortalConnector implements IConnector {
         else before = oldest.nativeId
       }
       const m = seen.get(id)
-      if (!m) return null
+      if (!m) {
+        if (pages >= CHAIN_PAGES) logger.debug({ channelId, pages }, 'portal: reply-chain walk ended at its page bound')
+        return null
+      }
       const a = authorOfMessage(m)
-      return { authorId: a.id, bot: a.bot, replyTo: m.replyToId }
+      // A relay system notice is no bot's turn: the walk stops there, as the
+      // Discord walk stops at any message whose author isn't a bot.
+      return { authorId: a.id, bot: a.bot && m.author.kind !== 'system', replyTo: m.replyToId }
     }
     return replyChainDepth(
       { authorId: message.author?.id, bot: !!message.author?.bot, replyTo: message.reference?.messageId },

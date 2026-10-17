@@ -33,8 +33,11 @@ describe('replyChainDepth', () => {
     expect(await replyChainDepth(bot('a', 'm3'), lookup)).toBe(1)
   })
 
-  it('stops at a message that replies to nothing', async () => {
-    expect(await replyChainDepth(bot('a'), chain({}))).toBe(1)
+  it('stops at a message that replies to nothing, without a lookup', async () => {
+    const lookup = async (id: string): Promise<ChainLink | null> => {
+      throw new Error(`looked up ${id}`)
+    }
+    expect(await replyChainDepth(bot('a'), lookup)).toBe(1)
   })
 
   it('stops at a link it can\'t find', async () => {
