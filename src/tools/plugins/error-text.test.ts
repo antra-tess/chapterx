@@ -22,9 +22,15 @@ describe('asSentence', () => {
     expect(asSentence('relay down')).toBe('relay down.')
   })
 
-  it('says there was no reason rather than print an empty one or a non-Error value', () => {
+  it('takes a thrown number or an object\'s message as the reason', () => {
+    expect(asSentence(50013)).toBe('50013.')
+    expect(asSentence({ message: 'Missing Access', code: 50001 })).toBe('Missing Access.')
+  })
+
+  it('says there was no reason rather than print an empty one', () => {
     expect(asSentence(new Error(''))).toBe('No reason was given.')
     expect(asSentence(undefined)).toBe('No reason was given.')
+    expect(asSentence(null)).toBe('No reason was given.')
     expect(asSentence({ code: 50013 })).toBe('No reason was given.')
   })
 })

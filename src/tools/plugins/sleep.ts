@@ -102,10 +102,10 @@ const sleepPlugin: ToolPlugin = {
           messageIds = await context.sendMessage(message)
         } catch (error) {
           logger.error({ error }, 'Failed to send .sleep message')
-          return `Error: the .sleep message couldn't be sent, so sleep is NOT active. ${asSentence(error)}`
+          return `Error: sending the .sleep message failed, so sleep is NOT active, though the message may have been posted. ${asSentence(error)}`
         }
         if (!messageIds || messageIds.length === 0) {
-          return 'Error: Failed to send .sleep message (no message ID returned)'
+          return 'Error: sending the .sleep message returned no message id, so it couldn\'t be pinned and sleep is NOT active.'
         }
 
         const sleepMsgId = messageIds[0]!
@@ -117,7 +117,7 @@ const sleepPlugin: ToolPlugin = {
           logger.error({ error, messageId: sleepMsgId }, 'Failed to pin .sleep message')
           // Say why: on Discord that's usually the channel's 50-pin limit, and on
           // the portal backend the bot can't pin at all.
-          return `Error: the .sleep message was sent, but pinning it failed, so sleep is NOT active. ${asSentence(error)} Calling go_to_sleep again posts another .sleep message, whose pin fails the same way while that reason holds.`
+          return `Error: the .sleep message was sent, but pinning it failed, so sleep is NOT active. ${asSentence(error)} Calling go_to_sleep again posts another .sleep message, and its pin fails the same way until what stopped this one changes.`
         }
 
         // React — purely cosmetic, don't fail the whole operation

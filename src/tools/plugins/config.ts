@@ -114,14 +114,19 @@ const plugin: ToolPlugin = {
           
           // Send and pin the config message. A .config takes effect only once
           // it's pinned.
-          const messageIds = await context.sendMessage(configMessage)
+          let messageIds: string[]
+          try {
+            messageIds = await context.sendMessage(configMessage)
+          } catch (err) {
+            return `Error: sending the .config message failed, so ${key} is unchanged, though the message may have been posted. ${asSentence(err)}`
+          }
           if (messageIds.length === 0) {
             return `Error: sending the .config message returned no message id, so it couldn't be pinned and ${key} is unchanged.`
           }
           try {
             await context.pinMessage(messageIds[0]!)
           } catch (err) {
-            return `Error: the .config message was sent, but pinning it failed, so ${key} is unchanged. ${asSentence(err)} Calling set_config again posts another .config message, whose pin fails the same way while that reason holds.`
+            return `Error: the .config message was sent, but pinning it failed, so ${key} is unchanged. ${asSentence(err)} Calling set_config again posts another .config message, and its pin fails the same way until what stopped this one changes.`
           }
           
           return `Config change pinned. ${key} will update on next message.`

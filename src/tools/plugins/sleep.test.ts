@@ -44,7 +44,7 @@ describe('a tool whose pin fails', () => {
     const answer = await tool.handler({ duration: '30m' }, ctx)
 
     expect(answer).toBe(
-      `Error: the .sleep message was sent, but pinning it failed, so sleep is NOT active. ${PORTAL_REFUSAL}. Calling go_to_sleep again posts another .sleep message, whose pin fails the same way while that reason holds.`,
+      `Error: the .sleep message was sent, but pinning it failed, so sleep is NOT active. ${PORTAL_REFUSAL}. Calling go_to_sleep again posts another .sleep message, and its pin fails the same way until what stopped this one changes.`,
     )
     expect(ctx.addReaction).not.toHaveBeenCalled()
   })
@@ -55,18 +55,38 @@ describe('a tool whose pin fails', () => {
     const answer = await tool.handler({ key: 'temperature', value: '0.7' }, context())
 
     expect(answer).toBe(
-      `Error: the .config message was sent, but pinning it failed, so temperature is unchanged. ${PORTAL_REFUSAL}. Calling set_config again posts another .config message, whose pin fails the same way while that reason holds.`,
+      `Error: the .config message was sent, but pinning it failed, so temperature is unchanged. ${PORTAL_REFUSAL}. Calling set_config again posts another .config message, and its pin fails the same way until what stopped this one changes.`,
     )
   })
 })
 
 describe('a tool whose send fails', () => {
-  it('go_to_sleep says sleep is not active and why, with the reason read once', async () => {
+  it('go_to_sleep says sleep is not active, that the message may have been posted, and why, quoting the reason once', async () => {
     vi.spyOn(logger, 'error').mockImplementation(() => undefined as never)
-    const ctx = { ...context(), sendMessage: vi.fn(async () => { throw new Error('relay down') }) }
+    const ctx = { ...context(), sendMessage: vi.fn(async () => { throw new Error('RPC send_message timed out') }) }
     const tool = sleepPlugin.tools.find((t) => t.name === 'go_to_sleep')!
 
-    expect(await tool.handler({ duration: '30m' }, ctx)).toBe("Error: the .sleep message couldn't be sent, so sleep is NOT active. relay down.")
+    expect(await tool.handler({ duration: '30m' }, ctx)).toBe(
+      'Error: sending the .sleep message failed, so sleep is NOT active, though the message may have been posted. RPC send_message timed out.',
+    )
+  })
+
+  it('go_to_sleep says sleep is not active when the send returns no message id', async () => {
+    const ctx = { ...context(), sendMessage: vi.fn(async () => [] as string[]) }
+    const tool = sleepPlugin.tools.find((t) => t.name === 'go_to_sleep')!
+
+    expect(await tool.handler({ duration: '30m' }, ctx)).toBe(
+      "Error: sending the .sleep message returned no message id, so it couldn't be pinned and sleep is NOT active.",
+    )
+  })
+
+  it('set_config says the setting is unchanged and the message may have been posted when the send fails', async () => {
+    const ctx = { ...context(), sendMessage: vi.fn(async () => { throw new Error('RPC send_message timed out') }) }
+    const tool = configPlugin.tools.find((t) => t.name === 'set_config')!
+
+    expect(await tool.handler({ key: 'temperature', value: '0.7' }, ctx)).toBe(
+      'Error: sending the .config message failed, so temperature is unchanged, though the message may have been posted. RPC send_message timed out.',
+    )
   })
 
   it('set_config reports no change when the send returns no message id', async () => {

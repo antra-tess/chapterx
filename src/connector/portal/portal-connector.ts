@@ -68,10 +68,10 @@ function isTextBasedType(type?: string): boolean {
   return type === 'text' || type === 'thread'
 }
 
-/** How many messages `seen` remembers, across every channel: at a few dozen
- *  bytes an entry, a few megabytes. Events, fetched history and the reply-chain
- *  walk (up to 500 messages a check) all add to it, and a message pushed out by
- *  newer ones has no known author or snowflake. */
+/** How many messages `seen` remembers, across every channel: about 220 bytes an
+ *  entry on Node 24, so about 10 MB at the cap. Events, fetched history and the
+ *  reply-chain walk (up to 500 messages a check) all add to it, and a message
+ *  pushed out by newer ones has no known author or snowflake. */
 const SEEN_CAP = 50_000
 /** How far back the reply-chain walk pages for a message it replies to, in pages
  *  of 100. The protocol has no fetch by id, so this bounds the RPCs one check

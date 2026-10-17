@@ -41,11 +41,11 @@ function stripPortalRolePrefix(text: string): string {
 /** Full PortalMessage → DiscordMessage. Uses portal's resolved `cleanContent`;
  *  adds the `<reply:@name>` prefix for non-bot authors (matching convertMessage).
  *  A reply's target snowflake comes from the messages at hand, or else from
- *  `snowflakeOf`, the connector's memory of the messages it has seen. */
+ *  `seenSnowflakeOf`, the connector's memory of the messages it has seen. */
 export function portalMessageToDiscordMessage(
   pm: PortalMessage,
   messageMap: Map<string, PortalMessage>,
-  snowflakeOf?: (messageId: string) => string | undefined,
+  seenSnowflakeOf?: (relayId: string) => string | undefined,
 ): DiscordMessage {
   const a = authorOfMessage(pm)
   let content = stripPortalRolePrefix(pm.cleanContent || pm.content)
@@ -75,7 +75,7 @@ export function portalMessageToDiscordMessage(
     mentions: pm.mentions.users,
     referencedMessage: pm.replyToId,
     referencedNativeId: pm.replyToId
-      ? (messageMap.get(pm.replyToId)?.nativeId ?? snowflakeOf?.(pm.replyToId))
+      ? (messageMap.get(pm.replyToId)?.nativeId ?? seenSnowflakeOf?.(pm.replyToId))
       : undefined,
   }
 }
