@@ -9,7 +9,9 @@ import { ChannelStateManager } from './state-manager.js'
 import { DiscordConnector, type PinnedSteer } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
+import { collectCoveredToolMessageIds } from '../context/stages/tool-interleave.js'
 import { ToolSystem } from '../tools/system.js'
+import { toolOutputText } from '../tools/output-text.js'
 import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult, VendorConfig } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { sleep } from '../utils/retry.js'
@@ -66,6 +68,23 @@ const REFUSAL_DEFAULT_EMOJI = '🛑'
 function refusalCategory(completion: { raw?: unknown }): string | undefined {
   const raw = completion.raw as { stop_details?: { category?: string | null } } | null | undefined
   return raw?.stop_details?.category ?? undefined
+}
+
+/**
+ * Where `completion` continues past `posted`, matching the two while skipping
+ * whitespace in both: the index just after the character that matches
+ * posted's last non-whitespace one, so whitespace that follows it stays with
+ * what comes next. Undefined when `completion` doesn't start with `posted`.
+ */
+function endOfPostedPrefix(completion: string, posted: string): number | undefined {
+  let at = 0
+  for (const char of posted) {
+    if (/\s/.test(char)) continue
+    while (at < completion.length && /\s/.test(completion[at]!)) at++
+    if (!completion.startsWith(char, at)) return undefined
+    at += char.length
+  }
+  return at
 }
 
 /**
@@ -1515,6 +1534,31 @@ export class AgentLoop {
     return undefined
   }
 
+  /**
+   * The Discord history the next context reads: without the messages that
+   * cached tool exchanges reconstruct, which it shows through those exchanges
+   * instead. With preserve_thinking_context on, the activation store supplies
+   * full completions and needs the original messages, so none are removed.
+   */
+  private messagesNotCoveredByToolCache(
+    messages: DiscordMessage[],
+    toolCache: Array<{ call: ToolCall; result: any }>,
+    config: BotConfig
+  ): DiscordMessage[] {
+    if (config.preserve_thinking_context) {
+      logger.debug('Skipping tool cache message filter (preserve_thinking_context enabled)')
+      return messages
+    }
+    const covered = collectCoveredToolMessageIds(toolCache, messages)
+    if (covered.size === 0) return messages
+    const remaining = messages.filter((message) => !covered.has(message.id))
+    logger.debug({
+      filtered: messages.length - remaining.length,
+      remaining: remaining.length,
+    }, 'Filtered Discord messages covered by tool cache')
+    return remaining
+  }
+
   private async handleActivation(
     channelId: string,
     guildId: string,
@@ -1879,32 +1923,12 @@ export class AgentLoop {
         }, 'Updated visible images with cached MCP results')
       }
       
-      // 4c. Filter out Discord messages that are in tool cache's botMessageIds
-      // ONLY when preserve_thinking_context is DISABLED
-      // When enabled, the activation store handles full completions and needs the original messages
-      if (!config.preserve_thinking_context) {
-        const toolCacheBotMessageIds = new Set<string>()
-        for (const entry of toolCacheForContext) {
-          if (entry.call.botMessageIds) {
-            entry.call.botMessageIds.forEach(id => toolCacheBotMessageIds.add(id))
-          }
-        }
-        
-        if (toolCacheBotMessageIds.size > 0) {
-          const beforeFilter = discordContext.messages.length
-          discordContext.messages = discordContext.messages.filter(msg => 
-            !toolCacheBotMessageIds.has(msg.id)
-          )
-          if (discordContext.messages.length < beforeFilter) {
-            logger.debug({ 
-              filtered: beforeFilter - discordContext.messages.length,
-              remaining: discordContext.messages.length
-            }, 'Filtered Discord messages covered by tool cache')
-          }
-        }
-      } else {
-        logger.debug('Skipping tool cache message filter (preserve_thinking_context enabled)')
-      }
+      // 4c. Filter only Discord messages whose text the tool cache reconstructs
+      discordContext.messages = this.messagesNotCoveredByToolCache(
+        discordContext.messages,
+        toolCacheForContext,
+        config
+      )
 
       // 4d. Load activations for preserve_thinking_context
       let activationsForContext: Activation[] | undefined
@@ -2064,7 +2088,6 @@ export class AgentLoop {
       let executionResult: {
         completion: any;
         toolCallIds: string[];
-        preambleMessageIds: string[];
         fullCompletionText?: string;
         sentMessageIds: string[];
         messageContexts: Record<string, MessageContext>;
@@ -2094,7 +2117,6 @@ export class AgentLoop {
       const {
         completion,
         toolCallIds,
-        preambleMessageIds,
         fullCompletionText,
         sentMessageIds: inlineSentMessageIds,
         messageContexts: inlineMessageContexts
@@ -2198,7 +2220,8 @@ export class AgentLoop {
         }
 
         // Combine text message IDs (already sent by inline execution) with image IDs
-        const allMessageIds = [...(inlineSentMessageIds ?? []), ...imageSentIds]
+        const textMessageIds = inlineSentMessageIds ?? []
+        const allMessageIds = [...new Set([...textMessageIds, ...imageSentIds])]
         const responseText = completion.content
           .filter((c: any) => c.type === 'text')
           .map((c: any) => c.text)
@@ -2221,6 +2244,22 @@ export class AgentLoop {
             }
           }
           await this.activationStore.completeActivation(activation.id)
+        }
+
+        // This branch returns before normal response finalization below, so it
+        // must also attach liveness and reconstruction metadata to tool entries.
+        // Native tool calls carry their round's coverage from persistence.
+        const coveredMessageIds = toolMode === 'native'
+          ? []
+          : [...new Set(textMessageIds)]
+        if (toolCallIds.length > 0 && allMessageIds.length > 0) {
+          await this.toolSystem.updateBotMessageIds(
+            this.botId,
+            channelId,
+            toolCallIds,
+            allMessageIds,
+            coveredMessageIds
+          )
         }
 
         // Update state and trace for image response
@@ -2311,11 +2350,22 @@ export class AgentLoop {
         await this.activationStore.completeActivation(activation.id)
       }
       
-      // Update tool cache entries with bot message IDs (for existence checking on reload)
-      // Include both preamble message IDs and final response message IDs
-      const allBotMessageIds = [...preambleMessageIds, ...sentMessageIds]
+      // Every emitted message is a liveness anchor. Coverage, the messages a
+      // cached completion reconstructs, is set here only for entries without
+      // their own: a native tool call carries its round's from persistence, and
+      // an inline call's completion is the whole output, covering every message.
+      const allBotMessageIds = [...new Set(sentMessageIds)]
+      const coveredMessageIds = toolMode === 'native'
+        ? []
+        : allBotMessageIds
       if (toolCallIds.length > 0 && allBotMessageIds.length > 0) {
-        await this.toolSystem.updateBotMessageIds(this.botId, channelId, toolCallIds, allBotMessageIds)
+        await this.toolSystem.updateBotMessageIds(
+          this.botId,
+          channelId,
+          toolCallIds,
+          allBotMessageIds,
+          coveredMessageIds
+        )
       }
 
       // 9. Update state
@@ -2599,7 +2649,6 @@ export class AgentLoop {
   ): Promise<{
     completion: any;
     toolCallIds: string[];
-    preambleMessageIds: string[];
     fullCompletionText?: string;
     sentMessageIds: string[];
     messageContexts: Record<string, MessageContext>;
@@ -2609,6 +2658,18 @@ export class AgentLoop {
     const messageContexts: Record<string, MessageContext> = {}
     const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
     let accumulatedPreToolText = ''
+    // The visible prose onPreToolContent posted in the current round, and the
+    // messages that carried it. Each of the round's tool calls caches exactly
+    // this text and covers exactly these messages, so the next context shows
+    // what Discord showed: not the round's thinking, which membrane's preamble
+    // includes, nor <thinking> or tool markup the model wrote in its text, nor
+    // anything from a round withheld at a participant name.
+    let roundPostedText = ''
+    let roundPostedMessageIds: string[] = []
+    // Membrane's final native response includes all text from every tool round,
+    // including prose already delivered through onPreToolContent. Keep the raw
+    // flushed prefix so the final Discord send can advance past it exactly once.
+    let flushedPreToolText = ''
     // Open markdown construct carried across this activation's messages
     // (pre-tool flushes + final send).
     let markdownCarry: MarkdownCarry = []
@@ -2700,10 +2761,16 @@ export class AgentLoop {
             )
             markdownCarry = sendResult.endCarry
             allSentMessageIds.push(...sendResult.sentMessageIds)
+            roundPostedMessageIds.push(...sendResult.sentMessageIds)
             for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
               messageContexts[msgId] = ctx
             }
             // Reset so we don't re-send
+            flushedPreToolText += accumulatedPreToolText
+            // Each visible piece went out as its own message, and the history
+            // joins consecutive bot messages with a space, so the cache does too.
+            const postedVisibleText = segments.map(s => s.visible).join(' ')
+            roundPostedText = roundPostedText ? `${roundPostedText} ${postedVisibleText}` : postedVisibleText
             accumulatedPreToolText = ''
           }
         },
@@ -2727,7 +2794,8 @@ export class AgentLoop {
               input: call.input as Record<string, any>,
               messageId: triggeringMessageId,
               timestamp: new Date(),
-              originalCompletionText: context.accumulated || '',
+              originalCompletionText: roundPostedText,
+              coveredMessageIds: [...roundPostedMessageIds],
             }
 
             const toolResult = await this.toolSystem.executeTool(cxCall)
@@ -2736,9 +2804,7 @@ export class AgentLoop {
             allToolCallIds.push(call.id)
 
             // Format output
-            const outputStr = typeof toolResult.output === 'string'
-              ? toolResult.output
-              : JSON.stringify(toolResult.output)
+            const outputStr = toolOutputText(toolResult.output)
 
             let content: string
             let isError = false
@@ -2772,7 +2838,7 @@ export class AgentLoop {
             // Send tool output to Discord if visible
             if (config.tool_output_visible) {
               const inputStr = JSON.stringify(call.input)
-              const rawOutput = typeof toolResult.output === 'string' ? toolResult.output : JSON.stringify(toolResult.output)
+              const rawOutput = toolOutputText(toolResult.output)
               const flatOutput = rawOutput.replace(/\n/g, ' ').replace(/\s+/g, ' ')
               const maxLen = 200
               const trimmedOutput = flatOutput.length > maxLen
@@ -2814,6 +2880,9 @@ export class AgentLoop {
             })
           }
 
+          // The next round starts with nothing posted.
+          roundPostedText = ''
+          roundPostedMessageIds = []
           return results
         },
       })
@@ -2829,6 +2898,25 @@ export class AgentLoop {
         .map((c: any) => c.text)
         .join('')
 
+      // onPreToolContent is a preview callback, not a destructive read: the
+      // text it posted is at the front of the final aggregate response too.
+      // Membrane doesn't pass it a round whose text is blank but keeps that
+      // text in the response, so the match skips whitespace. Only what follows
+      // the posted text is sent. If the response doesn't start with it, all of
+      // it is sent, with a warning; an empty response has nothing to send.
+      let remainingCompletionText = completionText
+      if (flushedPreToolText) {
+        const postedEnd = endOfPostedPrefix(completionText, flushedPreToolText)
+        if (postedEnd !== undefined) {
+          remainingCompletionText = completionText.slice(postedEnd)
+        } else if (completionText) {
+          logger.warn({
+            completionLength: completionText.length,
+            flushedLength: flushedPreToolText.length,
+          }, 'Native tool response did not start with the prose already posted; sending all of it')
+        }
+      }
+
       // Capture generated image blocks (from image generation models like Gemini)
       const generatedImageBlocks: ContentBlock[] = (result?.content || [])
         .filter((c: any) => c.type === 'image')
@@ -2842,6 +2930,9 @@ export class AgentLoop {
       // Strip thinking blocks and tool XML
       const { stripped, content: textThinkingContent } = this.stripThinkingBlocks(
         this.toolSystem.stripToolXml(completionText)
+      )
+      const { stripped: remainingStripped } = this.stripThinkingBlocks(
+        this.toolSystem.stripToolXml(remainingCompletionText)
       )
 
       // Thinking for debug display: structured blocks (native thinking) plus
@@ -2877,6 +2968,7 @@ export class AgentLoop {
 
       // Truncate at participant names
       let displayText = stripped
+      let remainingDisplayText = remainingStripped
       if (discordMessages) {
         const truncResult = this.truncateAtParticipant(
           displayText,
@@ -2889,16 +2981,28 @@ export class AgentLoop {
           logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated native output at participant')
           displayText = truncResult.text
         }
+
+        const remainingTruncResult = this.truncateAtParticipant(
+          remainingDisplayText,
+          discordMessages,
+          this.connector.getBotUsername() || config.name,
+          llmRequest.stop_sequences,
+          config
+        )
+        if (remainingTruncResult.truncatedAt) {
+          remainingDisplayText = remainingTruncResult.text
+        }
       }
 
       // Replace mentions
       if (discordMessages) {
         displayText = await this.replaceMentions(displayText, discordMessages)
+        remainingDisplayText = await this.replaceMentions(remainingDisplayText, discordMessages)
       }
 
       // Send remaining text to Discord (text not already sent via onPreToolContent)
-      if (displayText.trim()) {
-        const segments = this.parseIntoSegments(displayText)
+      if (remainingDisplayText.trim()) {
+        const segments = this.parseIntoSegments(remainingDisplayText)
         if (segments.length > 0) {
           const sendResult = await this.sendSegments(
             channelId,
@@ -2953,7 +3057,6 @@ export class AgentLoop {
           raw: result?.raw ?? null,
         },
         toolCallIds: allToolCallIds,
-        preambleMessageIds: [],
         fullCompletionText: completionText,
         sentMessageIds: allSentMessageIds,
         messageContexts,
@@ -2985,7 +3088,6 @@ export class AgentLoop {
             model: 'interrupted',
           },
           toolCallIds: allToolCallIds,
-          preambleMessageIds: [],
           fullCompletionText: ttsCtx.interruptedText,
           sentMessageIds: allSentMessageIds,
           messageContexts,
@@ -3032,7 +3134,6 @@ export class AgentLoop {
   ): Promise<{ 
     completion: any; 
     toolCallIds: string[]; 
-    preambleMessageIds: string[]; 
     fullCompletionText?: string;
     sentMessageIds: string[];
     messageContexts: Record<string, MessageContext>;
@@ -3043,7 +3144,6 @@ export class AgentLoop {
     // (per-iteration pre-tool flushes + the final send).
     let markdownCarry: MarkdownCarry = []
     const allToolCallIds: string[] = []
-    const allPreambleMessageIds: string[] = []
     const allSentMessageIds: string[] = []
     const messageContexts: Record<string, MessageContext> = {}
     const maxToolDepth = config.max_tool_depth
@@ -3204,7 +3304,6 @@ export class AgentLoop {
             accumulatedOutput,
             pendingToolPersistence,
             allToolCallIds,
-            allPreambleMessageIds,
             allSentMessageIds,
             messageContexts,
             lastContextEndPos,
@@ -3241,7 +3340,6 @@ export class AgentLoop {
           accumulatedOutput,
           pendingToolPersistence,
           allToolCallIds,
-          allPreambleMessageIds,
           allSentMessageIds,
           messageContexts,
           lastContextEndPos,
@@ -3285,7 +3383,6 @@ export class AgentLoop {
             accumulatedOutput: '',  // Discard everything
             pendingToolPersistence,
             allToolCallIds,
-            allPreambleMessageIds,
             allSentMessageIds,
             messageContexts,
             lastContextEndPos,
@@ -3342,7 +3439,7 @@ export class AgentLoop {
         allToolCallIds.push(call.id)
         
         // Collect result for injection
-        const outputStr = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
+        const outputStr = toolOutputText(result.output)
         
         // Build result text - include note about images if present
         let resultText = ''
@@ -3415,7 +3512,7 @@ export class AgentLoop {
         // Send tool output to Discord if visible
         if (config.tool_output_visible) {
           const inputStr = JSON.stringify(call.input)
-          const rawOutput = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
+          const rawOutput = toolOutputText(result.output)
           const flatOutput = rawOutput.replace(/\n/g, ' ').replace(/\s+/g, ' ')
           const maxLen = 200
           const trimmedOutput = flatOutput.length > maxLen 
@@ -3479,7 +3576,6 @@ export class AgentLoop {
       accumulatedOutput,
       pendingToolPersistence,
       allToolCallIds,
-      allPreambleMessageIds,
       allSentMessageIds,
       messageContexts,
       lastContextEndPos,
@@ -3503,7 +3599,6 @@ export class AgentLoop {
     accumulatedOutput: string;
     pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }>;
     allToolCallIds: string[];
-    allPreambleMessageIds: string[];
     allSentMessageIds: string[];
     messageContexts: Record<string, MessageContext>;
     lastContextEndPos: number;
@@ -3520,7 +3615,6 @@ export class AgentLoop {
   }): Promise<{
     completion: any;
     toolCallIds: string[];
-    preambleMessageIds: string[];
     fullCompletionText: string;
     sentMessageIds: string[];
     messageContexts: Record<string, MessageContext>;
@@ -3528,7 +3622,7 @@ export class AgentLoop {
   }> {
     let { accumulatedOutput } = params
     const { 
-      pendingToolPersistence, allToolCallIds, allPreambleMessageIds,
+      pendingToolPersistence, allToolCallIds,
       allSentMessageIds, messageContexts, lastContextEndPos,
       channelId, triggeringMessageId, config, llmRequest, discordMessages,
       suffix, stopReason, generatedImageBlocks, markdownCarry
@@ -3679,7 +3773,6 @@ export class AgentLoop {
         raw: params.raw ?? null,
       },
       toolCallIds: allToolCallIds,
-      preambleMessageIds: allPreambleMessageIds,
       fullCompletionText,
       sentMessageIds: allSentMessageIds,
       messageContexts,
