@@ -3,15 +3,15 @@
  * Main entry point
  */
 
-import { readFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { parse as parseYaml } from 'yaml'
 import { EventQueue } from './agent/event-queue.js'
 import { AgentLoop } from './agent/loop.js'
 import { ChannelStateManager } from './agent/state-manager.js'
 import { DiscordConnector } from './discord/connector.js'
 import { PortalConnector } from './connector/portal/portal-connector.js'
 import type { IConnector } from './connector/types.js'
+import { resolveConnectorSettings, portalCredentials, startConnectorThenTimers } from './connector/bootstrap.js'
 import { ConfigSystem } from './config/system.js'
 import { ContextBuilder } from './context/builder.js'
 import { ToolSystem } from './tools/system.js'
@@ -60,30 +60,32 @@ async function main() {
     const toolsPath = process.env.TOOLS_PATH || './tools'
     const cachePath = process.env.CACHE_PATH || './cache'
 
-    // ── Connector bootstrap settings (config-driven, env overrides) ──
-    // Read straight from the bot's config.yaml so the whole portal setup lives in
-    // one place (EMS: <EMS_PATH>/<BOT_NAME>/config.yaml). Env vars still win for
-    // ad-hoc overrides. BOT_NAME is required for config-driven portal mode.
-    let botBootstrap: Record<string, any> = {}
-    if (botNameOverride) {
-      const botCfgPath = emsPath
-        ? join(emsPath, botNameOverride, 'config.yaml')
-        : join(configPath, 'bots', `${botNameOverride}.yaml`)
-      try {
-        botBootstrap = parseYaml(readFileSync(botCfgPath, 'utf-8')) || {}
-      } catch {
-        logger.warn({ botCfgPath }, 'Could not pre-read bot config for connector settings')
-      }
-    }
+    const configSystem = new ConfigSystem(configPath)
 
-    // Backend selection: 'portal' routes through the shared relay; default is the
-    // bot's own discord.js gateway.
-    const backend =
-      (process.env.CONNECTOR_BACKEND || botBootstrap.connector_backend) === 'portal' ? 'portal' : 'discord'
+    // The connector: the bot's own discord.js gateway (the default), or the
+    // portal relay. Its settings come from the bot's config file, with env vars
+    // overriding (connector/bootstrap.ts lists them).
+    if (botNameOverride && !existsSync(configSystem.botConfigPath(botNameOverride))) {
+      logger.warn(
+        { botName: botNameOverride, path: configSystem.botConfigPath(botNameOverride) },
+        "No config file for BOT_NAME at this path, so the connector's settings come from the environment alone",
+      )
+    }
+    const connectorSettings = resolveConnectorSettings({
+      env: process.env,
+      botConfig: botNameOverride ? configSystem.loadBotConfig(botNameOverride) : {},
+      botName: botNameOverride,
+      emsPath,
+      configPath,
+    })
+    logger.info(
+      { backend: connectorSettings.backend, from: connectorSettings.backendFrom },
+      'Connector backend selected',
+    )
 
     // Read Discord token from file (discord backend only).
     let discordToken = ''
-    if (backend === 'discord') {
+    if (connectorSettings.backend === 'discord') {
       try {
         discordToken = readFileSync(tokenFilePath, 'utf-8').trim()
         logger.info({ tokenFile: tokenFilePath }, 'Discord token loaded from file')
@@ -101,19 +103,9 @@ async function main() {
     // Initialize components
     const queue = new EventQueue()
     const stateManager = new ChannelStateManager()
-    const configSystem = new ConfigSystem(configPath)
 
-    // Initialize timer scheduler (for self-activation)
+    // Timer scheduler (for self-activation); it starts with the connector, below.
     const timerScheduler = createTimerScheduler(cachePath)
-    await timerScheduler.initialize((event) => {
-      // Push timer events to the queue for processing
-      queue.push(event)
-      logger.info({
-        type: event.type,
-        channelId: event.channelId,
-        timerId: event.data?.timerId,
-      }, 'Timer event pushed to queue')
-    })
     const contextBuilder = new ContextBuilder()
     const toolSystem = new ToolSystem(toolsPath)
 
@@ -125,45 +117,15 @@ async function main() {
 
     // Initialize the connector for the selected backend.
     let connector: IConnector
-    if (backend === 'portal') {
-      const portalUrl = process.env.PORTAL_URL || botBootstrap.portal_url
-      if (!portalUrl) throw new Error('portal backend requires portal_url (config) or PORTAL_URL (env)')
-      let personaId = process.env.PORTAL_PERSONA
-      let portalToken = process.env.PORTAL_TOKEN
-      if (!personaId || !portalToken) {
-        // Enroll ONCE and reuse the persona forever. The creds file must live on a
-        // path that survives restarts/redeploys — in EMS mode default to the
-        // (persistent) bot dir, not the (re-deployable) code/cache dir.
-        const credsPath =
-          process.env.PORTAL_CREDS_PATH ||
-          botBootstrap.portal_creds_path ||
-          (emsPath && botNameOverride
-            ? join(emsPath, botNameOverride, 'portal-creds.json')
-            : join(cachePath, 'portal-creds.json'))
-        const { loadOrEnrollCreds } = await import('@animalabs/portal-client')
-        // desiredName is the portal persona display name. Defaults to BOT_NAME
-        // (the EMS directory name) but can be overridden via env or config for
-        // personas whose display identity differs from their bot slug.
-        const desiredName =
-          process.env.PORTAL_DESIRED_NAME ||
-          botBootstrap.portal_desired_name ||
-          botNameOverride
-        const creds = await loadOrEnrollCreds({
-          url: portalUrl,
-          credsPath,
-          invite: process.env.PORTAL_INVITE || botBootstrap.portal_invite,
-          desiredName,
-        })
-        personaId = creds.personaId
-        portalToken = creds.token
-        logger.info({ credsPath, personaId }, 'Portal persona credentials ready (enroll-once)')
-      }
+    if (connectorSettings.backend === 'portal') {
+      // The persona enrolls once and keeps its credentials (connector/bootstrap.ts).
+      const { personaId, token } = await portalCredentials(connectorSettings.url, connectorSettings.credentials)
       // No explicit channel subscriptions: channel access is role/permission-based,
       // tracked relay-side.
-      logger.info({ portalUrl, personaId }, 'Using portal backend')
+      logger.info({ portalUrl: connectorSettings.url, personaId }, 'Using portal backend')
       connector = new PortalConnector(queue, {
-        url: portalUrl,
-        token: portalToken,
+        url: connectorSettings.url,
+        token,
         personaId,
         cacheDir: cachePath + '/images',
         maxBackoffMs: 32000,
@@ -176,14 +138,14 @@ async function main() {
       })
     }
 
-    await connector.start()
+    await startConnectorThenTimers(connector, timerScheduler)
 
     // Get bot's Discord identity
     const botUserId = connector.getBotUserId()
     const botUsername = connector.getBotUsername()
     
     if (!botUserId || !botUsername) {
-      throw new Error(`Failed to get bot identity from ${backend === 'portal' ? 'portal relay' : 'Discord'}`)
+      throw new Error(`Failed to get bot identity from ${connectorSettings.backend === 'portal' ? 'portal relay' : 'Discord'}`)
     }
 
     // Use BOT_NAME override (for EMS mode) or Discord username for config loading

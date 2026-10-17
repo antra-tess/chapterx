@@ -24,6 +24,23 @@ describe('extractConfigs', () => {
   it('ignores malformed .config (no --- separator)', () => {
     expect(extractConfigs([pin('1', '.config\nfoo: 1')])).toEqual([])
   })
+
+  it('orders pins from before and after July 2022 by time, not as strings', () => {
+    // An 18-digit snowflake (2021) and a 19-digit one (2024): the later config
+    // must come last so it wins the merge.
+    const pins = [pin('1200000000000000000', '.config\n---\nmood: new'), pin('900000000000000000', '.config\n---\nmood: old')]
+    expect(extractConfigs(pins)).toEqual(['mood: old', 'mood: new'])
+  })
+
+  it('strips the target of a pin addressed to this bot, by name or by persona mention', () => {
+    const ctx = { identity: { botId: '', discordUsername: 'glm52', discordUserId: 'persona-p' } }
+    const pins = [
+      pin('1', '.config glm52\n---\na: 1'),
+      pin('2', '.config someone\n---\nb: 2', { mentionedPersonaIds: ['persona-p'] }),
+      pin('3', '.config Mythos\n---\nc: 3'),
+    ]
+    expect(extractConfigs(pins, ctx)).toEqual(['a: 1', 'b: 2', 'target: Mythos\nc: 3'])
+  })
 })
 
 describe('extractSteers', () => {
@@ -35,11 +52,26 @@ describe('extractSteers', () => {
     ]
     expect(extractSteers(pins)).toEqual([{ content: '.steer be nice', authorId: 'human1' }])
   })
+
+  it('carries a steer pin\'s resolved mentions through', () => {
+    const pins = [pin('1', '.steer be brief', { mentionedPersonaIds: ['persona-p'], mentionedRoleIds: ['r1'] })]
+    const [steer] = extractSteers(pins)
+    expect(steer!.mentionedPersonaIds).toEqual(['persona-p'])
+    expect(steer!.mentionedRoleIds).toEqual(['r1'])
+  })
 })
 
 describe('extractSleeps', () => {
   it('returns .sleep pins as full records, sorted by id', () => {
     const pins = [pin('2', '.sleep messages: 3'), pin('1', '.sleep'), pin('3', '.config\n---\nx: 1')]
     expect(extractSleeps(pins).map((p) => p.id)).toEqual(['1', '2'])
+  })
+})
+
+describe('pin order', () => {
+  it('puts an id that isn\'t a number in a fixed place rather than failing the extraction', () => {
+    const pins = [pin('1000', '.sleep'), pin('abc', '.sleep'), pin('200', '.sleep')]
+    expect(extractSleeps(pins).map((p) => p.id)).toEqual(['200', 'abc', '1000'])
+    expect(extractSleeps([...pins].reverse()).map((p) => p.id)).toEqual(['200', 'abc', '1000'])
   })
 })

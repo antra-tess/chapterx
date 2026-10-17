@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import type { PortalMessage } from '@animalabs/portal-protocol'
-import { portalMessageToDiscordMessage } from './context.js'
+import { portalMessageToDiscordMessage, buildPortalContext, type ContextDeps } from './context.js'
 
 function pm(over: Partial<PortalMessage> = {}): PortalMessage {
   return {
@@ -22,7 +22,7 @@ const noMap = new Map<string, PortalMessage>()
 
 describe('portalMessageToDiscordMessage — strip portal- role prefix', () => {
   it('strips the portal- prefix from a resolved role mention', () => {
-    const d = portalMessageToDiscordMessage(pm({ cleanContent: '@portal-glm52 hey' }), noMap, 'bot')
+    const d = portalMessageToDiscordMessage(pm({ cleanContent: '@portal-glm52 hey' }), noMap)
     expect(d.content).toBe('@glm52 hey')
   })
 
@@ -30,18 +30,172 @@ describe('portalMessageToDiscordMessage — strip portal- role prefix', () => {
     const d = portalMessageToDiscordMessage(
       pm({ cleanContent: 'ping @portal-nemotron-3-ultra and @portal-Fugu, cc @alice' }),
       noMap,
-      'bot',
     )
     expect(d.content).toBe('ping @nemotron-3-ultra and @Fugu, cc @alice')
   })
 
   it('leaves ordinary (non-portal) mentions untouched', () => {
-    const d = portalMessageToDiscordMessage(pm({ cleanContent: 'hey @alice and @bob' }), noMap, 'bot')
+    const d = portalMessageToDiscordMessage(pm({ cleanContent: 'hey @alice and @bob' }), noMap)
     expect(d.content).toBe('hey @alice and @bob')
   })
 
   it('is a no-op on raw <@&id> content (no cleanContent)', () => {
-    const d = portalMessageToDiscordMessage(pm({ cleanContent: '', content: '<@&123> hi' }), noMap, 'bot')
+    const d = portalMessageToDiscordMessage(pm({ cleanContent: '', content: '<@&123> hi' }), noMap)
     expect(d.content).toBe('<@&123> hi')
+  })
+})
+
+/** buildPortalContext's dependencies over one channel's messages, served by
+ *  snowflake as fetch_history does. */
+function depsOver(all: PortalMessage[], known: Record<string, string> = {}) {
+  const fetchBatch = vi.fn(async (_ch: string, opts: { before?: string; limit: number }) =>
+    all
+      .filter((m) => opts.before === undefined || BigInt(m.nativeId) < BigInt(opts.before))
+      .sort((a, b) => (BigInt(b.nativeId) > BigInt(a.nativeId) ? 1 : -1))
+      .slice(0, opts.limit),
+  )
+  const fetchSingle = vi.fn(async (_ch: string, snowflake: string) => all.find((m) => m.nativeId === snowflake) ?? null)
+  const deps: ContextDeps = {
+    botPersonaId: 'persona-p',
+    fetchBatch,
+    fetchSingle,
+    resolveChannelBySnowflake: async () => null,
+    authorRoles: async () => null,
+    channelMeta: () => ({ guildId: 'guild', isThread: false }),
+    snowflakeOf: (id) => (/^\d+$/.test(id) ? id : known[id]),
+    seenSnowflakeOf: (id) => known[id],
+    attachments: {} as ContextDeps['attachments'],
+  }
+  return { deps, fetchBatch, fetchSingle }
+}
+
+const numbered = (from: number, to: number) =>
+  Array.from({ length: to - from + 1 }, (_, i) => pm({ id: `rm_chan_${from + i}`, nativeId: String(from + i) }))
+
+describe('buildPortalContext and message ids', () => {
+  it('starts from a target given as a Discord snowflake, as the API passes one', async () => {
+    const { deps, fetchSingle } = depsOver(numbered(1, 20))
+    const ctx = await buildPortalContext({ channelId: 'chan', depth: 5, targetMessageId: '10' }, deps)
+
+    expect(fetchSingle).toHaveBeenCalledWith('chan', '10')
+    expect(ctx.messages.map((m) => m.id)).toEqual(['rm_chan_6', 'rm_chan_7', 'rm_chan_8', 'rm_chan_9', 'rm_chan_10'])
+  })
+
+  it('extends back to an anchor whose snowflake it knows, and trims to it', async () => {
+    const { deps } = depsOver(numbered(1, 30), { rm_chan_15: '15' })
+    const ctx = await buildPortalContext({ channelId: 'chan', depth: 10, firstMessageId: 'rm_chan_15' }, deps)
+
+    expect(ctx.messages[0]!.id).toBe('rm_chan_15')
+    expect(ctx.inheritanceInfo?.cacheAnchorTrimmed).toBe(true)
+  })
+
+  it('leaves relay system notices out of the messages it extends back over', async () => {
+    const all = numbered(1, 30).map((m) => (m.nativeId === '18' ? { ...m, author: { kind: 'system' as const } } : m))
+    const { deps } = depsOver(all, { rm_chan_15: '15' })
+    const ctx = await buildPortalContext({ channelId: 'chan', depth: 10, firstMessageId: 'rm_chan_15' }, deps)
+
+    expect(ctx.messages[0]!.id).toBe('rm_chan_15')
+    expect(ctx.messages.map((m) => m.id)).not.toContain('rm_chan_18')
+  })
+
+  it('doesn\'t extend to a known anchor more than 24 hours older than the window, and drops it', async () => {
+    const sf = (ms: number) => ((BigInt(ms) - 1420070400000n) << 22n).toString()
+    const t0 = Date.UTC(2026, 9, 17, 12, 0, 0)
+    const anchor = pm({ id: 'rm_chan_old', nativeId: sf(t0 - 2 * 24 * 3600 * 1000) })
+    const recent = Array.from({ length: 5 }, (_, i) => pm({ id: `rm_chan_${i}`, nativeId: sf(t0 + i * 60_000) }))
+    const { deps, fetchBatch } = depsOver([anchor, ...recent], { rm_chan_old: anchor.nativeId })
+
+    const ctx = await buildPortalContext({ channelId: 'chan', depth: 5, firstMessageId: 'rm_chan_old' }, deps)
+
+    expect(ctx.messages[0]!.id).toBe('rm_chan_0')
+    expect(fetchBatch).toHaveBeenCalledTimes(1) // no extension pages
+  })
+
+  it('extends to a known anchor less than 24 hours older than the window', async () => {
+    const sf = (ms: number) => ((BigInt(ms) - 1420070400000n) << 22n).toString()
+    const t0 = Date.UTC(2026, 9, 17, 12, 0, 0)
+    const anchor = pm({ id: 'rm_chan_old', nativeId: sf(t0 - 23 * 3600 * 1000) })
+    const recent = Array.from({ length: 5 }, (_, i) => pm({ id: `rm_chan_${i}`, nativeId: sf(t0 + i * 60_000) }))
+    const { deps } = depsOver([anchor, ...recent], { rm_chan_old: anchor.nativeId })
+
+    const ctx = await buildPortalContext({ channelId: 'chan', depth: 5, firstMessageId: 'rm_chan_old' }, deps)
+
+    expect(ctx.messages[0]!.id).toBe('rm_chan_old')
+  })
+
+  it('leaves an anchor it can\'t date alone, rather than parse the relay id', async () => {
+    // rm_chan_15 is outside the window and wasn't seen by this process.
+    const { deps, fetchBatch } = depsOver(numbered(1, 30))
+    const ctx = await buildPortalContext({ channelId: 'chan', depth: 10, firstMessageId: 'rm_chan_15' }, deps)
+
+    expect(fetchBatch).toHaveBeenCalledTimes(1)
+    expect(ctx.messages[0]!.id).toBe('rm_chan_21')
+    expect(ctx.inheritanceInfo?.cacheAnchorTrimmed).toBeUndefined()
+  })
+
+  it('gives each converted message its snowflake beside the relay id', async () => {
+    const d = portalMessageToDiscordMessage(pm({ id: 'rm_chan_42', nativeId: '42' }), noMap)
+    expect(d.id).toBe('rm_chan_42')
+    expect(d.nativeId).toBe('42')
+  })
+
+  it('gives a reply its target\'s snowflake from the messages at hand, or from the connector\'s memory', () => {
+    const target = pm({ id: 'rm_chan_40', nativeId: '40' })
+    const map = new Map([[target.id, target]])
+    const known = (id: string) => ({ rm_chan_30: '30' } as Record<string, string>)[id]
+
+    expect(portalMessageToDiscordMessage(pm({ replyToId: 'rm_chan_40' }), map, known).referencedNativeId).toBe('40')
+    expect(portalMessageToDiscordMessage(pm({ replyToId: 'rm_chan_30' }), map, known).referencedNativeId).toBe('30')
+    expect(portalMessageToDiscordMessage(pm({ replyToId: 'rm_chan_20' }), map, known).referencedNativeId).toBeUndefined()
+  })
+})
+
+describe('portalMessageToDiscordMessage reply prefix', () => {
+  const alice = pm({ id: 'rm_chan_1', nativeId: '1' })
+  const map = new Map([[alice.id, alice]])
+
+  it('prefixes a human\'s reply with the name of the author it answers', () => {
+    const reply = pm({ id: 'rm_chan_2', nativeId: '2', cleanContent: 'agreed', replyToId: 'rm_chan_1', author: { kind: 'user', userId: 'u2', username: 'bob', displayName: 'Bob', bot: false } })
+    expect(portalMessageToDiscordMessage(reply, map).content).toBe('<reply:@alice> agreed')
+  })
+
+  it('names "someone" when the message it answers isn\'t in the context', () => {
+    const reply = pm({ id: 'rm_chan_2', nativeId: '2', cleanContent: 'agreed', replyToId: 'rm_chan_99' })
+    expect(portalMessageToDiscordMessage(reply, map).content).toBe('<reply:@someone> agreed')
+  })
+
+  it('leaves a bot\'s reply unprefixed', () => {
+    const reply = pm({ id: 'rm_chan_2', nativeId: '2', cleanContent: 'ok', replyToId: 'rm_chan_1', author: { kind: 'persona', personaId: 'p', displayName: 'p', avatarUrl: '' } })
+    expect(portalMessageToDiscordMessage(reply, map).content).toBe('ok')
+  })
+})
+
+describe('buildPortalContext in a thread', () => {
+  it('extends from the parent channel when the window\'s oldest message is the starter or older', async () => {
+    // Thread 'thr' was started from parent message 50; the anchor is parent message 10.
+    const parent = numbered(1, 50).map((m) => ({ ...m, id: `rm_par_${m.nativeId}`, channelId: 'par' }))
+    const thread = [pm({ id: 'rm_thr_60', nativeId: '60', channelId: 'par', threadId: 'thr' })]
+    const byChannel: Record<string, PortalMessage[]> = { par: parent, thr: thread }
+    const fetchBatch = vi.fn(async (ch: string, opts: { before?: string; limit: number }) =>
+      (byChannel[ch] ?? [])
+        .filter((m) => opts.before === undefined || BigInt(m.nativeId) < BigInt(opts.before))
+        .sort((a, b) => (BigInt(b.nativeId) > BigInt(a.nativeId) ? 1 : -1))
+        .slice(0, opts.limit),
+    )
+    const deps: ContextDeps = {
+      botPersonaId: 'persona-p',
+      fetchBatch,
+      fetchSingle: async (ch, sf) => (byChannel[ch] ?? []).find((m) => m.nativeId === sf) ?? null,
+      resolveChannelBySnowflake: async () => null,
+      authorRoles: async () => null,
+      channelMeta: (ch) => (ch === 'thr' ? { guildId: 'g', isThread: true, parentId: 'par', native: '50' } : { guildId: 'g', isThread: false }),
+      snowflakeOf: (id) => ({ rm_par_10: '10' } as Record<string, string>)[id],
+      seenSnowflakeOf: (id) => ({ rm_par_10: '10' } as Record<string, string>)[id],
+      attachments: {} as ContextDeps['attachments'],
+    }
+    const ctx = await buildPortalContext({ channelId: 'thr', depth: 6, firstMessageId: 'rm_par_10' }, deps)
+
+    expect(fetchBatch.mock.calls.some(([ch, o]) => ch === 'par' && o.before === '46')).toBe(true)
+    expect(ctx.messages[0]!.id).toBe('rm_par_10')
   })
 })

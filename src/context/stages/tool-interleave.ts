@@ -7,33 +7,75 @@ import type {
   ContentBlock,
   ImageContent,
   ToolCall,
+  DiscordMessage,
 } from '../../types.js'
 import { logger } from '../../utils/logger.js'
+import { toolOutputText } from '../../tools/output-text.js'
 
 /**
- * Format tool cache entries as paired bot-completion + system-result messages.
- * Each entry produces two ParticipantMessages: the bot's original completion text
- * and the system tool result.
+ * Find the Discord messages that cached tool-call completion text reconstructs,
+ * which the next context shows through the cached exchange instead.
+ *
+ * Each entry names them in coveredMessageIds. An entry written before that
+ * field existed covers all its botMessageIds.
+ */
+export function collectCoveredToolMessageIds(
+  toolCacheWithResults: Array<{ call: ToolCall; result: any }>,
+  discordMessages: DiscordMessage[]
+): Set<string> {
+  const covered = new Set<string>()
+  const messagesById = new Map(discordMessages.map(message => [message.id, message]))
+
+  for (const entry of toolCacheWithResults) {
+    // interleaveToolMessages inserts cached exchanges after their triggering
+    // message. If that anchor was deleted, filtered, or fell outside the current
+    // history window, suppressing the surviving Discord response would lose it.
+    if (!messagesById.has(entry.call.messageId)) continue
+
+    const botMessageIds = new Set(entry.call.botMessageIds || [])
+    for (const id of entry.call.coveredMessageIds ?? botMessageIds) {
+      if (botMessageIds.has(id) && messagesById.has(id)) covered.add(id)
+    }
+  }
+
+  return covered
+}
+
+/**
+ * Format tool cache entries as bot-completion and system-result messages.
+ * The tool calls of one model round share its completion, so it is emitted
+ * once, followed by each result. A round is known by the messages its
+ * completion covers; an entry that covers none, or was written before coverage
+ * was recorded, is known by its trigger and text, so adjacent identical
+ * completions are emitted once. An entry whose result was left out (an earlier
+ * round of an activation the cache's five-result window cuts through) shows
+ * its completion alone.
  */
 export function formatToolUseWithResults(
-  toolCacheWithResults: Array<{call: ToolCall, result: any}>,
+  toolCacheWithResults: Array<{call: ToolCall, result: any, resultOmitted?: boolean}>,
   botName: string
 ): ParticipantMessage[] {
   const messages: ParticipantMessage[] = []
+  let previousCompletionKey: string | undefined
 
   for (const entry of toolCacheWithResults) {
-    // Bot's message with original completion text (includes XML tool call)
-    messages.push({
-      participant: botName,
-      content: [
-        {
-          type: 'text',
-          text: entry.call.originalCompletionText,
-        },
-      ],
-      timestamp: entry.call.timestamp,
-      messageId: entry.call.messageId,
-    })
+    const completionText = entry.call.originalCompletionText || ''
+    const coveredMessageIds = entry.call.coveredMessageIds
+    const completionKey = coveredMessageIds !== undefined && coveredMessageIds.length > 0
+      ? `covers\0${coveredMessageIds.join('\0')}`
+      : `${entry.call.messageId}\0${completionText}`
+    if (completionText && completionKey !== previousCompletionKey) {
+      // Bot's message with original completion text (includes XML tool call for
+      // inline tools; a native entry holds the prose its round posted).
+      messages.push({
+        participant: botName,
+        content: [{ type: 'text', text: completionText }],
+        timestamp: entry.call.timestamp,
+        messageId: entry.call.messageId,
+      })
+    }
+    previousCompletionKey = completionKey
+    if (entry.resultOmitted) continue
 
     // Tool result message from SYSTEM (not bot)
     // Result can be: string (legacy), { output, images } (new format), or other object
@@ -45,7 +87,9 @@ export function formatToolUseWithResults(
     } else if (entry.result && typeof entry.result === 'object') {
       // New format with output and optional images
       const output = entry.result.output
-      const outputText = typeof output === 'string' ? output : JSON.stringify(output)
+      const outputText = entry.result.error
+        ? `Error executing ${entry.call.name}: ${entry.result.error}`
+        : toolOutputText(output)
       resultContent.push({ type: 'text', text: outputText })
 
       // Add MCP images to context
@@ -80,7 +124,7 @@ export function formatToolUseWithResults(
 
 /**
  * Interleave tool messages with participant messages based on messageId.
- * Tool call/result pairs are inserted after the message that triggered them.
+ * Cached tool messages are inserted after the message that triggered them.
  */
 export function interleaveToolMessages(
   participantMessages: ParticipantMessage[],
@@ -88,16 +132,12 @@ export function interleaveToolMessages(
 ): ParticipantMessage[] {
   // Create a map of triggering message ID -> tool messages
   const toolsByMessageId = new Map<string, ParticipantMessage[]>()
-  for (let i = 0; i < toolMessages.length; i += 2) {
-    const toolCall = toolMessages[i]
-    const toolResult = toolMessages[i + 1]
-    if (toolCall && toolResult) {
-      const messageId = toolCall.messageId || ''
-      if (!toolsByMessageId.has(messageId)) {
-        toolsByMessageId.set(messageId, [])
-      }
-      toolsByMessageId.get(messageId)!.push(toolCall, toolResult)
+  for (const toolMessage of toolMessages) {
+    const messageId = toolMessage.messageId || ''
+    if (!toolsByMessageId.has(messageId)) {
+      toolsByMessageId.set(messageId, [])
     }
+    toolsByMessageId.get(messageId)!.push(toolMessage)
   }
 
   // Interleave tools with messages based on messageId

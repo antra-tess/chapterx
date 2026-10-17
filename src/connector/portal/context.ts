@@ -11,7 +11,7 @@ import type { DiscordContext, DiscordMessage } from '../../types.js'
 import type { FetchContextParams } from '../types.js'
 import { logger } from '../../utils/logger.js'
 import { authorOfMessage, containerOf } from './adapters.js'
-import { fetchPortalHistory, snowflakeFromId, type PortalFetchDeps } from './history.js'
+import { fetchPortalHistory, isKeepable, type PortalFetchDeps } from './history.js'
 import type { AttachmentCache } from '../util/attachment-cache.js'
 
 const DISCORD_EPOCH = 1420070400000
@@ -39,11 +39,13 @@ function stripPortalRolePrefix(text: string): string {
 }
 
 /** Full PortalMessage → DiscordMessage. Uses portal's resolved `cleanContent`;
- *  adds the `<reply:@name>` prefix for non-bot authors (matching convertMessage). */
+ *  adds the `<reply:@name>` prefix for non-bot authors (matching convertMessage).
+ *  A reply's target snowflake comes from the messages at hand, or else from
+ *  `seenSnowflakeOf`, the connector's memory of the messages it has seen. */
 export function portalMessageToDiscordMessage(
   pm: PortalMessage,
   messageMap: Map<string, PortalMessage>,
-  _botPersonaId: string,
+  seenSnowflakeOf?: (relayId: string) => string | undefined,
 ): DiscordMessage {
   const a = authorOfMessage(pm)
   let content = stripPortalRolePrefix(pm.cleanContent || pm.content)
@@ -56,6 +58,7 @@ export function portalMessageToDiscordMessage(
 
   return {
     id: pm.id,
+    nativeId: pm.nativeId,
     channelId: containerOf(pm),
     guildId: pm.guildId ?? '',
     author: { id: a.id, username: a.username, displayName: a.globalName ?? a.username, bot: a.bot },
@@ -71,6 +74,9 @@ export function portalMessageToDiscordMessage(
     reactions: pm.reactions.map((r) => ({ emoji: r.emoji, count: r.count })),
     mentions: pm.mentions.users,
     referencedMessage: pm.replyToId,
+    referencedNativeId: pm.replyToId
+      ? (messageMap.get(pm.replyToId)?.nativeId ?? seenSnowflakeOf?.(pm.replyToId))
+      : undefined,
   }
 }
 
@@ -78,6 +84,14 @@ export interface ContextDeps extends PortalFetchDeps {
   attachments: AttachmentCache
   /** Channel meta from the client cache. */
   channelMeta(channelId: string): { guildId: string; isThread: boolean; parentId?: string; native?: string } | null
+  /** The Discord snowflake of an id fetchContext was given: a relay id the
+   *  connector has seen, or an id it hasn't seen that is all digits, which the
+   *  API passes from Discord URLs. Undefined when neither says. */
+  snowflakeOf(messageId: string): string | undefined
+  /** The Discord snowflake of a relay id, from the messages the connector has
+   *  seen, or undefined: the protocol calls the id opaque, so its form says
+   *  nothing. */
+  seenSnowflakeOf(relayId: string): string | undefined
 }
 
 const MAX_ANCHOR_GAP_MS = 24 * 60 * 60 * 1000
@@ -89,9 +103,13 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
   const meta = deps.channelMeta(channelId)
 
   // ── Stage 1: channel messages with .history ──
+  const startFrom = targetMessageId ? deps.snowflakeOf(targetMessageId) : undefined
+  if (targetMessageId && !startFrom) {
+    logger.warn({ targetMessageId }, 'portal: target message not known, fetching from the latest')
+  }
   const result = await fetchPortalHistory(
     channelId,
-    targetMessageId ? snowflakeFromId(targetMessageId) : undefined,
+    startFrom,
     undefined,
     depth,
     authorized_roles ?? [],
@@ -104,7 +122,13 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
 
   // ── Stage 2: thread-parent assembly ──
   if (meta?.isThread && !historyDidClear && meta.parentId) {
-    const starterSnowflake = meta.native // thread id === starter message snowflake
+    // A thread started from a message has that message's snowflake as its id,
+    // and the starter is in the parent channel. A forum post's first message
+    // has the thread's id but is in the thread, and any other thread's id names
+    // no message, so for those the starter fetch from the parent below finds
+    // nothing. A forum post's first message is in the window only when the
+    // thread is no longer than the window, as on the Discord backend.
+    const starterSnowflake = meta.native
     const parentResult = await fetchPortalHistory(
       meta.parentId,
       starterSnowflake,
@@ -127,30 +151,45 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
   let cacheAnchorTrimmed = false
   let anchor = firstMessageId
   if (anchor && !historyDidClear) {
-    const anchorSnow = snowflakeFromId(anchor)
-    let firstIndex = messages.findIndex((m) => m.id === anchor || m.nativeId === anchorSnow)
+    const anchorSnow = deps.snowflakeOf(anchor)
+    const isAnchor = (m: PortalMessage) => m.id === anchor || (anchorSnow !== undefined && m.nativeId === anchorSnow)
+    let firstIndex = messages.findIndex(isAnchor)
     const oldest = messages[0]
 
     // Temporal sanity: skip extension if the anchor is far older than the window.
+    // An anchor whose snowflake isn't known (one the connector no longer
+    // remembers) can't be dated, so it isn't extended to either.
     if (firstIndex < 0 && oldest) {
-      const gap = snowflakeToTimestamp(oldest.nativeId) - snowflakeToTimestamp(anchorSnow)
-      if (gap > MAX_ANCHOR_GAP_MS) {
-        logger.warn({ anchor, gapHours: Math.round(gap / 3.6e6) }, 'portal: cache anchor too old — skipping extension')
+      if (anchorSnow === undefined) {
+        logger.debug({ anchor }, 'portal: cache anchor not in the window and not known, so not extending')
         anchor = undefined
+      } else {
+        const gap = snowflakeToTimestamp(oldest.nativeId) - snowflakeToTimestamp(anchorSnow)
+        if (gap > MAX_ANCHOR_GAP_MS) {
+          logger.warn({ anchor, gapHours: Math.round(gap / 3.6e6) }, 'portal: cache anchor too old — skipping extension')
+          anchor = undefined
+        }
       }
     }
 
     if (firstIndex < 0 && oldest && anchor) {
-      const extendChannel = meta?.isThread && meta.parentId && oldest.nativeId === meta.native ? meta.parentId : channelId
+      // In a thread, once stage 2 has put parent messages in the window, the
+      // oldest is at or before the thread's id and is in the parent channel,
+      // where the extension pages. A forum post's first message has the
+      // thread's id too, but nothing is older than it in either place, so the
+      // parent's page comes back empty.
+      const oldestInParent =
+        meta?.isThread && meta.parentId && meta.native && !snowflakeLT(meta.native, oldest.nativeId)
+      const extendChannel = oldestInParent ? meta.parentId! : channelId
       let extended = 0
       let before = oldest.nativeId
       while (extended < MAX_ANCHOR_EXTEND) {
         const batch = await deps.fetchBatch(extendChannel, { before, limit: 100 })
         if (batch.length === 0) break
         const sorted = [...batch].sort((a, b) => (snowflakeLT(a.nativeId, b.nativeId) ? -1 : 1))
-        messages = [...sorted, ...messages]
+        messages = [...sorted.filter(isKeepable), ...messages]
         extended += sorted.length
-        firstIndex = messages.findIndex((m) => m.id === anchor || m.nativeId === anchorSnow)
+        firstIndex = messages.findIndex(isAnchor)
         if (firstIndex >= 0) break
         before = sorted[0]!.nativeId
       }
@@ -166,7 +205,7 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
   // ── Convert + filter ──
   const messageMap = new Map(messages.map((m) => [m.id, m]))
   const discordMessages = messages
-    .map((m) => portalMessageToDiscordMessage(m, messageMap, deps.botPersonaId))
+    .map((m) => portalMessageToDiscordMessage(m, messageMap, deps.seenSnowflakeOf))
     .filter((m) => m.content || m.attachments.length > 0)
 
   // ── Stage 4: attachments (newest-first so the image cap keeps recent ones) ──

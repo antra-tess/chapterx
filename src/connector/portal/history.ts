@@ -3,10 +3,11 @@
  * operating on PortalMessage instead of discord.js Message.
  *
  * The critical adaptation: discord.js uses `msg.id` for BOTH identity and
- * ordering (it's the snowflake). In portal those split — identity is the relay
- * id (`rm_<container>_<snowflake>`), ordering/boundaries are the Discord
- * snowflake (`pm.nativeId`). So all cursor/boundary math here uses the snowflake
- * (BigInt-compared), while message identity stays the relay id downstream.
+ * ordering (it's the snowflake). In portal those split: identity is the relay id
+ * (`pm.id`, opaque by portal-protocol's contract), and ordering and boundaries
+ * are the Discord snowflake (`pm.nativeId`). So all cursor/boundary math here
+ * uses the snowflake (BigInt-compared), while message identity stays the relay id
+ * downstream.
  *
  * The pure parsers (parseHistoryCommand / extract*FromUrl) are reused verbatim
  * from context-fetch.ts.
@@ -41,16 +42,6 @@ export interface PortalHistoryResult {
   originChannelId: string | null
 }
 
-/** Recover the Discord snowflake from a relay id (`rm_<container>_<snowflake>`)
- *  or pass through a raw snowflake. */
-export function snowflakeFromId(id: string): string {
-  if (id.startsWith('rm_')) {
-    const us = id.lastIndexOf('_')
-    if (us > 2) return id.slice(us + 1)
-  }
-  return id
-}
-
 function snowflakeLE(a: string, b: string): boolean {
   try {
     return BigInt(a) <= BigInt(b)
@@ -59,8 +50,14 @@ function snowflakeLE(a: string, b: string): boolean {
   }
 }
 
+/** A copy of `messages`, newest first by Discord snowflake. fetch_history's order
+ *  isn't part of portal-protocol, so callers sort rather than rely on it. */
+export function newestFirst<T extends { nativeId: string }>(messages: readonly T[]): T[] {
+  return [...messages].sort((a, b) => (a.nativeId === b.nativeId ? 0 : snowflakeLE(a.nativeId, b.nativeId) ? 1 : -1))
+}
+
 /** Keep only real user/persona messages (drop relay system notices). */
-function isKeepable(pm: PortalMessage): boolean {
+export function isKeepable(pm: PortalMessage): boolean {
   return pm.author.kind !== 'system'
 }
 
@@ -143,15 +140,21 @@ async function processPortalHistoryCommand(
   deps: PortalFetchDeps,
   depth: number,
 ): Promise<PortalHistoryResult | null> {
+  // ── Bot targeting. If targeted and not us, skip. ──
+  // A leading user mention (`.history <@id>`) targets a Discord account, as the
+  // Discord engine reads it, and a persona has none, so it's never us.
+  if (/^\.history\s+<@!?\d+>/.test(msg.content)) return null
+  // A persona role-mention targets the personas it names.
+  if (msg.mentions.personas.length > 0 && !msg.mentions.personas.includes(deps.botPersonaId)) {
+    return null
+  }
+
   // ── Authorization (by role name) ──
+  // After targeting, since a role lookup is an RPC and a command aimed at
+  // someone else needs none.
   if (authorizedRoles.length > 0) {
     const roles = await deps.authorRoles(msg)
     if (!roles || !authorizedRoles.some((r) => roles.includes(r))) return null
-  }
-
-  // ── Bot targeting: persona role-mention. If targeted and not us, skip. ──
-  if (msg.mentions.personas.length > 0 && !msg.mentions.personas.includes(deps.botPersonaId)) {
-    return null
   }
 
   const parsed = parseHistoryCommand(msg.content)

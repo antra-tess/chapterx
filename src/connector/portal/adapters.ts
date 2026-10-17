@@ -9,6 +9,7 @@
 import type { PortalMessage, PortalEvent } from '@animalabs/portal-protocol'
 import type { Event } from '../../types.js'
 import type { InboundMessage } from '../types.js'
+import { emojiName } from '../../utils/emoji.js'
 
 /** Context the event adapter needs that isn't on the event itself. */
 export interface AdapterCtx {
@@ -39,22 +40,26 @@ export function authorOfMessage(pm: PortalMessage): {
 
 /**
  * PortalMessage → the discord.js-`Message`-compatible object the loop reads off
- * `event.data`. `mentions.has(id)` translates a persona role-mention into a
- * "bot mentioned" signal (botUserId === personaId). `address` carries the relay's
- * per-recipient addressing reasons (role_mention / reply / subscription); a
- * reply-ping can only be detected via `reasons`, since webhook personas never
- * appear in `mentions`.
+ * `event.data`. `mentions.has(botPersonaId)` is true when the persona's role is
+ * mentioned or when the relay addresses the message to this persona (its
+ * `addressedToMe`, set for a reply to one of the persona's messages too). A
+ * webhook persona can't receive a native reply-ping, and the relay's `reply`
+ * reason doesn't say whether the ping was on, so the loop treats every reply to
+ * the persona as an account bot's reply with the ping on: a mention. `address`
+ * keeps the relay's per-recipient reasons for the loop's trigger reason.
  */
 export function inboundFromPortal(
   pm: PortalMessage,
-  _botPersonaId: string,
+  botPersonaId: string,
   address?: { addressedToMe: boolean; reasons: string[] },
 ): InboundMessage {
   const author = authorOfMessage(pm)
   const mentionedIds = new Set<string>([...pm.mentions.personas, ...pm.mentions.users])
+  if (address?.addressedToMe) mentionedIds.add(botPersonaId)
   const users = new Map<string, unknown>(pm.mentions.users.map((id) => [id, { id }]))
   return {
     id: pm.id,
+    nativeId: pm.nativeId,
     channelId: containerOf(pm),
     guildId: pm.guildId ?? '',
     content: pm.content,
@@ -67,14 +72,15 @@ export function inboundFromPortal(
       users,
     },
     // Back the show-reaction override with the message's real reactions. The
-    // loop calls `r.emoji?.name` — Portal carries the unicode/`name:id` string,
-    // so wrap each as `{ emoji: { name } }`.
+    // loop calls `r.emoji?.name`, so wrap each as `{ emoji: { name } }`.
     reactions: {
       cache: {
-        some: (fn: (r: unknown) => boolean) => pm.reactions.some((r) => fn({ emoji: { name: r.emoji } })),
+        some: (fn: (r: unknown) => boolean) => pm.reactions.some((r) => fn({ emoji: { name: emojiName(r.emoji) } })),
       },
     },
-    // member.roles unavailable inbound (P1); role-gated user features degrade.
+    // A portal message carries no author roles (portal-protocol's MessageAuthor),
+    // so there's no `member`, and what reads the trigger's roles from it, such as
+    // the Soma check, sees none.
     member: undefined,
     _portal: pm,
   }
@@ -134,7 +140,7 @@ export function queueEventFromPortal(e: PortalEvent, ctx: AdapterCtx): Event | n
         guildId: ctx.guildOf(channelId),
         data: {
           messageId: e.messageId,
-          emoji: e.reaction.emoji,
+          emoji: emojiName(e.reaction.emoji),
           userId: reactorId,
           messageAuthorId: ctx.authorOf(e.messageId),
         },

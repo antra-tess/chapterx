@@ -175,6 +175,14 @@ export interface BotConfig {
   // Identity
   name: string  // Name used in LLM context (prefill labels, stop sequences)
 
+  // Connector, read once at startup from the bot's own config file; the env var
+  // of the same name in capitals overrides each (see connector/bootstrap.ts)
+  connector_backend?: 'discord' | 'portal'  // Default: discord
+  portal_url?: string  // The portal relay's WebSocket URL
+  portal_creds_path?: string  // Where the persona's credentials are saved. Default: beside this config file
+  portal_desired_name?: string  // The persona's name when it enrolls. Default: BOT_NAME
+  portal_invite?: string  // The invite to enroll with, used when no credentials are saved
+
   // Model config
   prefill_thinking?: boolean  // If true, enable extended thinking
   debug_thinking?: boolean  // If true, send thinking content as dot-prefixed debug message
@@ -421,8 +429,22 @@ export interface ToolCall {
   input: Record<string, any>
   messageId: string  // For pruning old calls (triggering user message)
   timestamp: Date
-  originalCompletionText: string  // The bot's original text including XML tool call
-  botMessageIds?: string[]  // Discord message IDs from bot's response (for existence checking)
+  /**
+   * The bot's text that the cached exchange reconstructs: for inline tools the
+   * activation's whole output, XML tool calls included; for a native tool call
+   * the visible prose posted in its round, or '' when the round posted none.
+   */
+  originalCompletionText: string
+  /** All Discord messages emitted by the activation (tool-cache liveness anchors). */
+  botMessageIds?: string[]
+  /**
+   * Subset of botMessageIds whose visible text is reconstructed by
+   * originalCompletionText: for a native tool call, the messages that posted
+   * its round's prose. Only these messages may be removed from raw Discord
+   * context before the cached tool exchange is interleaved. An entry written
+   * before this field existed has none, and covers all its botMessageIds.
+   */
+  coveredMessageIds?: string[]
 }
 
 export interface ToolCallWithResult {
@@ -481,7 +503,15 @@ export interface DiscordMessage {
   }>
   authorRoles?: string[]  // Guild role names (populated from member.roles)
   mentions: string[]  // User IDs
-  referencedMessage?: string  // Reply to message ID
+  /** The id of the message this one replies to, in the same id space as `id`:
+   *  the relay's message id on the portal backend, a snowflake on Discord. */
+  referencedMessage?: string
+  /** The Discord snowflake, when `id` isn't one: on the portal backend `id` is
+   *  the relay's message id. Absent on the Discord backend. */
+  nativeId?: string
+  /** With `nativeId`: the snowflake of the message `referencedMessage` names,
+   *  when the connector knows it. */
+  referencedNativeId?: string
 }
 
 export interface DiscordAttachment {
@@ -614,4 +644,3 @@ export class ToolError extends Chapter3Error {
     this.name = 'ToolError'
   }
 }
-

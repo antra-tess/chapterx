@@ -14,7 +14,7 @@ import {
 } from '../types.js'
 import { Activation } from '../activation/index.js'
 import { logger } from '../utils/logger.js'
-import { attachThinkingBlocks, type ThinkingBlock } from '../agent/thinking-cache.js'
+import { attachThinkingBlocks, sanitizeThinkingRuns, type ThinkingGroup } from '../agent/thinking-cache.js'
 import {
   determineCacheMarker,
   applyChapterXCacheMarker,
@@ -62,7 +62,7 @@ export interface BuildContextParams {
   activations?: Activation[]
   pluginInjections?: ContextInjection[]
   /** Persisted native thinking blocks keyed by the bot message ID they anchor to */
-  thinkingByMessageId?: Map<string, ThinkingBlock[]>
+  thinkingByMessageId?: Map<string, ThinkingGroup>
 }
 
 export interface ContextBuildResultWithTrace extends ContextBuildResult {
@@ -191,6 +191,16 @@ export class ContextBuilder {
     if (finalMessages !== participantMessages) {
       participantMessages.length = 0
       participantMessages.push(...finalMessages)
+    }
+
+    // 8b. The API rejects any turn where thinking blocks from different
+    // responses sit next to each other (pre-fix tool-loop cache entries).
+    // Drop such runs; everything else is sent as persisted.
+    if (thinkingByMessageId && thinkingByMessageId.size > 0) {
+      const dropped = sanitizeThinkingRuns(participantMessages, thinkingByMessageId.values())
+      if (dropped > 0) {
+        logger.info({ dropped }, 'Dropped thinking blocks that mix responses (API would reject the turn)')
+      }
     }
 
     // 9. Determine and apply cache marker

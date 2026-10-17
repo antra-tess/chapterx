@@ -118,13 +118,22 @@ export class ConfigSystem {
     return this.loadYAMLFile(join(this.configBasePath, 'guilds', `${guildId}.yaml`))
   }
 
-  private loadBotConfig(botName: string): Partial<BotConfig> {
-    // In EMS mode: <EMS_PATH>/<botName>/config.yaml
-    // In default mode: <CONFIG_PATH>/bots/<botName>.yaml
-    const path = this.emsMode
+  /**
+   * The bot's own config file alone, without the shared, guild or channel
+   * layers: what main() reads the connector settings from before it starts one.
+   * {} when the file doesn't exist.
+   */
+  loadBotConfig(botName: string): Partial<BotConfig> {
+    return this.loadYAMLFile(this.botConfigPath(botName))
+  }
+
+  /** Where the bot's own config file is.
+   *  In EMS mode: <EMS_PATH>/<botName>/config.yaml
+   *  In default mode: <CONFIG_PATH>/bots/<botName>.yaml */
+  botConfigPath(botName: string): string {
+    return this.emsMode
       ? join(this.configBasePath, botName, 'config.yaml')
       : join(this.configBasePath, 'bots', `${botName}.yaml`)
-    return this.loadYAMLFile(path)
   }
 
   private loadBotGuildConfig(botName: string, guildId: string): Partial<BotConfig> {
