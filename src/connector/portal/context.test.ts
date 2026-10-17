@@ -97,6 +97,19 @@ describe('buildPortalContext and message ids', () => {
     expect(ctx.messages.map((m) => m.id)).not.toContain('rm_chan_18')
   })
 
+  it('doesn\'t extend to a known anchor more than 24 hours older than the window, and drops it', async () => {
+    const sf = (ms: number) => ((BigInt(ms) - 1420070400000n) << 22n).toString()
+    const t0 = Date.UTC(2026, 9, 17, 12, 0, 0)
+    const anchor = pm({ id: 'rm_chan_old', nativeId: sf(t0 - 2 * 24 * 3600 * 1000) })
+    const recent = Array.from({ length: 5 }, (_, i) => pm({ id: `rm_chan_${i}`, nativeId: sf(t0 + i * 60_000) }))
+    const { deps, fetchBatch } = depsOver([anchor, ...recent], { rm_chan_old: anchor.nativeId })
+
+    const ctx = await buildPortalContext({ channelId: 'chan', depth: 5, firstMessageId: 'rm_chan_old' }, deps)
+
+    expect(ctx.messages[0]!.id).toBe('rm_chan_0')
+    expect(fetchBatch).toHaveBeenCalledTimes(1) // no extension pages
+  })
+
   it('leaves an anchor it can\'t date alone, rather than parse the relay id', async () => {
     // rm_chan_15 is outside the window and wasn't seen by this process.
     const { deps, fetchBatch } = depsOver(numbered(1, 30))

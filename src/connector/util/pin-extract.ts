@@ -7,20 +7,14 @@
 import type { TrackedPin, PinnedSteer } from '../types.js'
 import { pinAddressesBot, type BotIdentity } from '../../agent/pin-target.js'
 
-/** Oldest first. Pin ids are Discord snowflakes, compared as integers: ids gained
- *  a digit in July 2022, so comparing them as strings misorders the two eras. An
- *  id that isn't a number falls back to string order rather than failing the
- *  extraction. */
+/** Oldest first. Pin ids are Discord snowflakes: decimal integers without
+ *  leading zeros, which gained a digit in July 2022, so a shorter id is older
+ *  and ids of one length compare as text. That's a total order on any strings,
+ *  so an id that isn't a number still sorts somewhere fixed. */
 function sortById(pins: TrackedPin[]): TrackedPin[] {
-  return [...pins].sort((a, b) => {
-    try {
-      const x = BigInt(a.id)
-      const y = BigInt(b.id)
-      return x < y ? -1 : x > y ? 1 : 0
-    } catch {
-      return a.id.localeCompare(b.id)
-    }
-  })
+  return [...pins].sort((a, b) =>
+    a.id.length !== b.id.length ? a.id.length - b.id.length : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+  )
 }
 
 /** Identity + roles a connector resolves a pin target against. */

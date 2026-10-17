@@ -33,3 +33,21 @@ describe('API routes that need the Discord backend, on the portal backend', () =
     expect((await res.json()).message).toContain(what)
   })
 })
+
+describe('the same routes on the Discord backend', () => {
+  it.each(['/api/channels', '/api/users/123456789012345678', '/api/users/123456789012345678/avatar'])(
+    '%s goes on to the discord.js client instead of refusing',
+    async (path) => {
+      const users = { fetch: async () => ({ id: '123456789012345678', username: 'alice', globalName: 'Alice', bot: false, displayAvatarURL: () => 'https://cdn.invalid/a.png' }) }
+      const client = { users, guilds: { cache: new Map() }, on: () => undefined }
+      server = new ApiServer({ port: 0, bearerToken: 'secret' }, { isPortal: () => false, client } as any)
+      await server.start()
+      const port = (server as any).server.address().port as number
+
+      const res = await fetch(`http://127.0.0.1:${port}${path}`, { headers: { Authorization: 'Bearer secret' } })
+
+      expect(res.status).not.toBe(501)
+      expect(JSON.stringify(await res.json())).not.toContain('portal backend')
+    },
+  )
+})

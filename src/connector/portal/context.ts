@@ -117,9 +117,10 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
 
   // ── Stage 2: thread-parent assembly ──
   if (meta?.isThread && !historyDidClear && meta.parentId) {
-    // A thread started from a message has that message's snowflake as its id;
-    // a forum post or a thread made without one has no such message, and the
-    // starter fetch below finds nothing.
+    // A thread's id is its starter message's snowflake. For a thread started
+    // from a message, the starter is in the parent channel; a forum post's
+    // starter is the thread's own first message, so the starter fetch from the
+    // parent below finds nothing, and the thread's history already has it.
     const starterSnowflake = meta.native
     const parentResult = await fetchPortalHistory(
       meta.parentId,
@@ -165,8 +166,11 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
     }
 
     if (firstIndex < 0 && oldest && anchor) {
-      // In a thread, once stage 2 has put parent messages in the window, the
-      // oldest is the starter or older, and both live in the parent channel.
+      // In a thread started from a message, once stage 2 has put parent
+      // messages in the window, the oldest is the starter or older, and both
+      // live in the parent channel. In a forum post the oldest that can be is the
+      // starter, the thread's first message, so nothing is older in either place
+      // and the parent's page comes back empty.
       const oldestInParent =
         meta?.isThread && meta.parentId && meta.native && !snowflakeLT(meta.native, oldest.nativeId)
       const extendChannel = oldestInParent ? meta.parentId! : channelId

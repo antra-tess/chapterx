@@ -67,3 +67,11 @@ describe('extractSleeps', () => {
     expect(extractSleeps(pins).map((p) => p.id)).toEqual(['1', '2'])
   })
 })
+
+describe('pin order', () => {
+  it('puts an id that isn\'t a number in a fixed place rather than failing the extraction', () => {
+    const pins = [pin('1000', '.sleep'), pin('abc', '.sleep'), pin('200', '.sleep')]
+    expect(extractSleeps(pins).map((p) => p.id)).toEqual(['200', 'abc', '1000'])
+    expect(extractSleeps([...pins].reverse()).map((p) => p.id)).toEqual(['200', 'abc', '1000'])
+  })
+})
