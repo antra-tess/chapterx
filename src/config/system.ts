@@ -32,13 +32,17 @@ export class ConfigSystem {
 
     logger.debug({ botName, guildId, emsMode: this.emsMode }, 'Loading config')
 
+    // Load bot config early to get display name for pinned config target matching
+    const botConfig = this.loadBotConfig(botName)
+    const botDisplayName = botConfig.name
+
     // Load configs in priority order (each overrides previous)
     const configs: Partial<BotConfig>[] = [
       this.loadSharedConfig(),
       this.loadGuildConfig(guildId),
-      this.loadBotConfig(botName),
+      botConfig,
       this.loadBotGuildConfig(botName, guildId),
-      ...channelConfigs.map((yaml) => this.parseChannelConfig(yaml, botName)),
+      ...channelConfigs.map((yaml) => this.parseChannelConfig(yaml, botName, botDisplayName)),
     ]
 
     // Merge all configs
@@ -48,6 +52,32 @@ export class ConfigSystem {
     this.validateConfig(merged)
 
     logger.debug({ config: merged }, 'Config loaded successfully')
+
+    return merged
+  }
+
+  /**
+   * Load bot-level config only (for startup initialization like TTS relay)
+   * This loads without guild/channel context - just shared + bot configs
+   */
+  loadBotConfigOnly(botName: string): Partial<BotConfig> & { tts_relay?: import('../types.js').TTSRelayConfig } {
+    const configs = [
+      this.loadSharedConfig(),
+      this.loadBotConfig(botName),
+    ]
+
+    // Simple merge (not full mergeConfigs which applies defaults)
+    const merged: any = {}
+    for (const config of configs) {
+      for (const [key, value] of Object.entries(config)) {
+        if (value === undefined || value === null) continue
+        if (typeof value === 'object' && !Array.isArray(value)) {
+          merged[key] = { ...(merged[key] || {}), ...value }
+        } else {
+          merged[key] = value
+        }
+      }
+    }
 
     return merged
   }
@@ -106,21 +136,30 @@ export class ConfigSystem {
     return this.loadYAMLFile(path)
   }
 
-  private parseChannelConfig(yamlString: string, botName: string): Partial<BotConfig> {
+  private parseChannelConfig(yamlString: string, botName: string, botDisplayName?: string): Partial<BotConfig> {
     try {
       const config = YAML.parse(yamlString) || {}
-      
-      logger.debug({ 
-        yamlString, 
-        parsedConfig: config, 
-        target: config.target, 
+
+      // Match target against botId (e.g. "haiku45") or display name (e.g. "Haiku"), case-insensitive
+      // Strip Discord mention syntax: <@username> → username, <@!id> → id
+      const rawTarget = config.target ? String(config.target).replace(/^<@!?([^>]+)>$/, '$1') : undefined
+      const target = rawTarget?.toLowerCase()
+      const matchesBotId = target === botName.toLowerCase()
+      const matchesDisplayName = botDisplayName && target === botDisplayName.toLowerCase()
+      const targetMatches = !config.target || matchesBotId || matchesDisplayName
+
+      logger.debug({
+        yamlString,
+        parsedConfig: config,
+        target: config.target,
         botName,
-        match: config.target === botName
+        botDisplayName,
+        match: targetMatches
       }, 'Parsing channel config')
-      
+
       // If config has a target field, only apply if it matches this bot
-      if (config.target && config.target !== botName) {
-        logger.debug({ target: config.target, botName }, 'Skipping config with different target')
+      if (!targetMatches) {
+        logger.debug({ target: config.target, botName, botDisplayName }, 'Skipping config with different target')
         return {}
       }
       
@@ -207,21 +246,36 @@ export class ConfigSystem {
       }
     }
 
+    // Load prefill user message from file if specified (replaces '[Start]' synthetic user message)
+    let prefillUserMessage = config.prefill_user_message
+    if (config.prefill_user_message_file && !prefillUserMessage) {
+      const prefillPath = resolveBotFilePath(config.prefill_user_message_file)
+      if (existsSync(prefillPath)) {
+        prefillUserMessage = readFileSync(prefillPath, 'utf-8')
+        logger.info({ path: prefillPath, length: prefillUserMessage.length }, 'Loaded prefill user message from file')
+      } else {
+        logger.warn({ path: prefillPath }, 'Prefill user message file not found')
+      }
+    }
+
     return {
       // Identity (required, no defaults)
       name: config.name || '',
 
       // Model config
-      mode: config.mode || 'prefill',
       prefill_thinking: config.prefill_thinking || false,
       debug_thinking: config.debug_thinking || false,
+      thinking_budget: config.thinking_budget,
+      thinking_type: config.thinking_type,
       preserve_thinking_context: config.preserve_thinking_context || false,
+      preserve_thinking_blocks: config.preserve_thinking_blocks !== false,  // Default: true (opt-out)
       continuation_model: config.continuation_model || '',
       temperature: config.temperature ?? 1.0,
       max_tokens: config.max_tokens || 4096,
-      top_p: config.top_p ?? 1.0,
+      top_p: config.top_p,
       presence_penalty: config.presence_penalty,
       frequency_penalty: config.frequency_penalty,
+      repetition_penalty: config.repetition_penalty,
 
       // Context config
       recency_window_messages: config.recency_window_messages,
@@ -230,50 +284,96 @@ export class ConfigSystem {
       rolling_threshold: config.rolling_threshold || 50,
       recent_participant_count: config.recent_participant_count || 10,
       authorized_roles: config.authorized_roles || [],
+      steer_roles: config.steer_roles,
+      steer_visible: config.steer_visible === true,  // Default: false (opt-in)
+      steer_readout: config.steer_readout === true,  // Default: false (opt-in)
       prompt_caching: config.prompt_caching !== false,  // Default: true
+      cache_ttl: config.cache_ttl,  // Optional: '5m' (default) or '1h' (extended Anthropic caching)
 
       // Image config
       include_images: config.include_images ?? true,
       max_images: config.max_images || 5,
+      generate_images: config.generate_images,
+      provider_params: config.provider_params,
 
       // Text attachment config
       include_text_attachments: config.include_text_attachments ?? true,
       max_text_attachment_kb: config.max_text_attachment_kb || 100,  // 100KB default
 
+      // Reply tag config
+      include_reply_tags: config.include_reply_tags ?? false,
+
       // Tool config
       tools_enabled: config.tools_enabled ?? true,
       tool_output_visible: config.tool_output_visible ?? false,
       max_tool_depth: config.max_tool_depth || 100,
+      max_mcp_images: config.max_mcp_images ?? 3,  // Default: keep up to 3 latest MCP images
       mcp_servers: config.mcp_servers,
       tool_plugins: config.tool_plugins || [],
       plugin_config: config.plugin_config,
 
       // Stop sequences
       stop_sequences: config.stop_sequences || [],
-      message_delimiter: config.message_delimiter,  // Optional: e.g., '</s>' for base models (removes newlines)
-      turn_end_token: config.turn_end_token,  // Optional: e.g., '<eot>' for Gemini (preserves newlines)
-
-      // Chat mode persona
-      chat_persona_prompt: config.chat_persona_prompt ?? true,
-      chat_persona_prefill: config.chat_persona_prefill ?? true,
-      chat_bot_as_assistant: config.chat_bot_as_assistant ?? true,
+      message_delimiter: config.message_delimiter,  // Optional: for completions formatter
+      turn_end_token: config.turn_end_token,  // Optional: e.g., '<eot>' for Gemini
 
       // Retries
-      llm_retries: config.llm_retries || 3,
+      llm_retries: config.llm_retries ?? 0,
       discord_backoff_max: config.discord_backoff_max || 32000,
+      deferred_retries: config.deferred_retries ?? false,
+      supports_continuation: config.supports_continuation !== false,
 
       // Misc
       system_prompt: systemPrompt,
       system_prompt_file: config.system_prompt_file,
       context_prefix: contextPrefix,
       context_prefix_file: config.context_prefix_file,
+      prefill_user_message: prefillUserMessage,
+      prefill_user_message_file: config.prefill_user_message_file,
       reply_on_random: config.reply_on_random ?? 500,
       reply_on_name: config.reply_on_name ?? false,
+      may_speak: config.may_speak,
       max_queued_replies: config.max_queued_replies || 1,
       
       // Loop prevention
       max_bot_reply_chain_depth: config.max_bot_reply_chain_depth ?? 2,
       bot_reply_chain_depth_emote: config.bot_reply_chain_depth_emote || '🔁',
+
+      // Message filtering
+      ignore_dotted_messages: config.ignore_dotted_messages !== false,  // Default: true
+
+      // Reaction triggers
+      continuation_emoji: config.continuation_emoji ?? '▶️',
+      
+      // Soma integration (credit system) - optional
+      soma: config.soma ? {
+        enabled: config.soma.enabled ?? false,
+        url: config.soma.url || '',
+        token: config.soma.token,  // Optional: uses SOMA_TOKEN env var if not set
+      } : undefined,
+
+      // Use display names instead of usernames for participant labels - default false
+      use_display_names: config.use_display_names ?? false,
+
+      // Per-participant display-name flags. Fall back to use_display_names, then the
+      // documented defaults: bots → display names (true), humans → usernames (false).
+      use_display_names_bots: config.use_display_names_bots ?? config.use_display_names ?? true,
+      use_display_names_humans: config.use_display_names_humans ?? config.use_display_names ?? false,
+
+      // Mention format template - default undefined (uses <@name> format)
+      mention_format: config.mention_format,
+
+      // Participant stop sequences - default false (allows frags/quotes)
+      participant_stop_sequences: config.participant_stop_sequences ?? false,
+
+      // Bot mode (chat vs prefill)
+      mode: config.mode,  // 'chat' or 'prefill' (default: undefined = prefill)
+
+      // Streaming control
+      streaming: config.streaming,
+
+      // TTS relay
+      tts_relay: config.tts_relay,
     }
   }
 
@@ -292,8 +392,16 @@ export class ConfigSystem {
       throw new ConfigError('max_tokens must be positive')
     }
 
-    if (config.top_p < 0 || config.top_p > 1) {
+    if (config.top_p !== undefined && (config.top_p < 0 || config.top_p > 1)) {
       throw new ConfigError('top_p must be between 0 and 1')
+    }
+
+    // TTS relay requires real streaming for real-time token delivery
+    if (config.streaming === false && config.tts_relay?.enabled) {
+      logger.warn(
+        { botName: config.name },
+        'streaming:false with tts_relay.enabled — TTS will receive synthesized callbacks from membrane.complete(), not real-time per-token delivery'
+      )
     }
   }
 }

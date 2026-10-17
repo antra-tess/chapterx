@@ -20,6 +20,7 @@ export class ToolSystem {
   private pluginContext: Partial<PluginContext> = {}
   private pluginContextFactory: any = null  // PluginContextFactory, typed as any to avoid circular import
   private pluginConfigs: Record<string, any> = {}  // Per-plugin configs
+  private mcpResources = new Map<string, Array<{ uri: string; name: string; description?: string; mimeType?: string }>>()
 
   constructor(private toolCacheDir: string) {}
 
@@ -71,6 +72,13 @@ export class ToolSystem {
    */
   setPluginContext(context: Partial<PluginContext>): void {
     this.pluginContext = { ...this.pluginContext, ...context }
+  }
+  
+  /**
+   * Get current plugin context
+   */
+  getPluginContext(): Partial<PluginContext> {
+    return this.pluginContext
   }
   
   /**
@@ -130,13 +138,35 @@ export class ToolSystem {
     await client.connect(transport)
 
     // Load tools from this server
-    const response = await client.listTools()
-    const serverTools: ToolDefinition[] = response.tools.map((tool) => ({
+    const toolResponse = await client.listTools()
+    const serverTools: ToolDefinition[] = toolResponse.tools.map((tool) => ({
       name: tool.name,
       description: tool.description || '',
       inputSchema: tool.inputSchema as any,
       serverName: config.name,
     }))
+
+    // Load resources from this server (if supported)
+    try {
+      const resourceResponse = await client.listResources()
+      if (resourceResponse.resources && resourceResponse.resources.length > 0) {
+        const resources = resourceResponse.resources.map((r: any) => ({
+          uri: r.uri,
+          name: r.name,
+          description: r.description,
+          mimeType: r.mimeType,
+        }))
+        this.mcpResources.set(config.name, resources)
+        logger.info({ 
+          server: config.name, 
+          resourceCount: resources.length,
+          resources: resources.map((r: any) => r.name)
+        }, 'MCP resources discovered')
+      }
+    } catch (e) {
+      // Server may not support resources - that's ok
+      logger.debug({ server: config.name }, 'MCP server does not support resources')
+    }
 
     this.mcpClients.set(config.name, client)
     this.tools.push(...serverTools)
@@ -145,6 +175,48 @@ export class ToolSystem {
       server: config.name, 
       toolCount: serverTools.length 
     }, 'MCP server initialized')
+  }
+
+  /**
+   * Get all available MCP resources
+   */
+  getMcpResources(): Array<{ server: string; uri: string; name: string; description?: string }> {
+    const allResources: Array<{ server: string; uri: string; name: string; description?: string }> = []
+    for (const [server, resources] of this.mcpResources) {
+      for (const resource of resources) {
+        allResources.push({ server, ...resource })
+      }
+    }
+    return allResources
+  }
+
+  /**
+   * Read an MCP resource by URI
+   */
+  async readMcpResource(uri: string): Promise<{ content: string; mimeType?: string } | null> {
+    // Find which server owns this resource
+    for (const [serverName, resources] of this.mcpResources) {
+      const resource = resources.find(r => r.uri === uri)
+      if (resource) {
+        const client = this.mcpClients.get(serverName)
+        if (client) {
+          try {
+            const result = await client.readResource({ uri })
+            // Result contains contents array
+            const content = result.contents?.map((c: any) => {
+              if (c.text) return c.text
+              if (c.blob) return `[Binary data: ${c.uri || uri}]`
+              return JSON.stringify(c)
+            }).join('\n') || ''
+            return { content, mimeType: resource.mimeType }
+          } catch (e: any) {
+            logger.error({ uri, error: e.message }, 'Failed to read MCP resource')
+            return null
+          }
+        }
+      }
+    }
+    return null
   }
 
 
@@ -245,7 +317,10 @@ export class ToolSystem {
               originalCompletionText: entry.call.originalCompletionText || '',
               botMessageIds: botMsgIds,
             },
-            result
+            result: {
+              output: result,
+              images: entry.result.images,  // Restore MCP images from cache
+            }
           })
         }
       } catch (error) {
@@ -511,6 +586,9 @@ export class ToolSystem {
           config: this.pluginContext.config || {},
           sendMessage: this.pluginContext.sendMessage || (async () => []),
           pinMessage: this.pluginContext.pinMessage || (async () => {}),
+          addReaction: this.pluginContext.addReaction || (async () => {}),
+          uploadFile: this.pluginContext.uploadFile,
+          visibleImages: this.pluginContext.visibleImages,
         }
         
         let result = await pluginHandler(call.input, context)
@@ -595,9 +673,13 @@ export class ToolSystem {
         arguments: call.input,
       })
 
+      // Parse MCP result content - extract text and images separately
+      const { textOutput, images } = this.parseMcpResultContent(result.content)
+
       return {
         callId: call.id,
-        output: result.content,
+        output: textOutput,
+        images: images.length > 0 ? images : undefined,
         timestamp: new Date(),
       }
     } catch (error) {
@@ -644,6 +726,7 @@ export class ToolSystem {
       result: {
         output: result.output,
         error: result.error,
+        images: result.images,  // MCP image content (base64)
       },
       timestamp: result.timestamp.toISOString(),
     }
@@ -773,6 +856,72 @@ export class ToolSystem {
 
   private generateToolCallId(): string {
     return `call_${Date.now()}_${Math.random().toString(36).substring(7)}`
+  }
+
+  /**
+   * Parse MCP result content - extract text and images separately
+   * MCP content can be an array of content blocks:
+   * - { type: 'text', text: string }
+   * - { type: 'image', data: string, mimeType: string }
+   * - { type: 'resource', ... } (embedded resources - treated as text)
+   */
+  private parseMcpResultContent(content: any): {
+    textOutput: string
+    images: Array<{ data: string; mimeType: string }>
+  } {
+    const images: Array<{ data: string; mimeType: string }> = []
+    const textParts: string[] = []
+
+    // Handle null/undefined
+    if (!content) {
+      return { textOutput: '', images: [] }
+    }
+
+    // Handle string content directly
+    if (typeof content === 'string') {
+      return { textOutput: content, images: [] }
+    }
+
+    // Handle array of content blocks (standard MCP format)
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!block || typeof block !== 'object') {
+          textParts.push(String(block))
+          continue
+        }
+
+        if (block.type === 'text' && typeof block.text === 'string') {
+          textParts.push(block.text)
+        } else if (block.type === 'image') {
+          // MCP image content block
+          const data = block.data || block.source?.data
+          const mimeType = block.mimeType || block.source?.media_type || 'image/png'
+          if (data) {
+            images.push({ data, mimeType })
+            logger.debug({ mimeType, dataLength: data.length }, 'Extracted image from MCP tool result')
+          }
+        } else if (block.type === 'resource') {
+          // Embedded resource - extract text if available
+          if (block.resource?.text) {
+            textParts.push(block.resource.text)
+          } else if (block.resource?.blob) {
+            // Binary resource - just note its presence
+            textParts.push(`[Binary resource: ${block.resource.uri || 'unknown'}]`)
+          }
+        } else {
+          // Unknown block type - stringify it
+          textParts.push(JSON.stringify(block))
+        }
+      }
+    } else {
+      // Non-array content - stringify it
+      textParts.push(typeof content === 'string' ? content : JSON.stringify(content))
+    }
+
+    return {
+      textOutput: textParts.join('\n'),
+      images,
+    }
   }
 }
 

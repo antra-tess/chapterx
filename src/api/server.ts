@@ -5,6 +5,8 @@
 
 import express, { Request, Response, NextFunction } from 'express'
 import { DiscordConnector } from '../discord/connector.js'
+import { ConfigSystem } from '../config/system.js'
+import { ContextBuilder } from '../context/builder.js'
 import { logger } from '../utils/logger.js'
 
 export interface ApiConfig {
@@ -19,6 +21,8 @@ export interface MessageExportRequest {
     messages?: number
     characters?: number
   }
+  maxImages?: number  // Max images to fetch (default: 50)
+  ignoreHistory?: boolean  // Skip .history command processing (raw fetch)
 }
 
 export interface MessageExportResponse {
@@ -64,7 +68,10 @@ export class ApiServer {
 
   constructor(
     private config: ApiConfig,
-    private connector: DiscordConnector
+    private connector: DiscordConnector,
+    private configSystem?: ConfigSystem,
+    private contextBuilder?: ContextBuilder,
+    private botName?: string
   ) {
     this.setupMiddleware()
     this.setupRoutes()
@@ -234,6 +241,158 @@ export class ApiServer {
         }
       }
     })
+
+    // List channels the bot has access to, with last-activity timestamps.
+    // Timestamps are derived from Discord snowflake IDs (no fetches needed)
+    // so this is fast even with hundreds of channels across many guilds.
+    this.app.get('/api/channels', async (req: Request, res: Response) => {
+      try {
+        const guildIdFilter = req.query.guildId as string | undefined
+        const sinceParam = req.query.since as string | undefined
+        const sinceMs = sinceParam ? new Date(sinceParam).getTime() : 0
+        if (sinceParam && Number.isNaN(sinceMs)) {
+          res.status(400).json({
+            error: 'Bad Request',
+            message: 'Invalid since parameter — must be ISO 8601 timestamp',
+          })
+          return
+        }
+
+        const client = (this.connector as any).client
+        const guilds = guildIdFilter
+          ? [client.guilds.cache.get(guildIdFilter)].filter(Boolean)
+          : Array.from(client.guilds.cache.values())
+
+        // Discord snowflake → epoch ms: (id >> 22) + Discord epoch
+        const DISCORD_EPOCH = 1420070400000n
+        const snowflakeToTimestamp = (snowflake: string): number =>
+          Number((BigInt(snowflake) >> 22n) + DISCORD_EPOCH)
+
+        const channels: any[] = []
+        for (const guild of guilds as any[]) {
+          for (const ch of guild.channels.cache.values()) {
+            if (!ch.isTextBased?.()) continue
+            const lastMessageId = ch.lastMessageId as string | null
+            const lastActivityAt = lastMessageId
+              ? new Date(snowflakeToTimestamp(lastMessageId)).toISOString()
+              : null
+            if (sinceMs && (!lastMessageId || snowflakeToTimestamp(lastMessageId) < sinceMs)) continue
+            channels.push({
+              id: ch.id,
+              name: ch.name,
+              guildId: guild.id,
+              guildName: guild.name,
+              type: ch.type,  // discord.js ChannelType enum value
+              isThread: ch.isThread?.() ?? false,
+              parentId: ch.parentId ?? null,
+              lastMessageId,
+              lastActivityAt,
+            })
+          }
+        }
+
+        // Newest activity first; channels with no messages sink to the bottom
+        channels.sort((a, b) => {
+          if (!a.lastMessageId) return 1
+          if (!b.lastMessageId) return -1
+          return b.lastMessageId.localeCompare(a.lastMessageId)
+        })
+
+        res.json({
+          channels,
+          metadata: {
+            count: channels.length,
+            guildCount: guilds.length,
+            guildIdFilter: guildIdFilter || null,
+            since: sinceParam || null,
+          },
+        })
+      } catch (error: any) {
+        logger.error({ error }, 'API error in /api/channels')
+        res.status(500).json({
+          error: 'Internal Server Error',
+          message: error.message || 'Failed to list channels',
+        })
+      }
+    })
+
+    // Latest N raw messages for a channel, same shape as /api/messages/export.
+    // Distinct from /api/context/build (which pipeline-processes for LLM use)
+    // and from export (which requires a boundary message URL).
+    this.app.get('/api/channels/:channelId/latest', async (req: Request, res: Response) => {
+      try {
+        const channelId = req.params.channelId
+        if (!channelId || !/^\d+$/.test(channelId)) {
+          res.status(400).json({
+            error: 'Bad Request',
+            message: 'channelId must be a Discord channel ID (numeric)',
+          })
+          return
+        }
+        const messages = Math.min(Math.max(parseInt(req.query.messages as string) || 50, 1), 500)
+        const maxImages = req.query.maxImages !== undefined
+          ? Math.max(parseInt(req.query.maxImages as string) || 0, 0)
+          : 50
+        const ignoreHistory = req.query.ignoreHistory !== 'false'  // Default true, like export
+
+        const result = await this.fetchLatestMessages(channelId, messages, maxImages, ignoreHistory)
+        res.json(result)
+      } catch (error: any) {
+        logger.error({ error, channelId: req.params.channelId }, 'API error in /api/channels/:channelId/latest')
+        if (error.message?.includes('not found') || error.message?.includes('Unknown')) {
+          res.status(404).json({ error: 'Not Found', message: error.message })
+        } else if (error.message?.includes('Missing Access') || error.message?.includes('not accessible')) {
+          res.status(403).json({ error: 'Forbidden', message: error.message })
+        } else {
+          res.status(500).json({
+            error: 'Internal Server Error',
+            message: error.message || 'Failed to fetch latest messages',
+          })
+        }
+      }
+    })
+
+    // Build full LLM context for a channel (get_prompt equivalent)
+    this.app.post('/api/context/build', async (req: Request, res: Response) => {
+      try {
+        if (!this.configSystem || !this.contextBuilder || !this.botName) {
+          res.status(501).json({
+            error: 'Not Available',
+            message: 'Context building requires configSystem, contextBuilder, and botName'
+          })
+          return
+        }
+
+        const { channel, messages: messageCount } = req.body as {
+          channel: string  // Discord channel URL or channel ID
+          messages?: number  // Number of messages to include (default: bot config)
+        }
+
+        if (!channel) {
+          res.status(400).json({
+            error: 'Bad Request',
+            message: 'Missing required parameter: channel',
+            details: 'Provide a Discord channel URL or channel ID'
+          })
+          return
+        }
+
+        const result = await this.buildFullContext(channel, messageCount)
+        res.json(result)
+      } catch (error: any) {
+        logger.error({ error, body: req.body }, 'API error in /api/context/build')
+
+        if (error.message?.includes('Invalid') || error.message?.includes('Missing')) {
+          res.status(400).json({ error: 'Bad Request', message: error.message })
+        } else if (error.message?.includes('not found') || error.message?.includes('Unknown')) {
+          res.status(404).json({ error: 'Not Found', message: error.message })
+        } else if (error.message?.includes('not accessible') || error.message?.includes('Missing Access')) {
+          res.status(403).json({ error: 'Forbidden', message: error.message })
+        } else {
+          res.status(500).json({ error: 'Internal Server Error', message: error.message || 'An unexpected error occurred' })
+        }
+      }
+    })
   }
 
   private async exportMessages(request: MessageExportRequest): Promise<MessageExportResponse> {
@@ -256,10 +415,12 @@ export class ApiServer {
     const maxFetch = recencyWindow.messages ? recencyWindow.messages + 100 : 1000
 
     // Use connector.fetchContext() which automatically:
-    // - Recursively handles .history commands during traversal
+    // - Recursively handles .history commands during traversal (unless ignoreHistory)
     // - Downloads and caches images
     // - Converts to DiscordMessage format
-    logger.debug({ channelId, targetMessageId: lastMessageId, firstMessageId, depth: maxFetch }, 'Calling fetchContext')
+    const maxImages = request.maxImages ?? 50  // Default to 50 to prevent RAM bloat
+    const ignoreHistory = request.ignoreHistory ?? true  // Default to true for raw export (skip .history processing)
+    logger.debug({ channelId, targetMessageId: lastMessageId, firstMessageId, depth: maxFetch, maxImages, ignoreHistory }, 'Calling fetchContext')
     let context
     try {
       context = await this.connector.fetchContext({
@@ -267,6 +428,8 @@ export class ApiServer {
         depth: maxFetch,
         targetMessageId: lastMessageId,  // Start from the 'last' URL
         firstMessageId,  // Stop at 'first' URL if provided
+        maxImages,
+        ignoreHistory,  // Skip .history processing for raw export
       })
     } catch (error: any) {
       if (error.code === 50001) {
@@ -324,7 +487,24 @@ export class ApiServer {
     messages = this.mergeConsecutiveBotMessages(messages)
 
     // Transform to export format (from DiscordMessage to API format)
-    const exportedMessages = messages.map((msg: any) => ({
+    const exportedMessages = messages.map(m => this.toExportMessage(m, imageCache))
+
+    return {
+      messages: exportedMessages,
+      metadata: {
+        channelId,
+        guildId,
+        firstMessageId: messages[0]?.id || '',
+        lastMessageId: messages[messages.length - 1]?.id || '',
+        totalCount: messages.length,
+        truncated: wasExplicitlyTruncated,
+      },
+    }
+  }
+
+  /** Convert a fetched DiscordMessage to the public export shape. */
+  private toExportMessage(msg: any, imageCache: Map<string, any>): any {
+    return {
       id: msg.id,
       author: {
         id: msg.author.id,
@@ -349,17 +529,49 @@ export class ApiServer {
         }
       }),
       referencedMessageId: msg.referencedMessage,
-    }))
+    }
+  }
+
+  /** Fetch the latest N raw messages for a channel — backs /api/channels/:id/latest */
+  private async fetchLatestMessages(
+    channelId: string,
+    messageCount: number,
+    maxImages: number,
+    ignoreHistory: boolean
+  ): Promise<any> {
+    let context
+    try {
+      context = await this.connector.fetchContext({
+        channelId,
+        depth: messageCount,
+        maxImages,
+        ignoreHistory,
+      })
+    } catch (error: any) {
+      if (error.code === 50001) {
+        throw new Error(`Missing Access: Bot does not have permission to view channel ${channelId}`)
+      } else if (error.code === 10003) {
+        throw new Error(`Channel ${channelId} not found or bot is not a member of this guild`)
+      }
+      throw new Error(`Failed to fetch messages: ${error.message}`)
+    }
+
+    const messages = context.messages
+    if (messages.length === 0) {
+      throw new Error(`No messages found in channel ${channelId}`)
+    }
+    const imageCache = new Map(context.images.map(img => [img.url, img]))
+    const exportedMessages = messages.map(m => this.toExportMessage(m, imageCache))
 
     return {
       messages: exportedMessages,
       metadata: {
         channelId,
-        guildId,
         firstMessageId: messages[0]?.id || '',
         lastMessageId: messages[messages.length - 1]?.id || '',
         totalCount: messages.length,
-        truncated: wasExplicitlyTruncated,
+        requestedCount: messageCount,
+        ignoreHistory,
       },
     }
   }
@@ -542,6 +754,98 @@ export class ApiServer {
   private extractMessageIdFromUrl(url: string): string | null {
     const match = url.match(/\/channels\/\d+\/\d+\/(\d+)/)
     return match ? match[1]! : null
+  }
+
+  /**
+   * Build the full LLM context for a channel, as the bot would see it.
+   * Runs the complete context builder pipeline with an optional message count override.
+   * Character limits and other truncation are disabled so you get the full window.
+   */
+  private async buildFullContext(channel: string, messageCount?: number): Promise<any> {
+    // Parse channel ID from URL or use as-is
+    let channelId: string
+    let guildId: string = ''
+    const urlMatch = channel.match(/\/channels\/(\d+)\/(\d+)/)
+    if (urlMatch) {
+      guildId = urlMatch[1]!
+      channelId = urlMatch[2]!
+    } else if (/^\d+$/.test(channel)) {
+      channelId = channel
+    } else {
+      throw new Error('Invalid channel: provide a Discord channel URL or numeric channel ID')
+    }
+
+    // Load bot config for this channel
+    const config = this.configSystem!.loadConfig({
+      botName: this.botName!,
+      guildId,
+      channelConfigs: [],
+    })
+
+    // Override limits: use provided message count, disable character limits
+    const fetchMessages = messageCount || config.recency_window_messages || 200
+    const fetchDepth = fetchMessages + 100  // Buffer for .history and filtering
+
+    // Fetch context from Discord
+    const discordContext = await this.connector.fetchContext({
+      channelId,
+      depth: fetchDepth,
+      maxImages: config.include_images ? Math.max((config.max_images || 5) * 2, 10) : 0,
+    })
+
+    const discordFetched = discordContext.messages.length
+
+    if (discordFetched === 0) {
+      throw new Error(`No messages found in channel ${channelId}`)
+    }
+
+    // Build config with overridden limits
+    const overriddenConfig = {
+      ...config,
+      recency_window_messages: fetchMessages,
+      recency_window_characters: Infinity,  // No character limit
+      hard_max_characters: Infinity,  // No hard limit
+    }
+
+    const botUsername = this.connector.getBotUsername()
+
+    // Run full context builder pipeline
+    const contextResult = await this.contextBuilder!.buildContext({
+      discordContext,
+      toolCacheWithResults: [],  // No tool cache for inspection
+      lastCacheMarker: null,
+      messagesSinceRoll: 0,
+      config: overriddenConfig,
+      botDiscordUsername: botUsername || undefined,
+    })
+
+    // Format the output: participant messages with text content
+    const messages = contextResult.request.messages.map(msg => ({
+      participant: msg.participant,
+      content: msg.content
+        .filter(b => b.type === 'text')
+        .map(b => (b as any).text)
+        .join('\n'),
+      hasImages: msg.content.some(b => b.type === 'image'),
+      imageCount: msg.content.filter(b => b.type === 'image').length,
+    }))
+
+    return {
+      messages,
+      metadata: {
+        botName: config.name,
+        channelId,
+        messageCount: messages.length,
+        discordMessagesFetched: discordFetched,
+        configuredLimit: config.recency_window_messages,
+        requestedLimit: messageCount || null,
+        model: config.continuation_model,
+        mode: config.mode || 'prefill',
+        systemPrompt: config.system_prompt ? config.system_prompt.substring(0, 200) + (config.system_prompt.length > 200 ? '...' : '') : null,
+        contextPrefix: config.context_prefix ? config.context_prefix.substring(0, 200) + (config.context_prefix.length > 200 ? '...' : '') : null,
+        stopSequences: contextResult.request.stop_sequences,
+      },
+    }
   }
 
   async start(): Promise<void> {

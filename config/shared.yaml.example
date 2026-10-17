@@ -18,23 +18,36 @@ vendors:
   #   provides:
   #     - "anthropic\\.claude.*"
   
+  # OpenAI direct API (for GPT, o1, o3, etc.)
   # openai:
   #   config:
   #     openai_api_key: "sk-..."
-  #     openai_base_url: "https://api.openai.com/v1"
+  #     # openai_base_url: "https://api.openai.com/v1"  # Optional, defaults to OpenAI
   #   provides:
   #     - "gpt-4.*"
-  #     - "gpt-3.5-turbo"
+  #     - "gpt-5.*"
+  #     - "o1-.*"
+  #     - "o3-.*"
   
-  # OpenAI Compatable Completions API for base/foundation models
-  # Uses /v1/completions endpoint (prompt in, text continuation out)
-  # Supports prefill mode only - no chat roles
-  # base-model-provider:
+  # OpenRouter (unified API for multiple providers)
+  # openrouter:
   #   config:
-  #     openai_completions_api_key: "sk-..."
-  #     openai_completions_base_url: "https://api.example.com/v1"
+  #     openrouter_api_key: "sk-or-..."
   #   provides:
-  #     - "my-base-model-.*"
-# Bot config tip for base models:
-# Set message_delimiter: "</s>" to append end-of-sequence token to each message.
-# The base model will learn to end its responses the same way.
+  #     - "anthropic/claude-3-opus"
+  #     - "openai/gpt-4-turbo"
+  #     - "meta-llama/llama-3.*"
+  
+  # OpenAI-compatible endpoint (local inference, vLLM, Ollama, etc.)
+  # Models should be prefixed with "local:" for routing
+  # local-inference:
+  #   config:
+  #     openai_compatible_api_key: "not-needed"  # Often not required for local
+  #     openai_compatible_base_url: "http://localhost:11434/v1"  # Ollama example
+  #   provides:
+  #     - "local:llama3.*"
+  #     - "local:mistral.*"
+
+# Bot config tip for local models:
+# Use "local:" prefix in model names to route to openai-compatible adapter
+# Example: model: "local:llama3.2:8b"

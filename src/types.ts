@@ -17,6 +17,7 @@ export interface LLMRequest {
   messages: ParticipantMessage[]
   system_prompt?: string
   context_prefix?: string  // Inserted as first cached assistant message (for simulacrum seeding)
+  prefill_user_message?: string  // Custom content for synthetic user message (replaces '[Start]')
   config: ModelConfig
   tools?: ToolDefinition[]
   stop_sequences?: string[]
@@ -40,21 +41,43 @@ export interface ParticipantMessage {
   content: ContentBlock[]
   timestamp?: Date
   messageId?: string  // Discord message ID (for cache markers)
-  cacheControl?: CacheControl
+  isBot?: boolean  // Whether this message is from a bot (used for merge decisions)
+  isCharacterOverride?: boolean  // If true, participant was set via `~Name:` prefix — excluded from stop sequences so the model can frag
+  cacheBreakpoint?: boolean  // If true, cache boundary is placed AFTER this message
+  cacheControl?: CacheControl  // @deprecated - use cacheBreakpoint instead
 }
 
 /**
- * Content blocks - supports text, images, and tool use
+ * Content blocks - supports text, images, tool use, and thinking
  */
-export type ContentBlock = 
+export type ContentBlock =
   | TextContent
   | ImageContent
   | ToolUseContent
   | ToolResultContent
+  | ThinkingContent
+  | RedactedThinkingContent
 
 export interface TextContent {
   type: 'text'
   text: string
+}
+
+/**
+ * Native extended-thinking block. The signature carries the API's encrypted
+ * full reasoning (validated and, on display:'omitted' models, decrypted
+ * server-side when passed back). Must round-trip verbatim — including blocks
+ * whose thinking field is empty (signature-only).
+ */
+export interface ThinkingContent {
+  type: 'thinking'
+  thinking: string
+  signature?: string
+}
+
+export interface RedactedThinkingContent {
+  type: 'redacted_thinking'
+  data?: string
 }
 
 export interface ImageContent {
@@ -82,6 +105,7 @@ export interface ToolResultContent {
 
 export interface CacheControl {
   type: 'ephemeral'
+  ttl?: '5m' | '1h'
 }
 
 // ============================================================================
@@ -124,19 +148,24 @@ export interface ModelConfig {
   model: string
   temperature: number
   max_tokens: number
-  top_p: number
-  mode: 'prefill' | 'chat'
-  prefill_thinking?: boolean  // If true, prefill with <thinking> tag
+  top_p?: number  // Optional — only sent to API when explicitly set (avoids Anthropic temp+top_p conflict)
+  prefill_thinking?: boolean  // If true, enable extended thinking
+  debug_thinking?: boolean  // If true, thinking is enabled and content posted as dot-prefixed debug messages
+  thinking_budget?: number  // Token budget for extended thinking (default: 10000)
+  thinking_type?: 'enabled' | 'adaptive'  // API thinking type: 'enabled' (explicit budget) or 'adaptive' (model-managed, e.g. Fable 5)
   botName: string  // Name used in LLM context (prefill labels, stop sequences)
-  botDiscordUsername?: string  // Bot's actual Discord username for chat mode message matching
-  chatPersonaPrompt?: boolean  // If true, add persona instruction system prompt for chat mode
-  chatPersonaPrefill?: boolean  // If true, add "botname:" prefill to end of last user message in chat mode
-  chatBotAsAssistant?: boolean  // If true (default), bot's own messages are sent as assistant role; if false, merged into user turns
-  messageDelimiter?: string  // Optional delimiter appended to each message (for base model completions, removes newlines)
-  turnEndToken?: string  // Optional token appended after each message content (e.g., '<eot>' for Gemini, preserves newlines)
+  messageDelimiter?: string  // Optional delimiter appended to each message (for completions formatter)
+  turnEndToken?: string  // Optional token appended after each message content (e.g., '<eot>' for Gemini)
   presence_penalty?: number  // Penalty for token presence (0.0-2.0)
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
+  repetition_penalty?: number  // Multiplicative repetition penalty (vLLM/HuggingFace style, typically 1.0-1.2)
   prompt_caching?: boolean  // If true (default), apply cache_control markers for Anthropic prompt caching
+  cache_ttl?: '5m' | '1h'  // Anthropic cache TTL - '5m' (default) or '1h' (extended)
+  participant_stop_sequences?: boolean  // If true, membrane generates stop sequences from participant names (default: false)
+  generate_images?: boolean  // If true, set responseModalities for image generation (overrides auto-detect from model name)
+  provider_params?: Record<string, unknown>  // Arbitrary params passed through to the LLM provider (e.g., reasoning config)
+  mode?: 'chat' | 'prefill' | 'base-model'  // Bot mode — controls formatter and execution path routing
+  streaming?: boolean  // When false, force non-streaming LLM calls (default: true)
 }
 
 /**
@@ -145,19 +174,22 @@ export interface ModelConfig {
 export interface BotConfig {
   // Identity
   name: string  // Name used in LLM context (prefill labels, stop sequences)
-  
+
   // Model config
-  mode: 'prefill' | 'chat'
-  prefill_thinking?: boolean  // If true, prefill with <thinking> tag to enable reasoning
+  prefill_thinking?: boolean  // If true, enable extended thinking
   debug_thinking?: boolean  // If true, send thinking content as dot-prefixed debug message
+  thinking_budget?: number  // Token budget for extended thinking (default: 10000)
+  thinking_type?: 'enabled' | 'adaptive'  // API thinking type: 'enabled' (explicit budget) or 'adaptive' (model-managed)
   preserve_thinking_context?: boolean  // If true, preserve thinking traces in context (for Opus 4.5)
+  preserve_thinking_blocks?: boolean  // Persist + round-trip native thinking blocks (signatures) for reasoning continuity. Default: true
   continuation_model: string
   temperature: number
   max_tokens: number
-  top_p: number
+  top_p?: number
   presence_penalty?: number  // Penalty for token presence (0.0-2.0)
   frequency_penalty?: number  // Penalty for token frequency (0.0-2.0)
-  
+  repetition_penalty?: number  // Multiplicative repetition penalty (vLLM/HuggingFace style, typically 1.0-1.2)
+
   // Context config
   recency_window_messages?: number  // Max number of messages
   recency_window_characters?: number  // Max number of characters
@@ -165,43 +197,53 @@ export interface BotConfig {
   rolling_threshold: number  // Messages before truncation
   recent_participant_count: number  // Number of recent participants for stop sequences
   authorized_roles: string[]  // Roles authorized to use .history commands
+  steer_roles?: string[]  // Roles authorized to use .steer commands (if empty/undefined, .steer is unrestricted)
+  steer_visible?: boolean  // If true, .steer messages are visible in bot context (default: false)
+  steer_readout?: boolean  // If true, send probe readout as file attachment after steered generation (default: false)
   prompt_caching?: boolean  // Enable Anthropic prompt caching (default: true)
+  cache_ttl?: '5m' | '1h'  // Anthropic cache TTL - '5m' (default) or '1h' (extended)
   
   // Image config
   include_images: boolean
-  max_images: number
-  
+  max_images: number  // Max images to include (applies to ephemeral window, or prefix if cache_images is true)
+  max_ephemeral_images?: number  // Max images in rolling window after cache marker (default: max_images)
+  cache_images?: boolean  // If true, include images in cached prefix (requires deterministic handling). Default: false (images only in rolling window)
+  generate_images?: boolean  // If true, set responseModalities for image generation models (overrides auto-detect from model name)
+
   // Text attachment config
   include_text_attachments: boolean
   max_text_attachment_kb: number  // Max size per text attachment in KB
-  
+
+  // Reply tag config
+  include_reply_tags?: boolean  // If true, keep <reply:@username> in context (default: false, matching Chapter2)
+
   // Tool config
   tools_enabled: boolean
   tool_output_visible: boolean
   max_tool_depth: number
+  max_mcp_images: number  // Max images from MCP tool results to include in context
   mcp_servers?: MCPServerConfig[]
   tool_plugins?: string[]  // Plugin names to enable (e.g., ['config'])
   plugin_config?: Record<string, PluginInstanceConfig>  // Per-plugin configuration
   
   // Stop sequences
   stop_sequences: string[]
-  message_delimiter?: string  // Delimiter appended to each message in prefill mode (e.g., '</s>' for base models, removes newlines)
-  turn_end_token?: string  // Token appended after each message content (e.g., '<eot>' for Gemini, preserves newlines)
-  
-  // Chat mode persona
-  chat_persona_prompt?: boolean  // If true, add persona instruction system prompt for chat mode
-  chat_persona_prefill?: boolean  // If true, add "botname:" prefill to end of last user message in chat mode
-  chat_bot_as_assistant?: boolean  // If true (default), bot's own messages are sent as assistant role; if false, merged into user turns
+  message_delimiter?: string  // Delimiter appended to each message (for completions formatter)
+  turn_end_token?: string  // Token appended after each message content (e.g., '<eot>' for Gemini)
   
   // Retries
   llm_retries: number
   discord_backoff_max: number
-  
+  deferred_retries: boolean
+  supports_continuation?: boolean  // If false, reject m continue when last message is bot's own (default: true)
+
   // Misc
   system_prompt?: string
   system_prompt_file?: string  // Path to file containing system prompt (relative to config dir)
   context_prefix?: string      // Prefix content to insert as first assistant message (cached)
   context_prefix_file?: string // Path to file containing context prefix (relative to config dir)
+  prefill_user_message?: string       // Custom content for synthetic user message (replaces '[Start]')
+  prefill_user_message_file?: string  // Path to file containing prefill user message (relative to config dir)
   reply_on_random: number
   reply_on_name: boolean
   max_queued_replies: number
@@ -210,8 +252,73 @@ export interface BotConfig {
   max_bot_reply_chain_depth: number  // Max consecutive bot messages in reply chain (prevents bot loops)
   bot_reply_chain_depth_emote: string  // Emote to show when bot reply chain depth limit is reached
   
+  // Message filtering
+  ignore_dotted_messages: boolean  // If true (default), dot-prefixed messages are hidden from context and don't trigger activation
+
+  // Reaction triggers
+  continuation_emoji?: string  // Emoji that triggers continuation when reacted on bot's message (e.g., '▶️')
+
+  // Bot mode
+  mode?: 'chat' | 'prefill' | 'base-model'  // 'chat' = native formatter, no prefill; 'prefill' = anthropic-xml with prefill (default); 'base-model' = completions formatter
+
   // API mode
   api_only?: boolean  // If true, disable Discord activation handling - only serve API requests
+
+  // Speaker gating
+  // If set on a channel-pinned .config, only bots whose id or display name
+  // appears in this list will activate in that channel (covers both
+  // user-triggered and self_activation paths).
+  may_speak?: string[]
+  
+  // Soma integration (credit system)
+  soma?: SomaConfig
+
+  // Participant display
+  // When true, uses Discord display names (globalName/nickname) instead of usernames
+  // for participant labels in the LLM context. Default: false (use usernames, matching Chapter2)
+  use_display_names?: boolean
+
+  // Per-participant display-name control. When set, these override use_display_names
+  // for the given participant class. Defaults (when unset): bots → display names,
+  // humans → usernames. use_display_names (above) remains the fallback for both.
+  use_display_names_bots?: boolean
+  use_display_names_humans?: boolean
+
+  // Mention format template for LLM context. {name} is replaced with the resolved name.
+  // Default: '<@{name}>' (angle-bracket style). Examples: '@{name}', '{name}', '[{name}]'
+  // Applies to both inline mentions and reply tags. Base models often work better
+  // without angle brackets since <@...> can interfere with tokenization.
+  mention_format?: string
+
+  // Participant stop sequences
+  // When true, auto-generates stop sequences from participant names to prevent
+  // the model from "speaking as" other users. Default: false (allows frags/quotes)
+  participant_stop_sequences?: boolean
+
+  // Provider-specific params (passed through to LLM provider as-is)
+  // e.g., { reasoning: { effort: "none" } } for OpenRouter/grok
+  provider_params?: Record<string, unknown>
+
+  // Streaming control
+  // When false, forces non-streaming LLM calls even when TTS relay is active.
+  // Useful for working around provider streaming bugs (e.g., OpenAI SSE issues).
+  // Default: true (streaming enabled when TTS relay is active)
+  streaming?: boolean
+
+  // TTS relay integration
+  // Connects to a WebSocket relay server to stream visible text chunks
+  // for text-to-speech playback in local clients
+  tts_relay?: TTSRelayConfig
+}
+
+/**
+ * TTS relay configuration for streaming text to local TTS clients
+ */
+export interface TTSRelayConfig {
+  enabled: boolean
+  url: string  // WebSocket URL (e.g., "ws://localhost:8800/bot")
+  token: string  // Authentication token
+  reconnect_interval_ms?: number  // Reconnect delay (default: 5000)
 }
 
 /**
@@ -220,6 +327,28 @@ export interface BotConfig {
 export interface VendorConfig {
   config: Record<string, string>
   provides: string[]  // Model name patterns (regex)
+
+  /**
+   * Formatter type for this vendor:
+   * - 'anthropic-xml': Prefill mode with XML tools (default for Anthropic/Claude)
+   * - 'native': Native API tools (for OpenAI-style APIs)
+   * - 'completions': For base models using /v1/completions
+   */
+  formatter?: 'anthropic-xml' | 'native' | 'completions'
+
+  /**
+   * Completions formatter settings (when formatter='completions')
+   */
+  completions_config?: {
+    /** End-of-turn token (default: '<|eot|>', set to empty to disable) */
+    eot_token?: string
+    /** Name format template (default: '{name}: ') */
+    name_format?: string
+    /** Message separator (default: '\n\n') */
+    message_separator?: string
+    /** Add lowercased stop sequence variants to catch mixed-case simming (default: false) */
+    case_insensitive_stops?: boolean
+  }
 }
 
 // ============================================================================
@@ -238,6 +367,45 @@ export interface PluginInstanceConfig {
   state_scope?: 'global' | 'channel' | 'epic' | 'off'
   /** Any other plugin-specific settings */
   [key: string]: any
+}
+
+// ============================================================================
+// Soma Integration (Credit System)
+// ============================================================================
+
+/**
+ * Soma integration configuration
+ * When enabled, users must have sufficient ichor (credits) to trigger the bot
+ */
+export interface SomaConfig {
+  /** Enable Soma credit checking (default: false) */
+  enabled: boolean
+  /** Soma API base URL (e.g., "http://localhost:3100/api/v1") */
+  url: string
+  /** Optional: Override token from environment (default: uses SOMA_TOKEN env var) */
+  token?: string
+}
+
+/**
+ * Result from Soma check-and-deduct API
+ */
+export interface SomaCheckResult {
+  allowed: boolean
+  cost: number
+  // Success fields
+  balanceAfter?: number
+  transactionId?: string
+  // Failure fields  
+  currentBalance?: number
+  regenRate?: number
+  timeToAfford?: number  // Minutes
+  cheaperAlternatives?: Array<{
+    botId: string
+    name: string
+    cost: number
+  }>
+  // Reason for denial (if allowed=false)
+  reason?: 'insufficient_funds' | 'bot_not_configured'
 }
 
 export interface ToolDefinition {
@@ -265,6 +433,11 @@ export interface ToolCallWithResult {
 export interface ToolResult {
   callId: string
   output: any
+  /** Image content blocks returned from MCP tools (base64 encoded) */
+  images?: Array<{
+    data: string      // base64 encoded image data
+    mimeType: string  // e.g., 'image/png', 'image/jpeg'
+  }>
   error?: string
   timestamp: Date
 }
@@ -306,6 +479,7 @@ export interface DiscordMessage {
     emoji: string
     count: number
   }>
+  authorRoles?: string[]  // Guild role names (populated from member.roles)
   mentions: string[]  // User IDs
   referencedMessage?: string  // Reply to message ID
 }
@@ -335,6 +509,10 @@ export interface DiscordContext {
     parentChannelId?: string
     /** Origin channel ID if .history was used to jump here */
     historyOriginChannelId?: string
+    /** Whether .history clear was used to truncate context */
+    historyDidClear?: boolean
+    /** Whether context was trimmed to the cache anchor (overshoot correction) */
+    cacheAnchorTrimmed?: boolean
   }
 }
 
@@ -368,6 +546,7 @@ export interface Event {
   guildId: string
   data: any
   timestamp: Date
+  receivedAt?: number
 }
 
 export type EventType = 

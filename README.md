@@ -266,6 +266,32 @@ npm run format
 npm test
 ```
 
+## Updating Dependencies
+
+### Membrane (LLM Abstraction Layer)
+
+ChapterX uses [membrane](https://github.com/antra-tess/membrane) as its LLM abstraction layer. Membrane is installed as a git dependency and won't auto-update with regular `npm install`.
+
+**To update membrane to the latest version:**
+
+```bash
+npm update membrane
+```
+
+This will fetch the latest commit from the `main` branch and update your `package-lock.json`.
+
+> **Note:** After updating, you should commit the updated `package-lock.json` to keep your deployment in sync. A future release of membrane will be published to npm for easier version management.
+
+**Check current vs latest version:**
+
+```bash
+# See what you have installed
+npm ls membrane
+
+# See latest on GitHub
+git ls-remote https://github.com/antra-tess/membrane.git refs/heads/main | cut -c1-7
+```
+
 ## Requirements
 
 - Node.js 20+
