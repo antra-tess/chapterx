@@ -142,3 +142,60 @@ describe('somaBotKey', () => {
     expect((loop as any).somaBotKey()).toBe('123456789012345678')
   })
 })
+
+describe('processBatch: an m continue refused on the portal backend', () => {
+  it('stays refused when the relay fails the reaction that marks it', async () => {
+    // The bot doesn't support continuation and its own message is the last one,
+    // so the loop deletes the `m continue` and marks the refusal with a reaction
+    // on the latest message. Here the relay fails that fetch.
+    const tmpCache = mkdtempSync(join(tmpdir(), 'loop-portal-refusal-'))
+    try {
+      const connector = new PortalConnector(new EventQueue(), {
+        url: 'ws://relay.invalid', token: 't', personaId: PERSONA, cacheDir: tmpCache,
+      })
+      const personaMessage = pm({
+        id: 'rm_chan_150', nativeId: '150',
+        author: { kind: 'persona', personaId: PERSONA, displayName: 'p', avatarUrl: '' },
+      })
+      const client = {
+        call: vi.fn(async () => ({ messages: [] })), // list_pins: no pins
+        fetchHistory: vi.fn(async (p: { before?: string }) => {
+          if (p.before === undefined) throw new Error('relay timeout') // reactToLatestMessage's fetch
+          return { messages: [personaMessage] } // getMessageBefore: the persona spoke last
+        }),
+        deleteMessage: vi.fn(async () => undefined),
+        react: vi.fn(async () => undefined),
+        sendMessage: vi.fn(async () => ({ messageId: 'rm_chan_999' })),
+      }
+      ;(connector as any).client = client
+      const loop = Object.create(AgentLoop.prototype)
+      Object.assign(loop, {
+        botId: 'glm52',
+        botUserId: PERSONA,
+        botMessageIds: new Set<string>(),
+        connector,
+        configSystem: {
+          loadConfig: () => ({
+            max_bot_reply_chain_depth: 2,
+            bot_reply_chain_depth_emote: '🔗',
+            reply_on_random: 0,
+            supports_continuation: false,
+          }),
+        },
+        sleepState: { sleepPinsForBot: () => [], isSleeping: () => false, observeMessage: () => undefined },
+      })
+      const ev = event(
+        pm({ id: 'rm_chan_200', nativeId: '200', replyToId: 'rm_chan_150', content: 'm continue', cleanContent: 'm continue' }),
+        true,
+        ['reply'],
+      )
+
+      await (loop as any).processBatch([ev])
+
+      expect(client.deleteMessage).toHaveBeenCalledTimes(1) // the refused command, once
+      expect(client.sendMessage).not.toHaveBeenCalled() // no continuation was sent
+    } finally {
+      rmSync(tmpCache, { recursive: true, force: true })
+    }
+  })
+})
