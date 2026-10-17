@@ -16,18 +16,18 @@ export class EventQueue {
   }
 
   /**
-   * Restore an older batch ahead of events that arrived after it was polled.
+   * Restore events ahead of everything still queued, keeping their order.
    */
   prepend(events: Event[]): void {
-    if (events.length === 0) return
     this.queue.unshift(...events)
   }
 
   /**
    * Poll a batch of events
    * Returns consecutive events for one channel and the same type category.
-   * AgentLoop processes a batch using its first event's channel and guild, so
-   * mixing channels would route every later event through the wrong context.
+   * AgentLoop processes a batch using its first event's channel, so mixing
+   * channels would route every later event through the wrong context. A
+   * channel belongs to one guild, so the channel decides the guild too.
    */
   pollBatch(): Event[] {
     if (this.queue.length === 0) {
@@ -58,7 +58,6 @@ export class EventQueue {
       // Stop if we hit a different event category
       if (
         nextEvent.channelId !== firstEvent.channelId ||
-        nextEvent.guildId !== firstEvent.guildId ||
         this.isDiscordEvent(nextEvent) !== isDiscordEvent
       ) {
         break

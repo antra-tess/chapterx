@@ -28,6 +28,16 @@ describe('EventQueue channel isolation', () => {
     expect(queue.pollBatch()).toEqual([message, reaction])
   })
 
+  it('batches one channel\'s events whatever their guild field holds', () => {
+    const queue = new EventQueue()
+    const first = makeEvent('message', 'channel-a', 'first', 'guild')
+    const second = makeEvent('message', 'channel-a', 'second', '')
+    queue.push(first)
+    queue.push(second)
+
+    expect(queue.pollBatch()).toEqual([first, second])
+  })
+
   it('never combines Discord events from different channels', () => {
     const queue = new EventQueue()
     const first = makeEvent('message', 'channel-a', 'first')
