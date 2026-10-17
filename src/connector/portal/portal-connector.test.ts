@@ -340,6 +340,54 @@ describe('PortalConnector pins', () => {
     expect(h.connector.getCachedPinnedSleeps(CH)).toHaveLength(1)
   })
 
+  it('a channel\'s first load in flight across a resume asks again, and its held events wait for that answer', async () => {
+    // The relay answers an RPC on the socket that asked, and a resume replays
+    // events, not answers, so the request is lost and times out.
+    h = makeHarness()
+    const replies: Array<{ res: (v: unknown) => void; rej: (e: Error) => void }> = []
+    h.client.call.mockImplementation((() => new Promise((res, rej) => replies.push({ res, rej }))) as never)
+    const queued: Array<number | null> = []
+    vi.spyOn((h.connector as any).queue, 'push').mockImplementation(((ev: { channelId: string }) => {
+      queued.push(h.connector.getCachedPinnedSleeps(ev.channelId)?.length ?? null)
+    }) as never)
+    await h.connector.start()
+    h.client.emit('event', { type: 'message_create', message: msg(5, 'human'), addressedToMe: false, reasons: ['subscription'] })
+    h.client.emit('resumed', 0)
+
+    replies[0]!.rej(new Error('RPC list_pins timed out'))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(h.client.call).toHaveBeenCalledTimes(2)
+    expect(queued).toEqual([])
+    replies[1]!.res({ messages: [pinned(40, '.sleep')] })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(queued).toEqual([1])
+  })
+
+  it('a refresh in flight across a resume asks again, so the next event sees the pin it announced', async () => {
+    h = makeHarness()
+    const replies: Array<{ res: (v: unknown) => void; rej: (e: Error) => void }> = []
+    h.client.call.mockImplementation((() => new Promise((res, rej) => replies.push({ res, rej }))) as never)
+    const queued: Array<number | null> = []
+    vi.spyOn((h.connector as any).queue, 'push').mockImplementation(((ev: { channelId: string }) => {
+      queued.push(h.connector.getCachedPinnedSleeps(ev.channelId)?.length ?? null)
+    }) as never)
+    await h.connector.start()
+    h.client.emit('event', { type: 'message_create', message: msg(5, 'human'), addressedToMe: false, reasons: ['subscription'] })
+    replies[0]!.res({ messages: [] })
+    await new Promise((r) => setTimeout(r, 0))
+
+    h.client.emit('event', { type: 'pins_update', channelId: CH }) // a .sleep was just pinned
+    h.client.emit('resumed', 0)
+    h.client.emit('event', { type: 'message_create', message: msg(6, 'human'), addressedToMe: false, reasons: ['subscription'] })
+    replies[1]!.rej(new Error('RPC list_pins timed out'))
+    await new Promise((r) => setTimeout(r, 0))
+    replies[2]!.res({ messages: [pinned(40, '.sleep')] })
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(queued).toEqual([0, 1])
+  })
+
   it('a load in flight across a fresh ready asks again once its request fails', async () => {
     h = makeHarness()
     const replies: Array<{ res: (v: unknown) => void; rej: (e: Error) => void }> = []

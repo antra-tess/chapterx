@@ -152,10 +152,17 @@ export class PortalConnector implements IConnector {
     // pins_update in the gap may be lost: no channel's pins are current any more,
     // and each channel loads them again on its next event or read, rather than
     // all at once. A load in progress asks once more, since its request may have
-    // gone out on the old connection. A resume replays the gap and needs nothing.
+    // gone out on the old connection.
     this.client.on('ready', () => {
       this.pinsCurrent.clear()
       this.pinFailedAt.clear()
+      for (const load of this.pinLoads.values()) load.again = true
+    })
+    // A resume replays the gap's events, so the cached pins stay current, but
+    // not an RPC's answer: the relay answers on the socket that asked (portal-
+    // relay relay.ts handleRpc, gateway.ts Session.send). So a load in progress
+    // asks once more here too.
+    this.client.on('resumed', () => {
       for (const load of this.pinLoads.values()) load.again = true
     })
     this.client.on('close', (info) =>
