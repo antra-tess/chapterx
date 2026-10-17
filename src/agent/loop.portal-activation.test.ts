@@ -74,8 +74,10 @@ function makeLoop(connector: unknown) {
       loadConfig: () => ({ max_bot_reply_chain_depth: 2, bot_reply_chain_depth_emote: '🔗', reply_on_random: 0 }),
     },
     sleepState: { sleepPinsForBot: () => [], isSleeping: () => false, observeMessage: () => undefined },
+    answeredContextNewestId: new Map<string, string>(),
   })
-  return (events: unknown[]) => (loop as any).shouldActivate(events, 'chan', 'guild') as Promise<boolean>
+  // shouldActivate gives the event that decides the batch, or undefined.
+  return async (events: unknown[]) => (await (loop as any).shouldActivate(events, 'chan', 'guild')) !== undefined
 }
 
 describe('shouldActivate for portal events', () => {
@@ -168,9 +170,10 @@ describe('the sleep gate on the portal backend, with the real connector', () => 
         connector,
         configSystem: { loadConfig: () => ({ max_bot_reply_chain_depth: 2, reply_on_random: 0 }) },
         sleepState: new SleepState(connector, () => ({ botId: 'glm52' })),
+        answeredContextNewestId: new Map<string, string>(),
       })
       const debug = vi.spyOn(logger, 'debug').mockImplementation(() => undefined as never)
-      expect(await (loop as any).shouldActivate(queue.pollBatch(), 'chan', 'guild')).toBe(false)
+      expect(await (loop as any).shouldActivate(queue.pollBatch(), 'chan', 'guild')).toBeUndefined()
       expect(debug).toHaveBeenCalledWith(expect.anything(), 'Skipping activation — bot is sleeping')
       debug.mockRestore()
     } finally {
@@ -245,8 +248,9 @@ describe('shouldActivate: the continuation emoji on the portal backend', () => {
       connector: fakeConnector(0),
       configSystem: { loadConfig: () => ({ max_bot_reply_chain_depth: 2, reply_on_random: 0, continuation_emoji: continuation }) },
       sleepState: { sleepPinsForBot: () => [], isSleeping: () => false, observeMessage: () => undefined },
+      answeredContextNewestId: new Map<string, string>(),
     })
-    return (events: unknown[]) => (loop as any).shouldActivate(events, 'chan', 'guild') as Promise<boolean>
+    return async (events: unknown[]) => (await (loop as any).shouldActivate(events, 'chan', 'guild')) !== undefined
   }
   const onPersonaMessage: AdapterCtx = { ...ctx, authorOf: () => PERSONA }
   const reaction = (emoji: string) =>
@@ -307,6 +311,9 @@ describe('processBatch: an m continue refused on the portal backend', () => {
           }),
         },
         sleepState: { sleepPinsForBot: () => [], isSleeping: () => false, observeMessage: () => undefined },
+        answeredContextNewestId: new Map<string, string>(),
+        activeChannels: new Set<string>(),
+        queue: new EventQueue(),
       })
       const ev = event(
         pm({ id: 'rm_chan_200', nativeId: '200', replyToId: 'rm_chan_150', content: 'm continue', cleanContent: 'm continue' }),

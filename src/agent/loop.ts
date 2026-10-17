@@ -111,8 +111,9 @@ export class AgentLoop {
   // would otherwise hold a busy channel's events until restart.
   private pendingChannelEvents = new Map<string, { events: Event[]; dropped: number }>()
   private static readonly MAX_PENDING_CHANNEL_EVENTS = 500
-  // Per channel, the newest message id in the context of an activation whose
-  // model has answered. A message at or before it was in that context, or was
+  // Per channel, the Discord snowflake of the newest message in the context of
+  // an activation whose model has answered (its nativeId on the portal backend,
+  // where the id is the relay's). A message at or before it was in that context, or was
   // left out of it (filtered, cut by .history, or older than its window), so a
   // new activation wouldn't show it either. It can't trigger another
   // activation by mention or random roll, whether it was held during that
@@ -1532,7 +1533,7 @@ export class AgentLoop {
       // A message at or before the newest of a context the model answered
       // (see answeredContextNewestId) is counted for sleep above, and an m
       // command in it runs, but it can't trigger here.
-      if (snowflakeAtOrBefore(message.id, this.answeredContextNewestId.get(channelId))) {
+      if (snowflakeAtOrBefore(message.nativeId ?? message.id, this.answeredContextNewestId.get(channelId))) {
         continue
       }
 
@@ -1692,8 +1693,11 @@ export class AgentLoop {
       })
       endProfile('fetchContext')
       // Once the model has answered this context, messages up to its newest
-      // can't trigger again in this channel (see answeredContextNewestId).
-      const newestFetchedId = discordContext.messages[discordContext.messages.length - 1]?.id
+      // can't trigger again in this channel (see answeredContextNewestId). The
+      // mark is a snowflake: on the portal backend a message's id is the
+      // relay's, and its snowflake is nativeId.
+      const newestFetched = discordContext.messages[discordContext.messages.length - 1]
+      const newestFetchedId = newestFetched?.nativeId ?? newestFetched?.id
 
       // Cache stability: maintain a consistent starting point for prompt caching
       // Note: fetch overshoot trimming is now handled in fetchContext Stage 3.

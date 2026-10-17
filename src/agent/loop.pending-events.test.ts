@@ -386,6 +386,36 @@ describe('AgentLoop active-channel event buffering', () => {
     expect(soma).toEqual([])
   })
 
+  it('on the portal backend, marks and compares by snowflake, since a message\'s id there is the relay\'s', async () => {
+    // Relay ids are rm_<container>_<snowflake>, and each message carries its
+    // snowflake as nativeId. 'rm_channel_99' sorts after 'rm_channel_100' as a
+    // string, and neither is a snowflake.
+    const harness = makeLoop(['allowed'])
+    const { loop, queue, soma, setFetchContext } = harness
+    const portal = (n: number, content: string) => {
+      const event = message('channel', `rm_channel_${n}`, { content, mentionsBot: true })
+      event.data.nativeId = String(n)
+      return event
+    }
+    let openFetch!: () => void
+    const fetchStarted = new Promise<void>((started) => {
+      setFetchContext(() => new Promise((resolve) => {
+        openFetch = () =>
+          resolve({ messages: [{ id: 'rm_channel_98', nativeId: '98' }, { id: 'rm_channel_100', nativeId: '100' }], images: [] })
+        started()
+      }))
+    })
+    await loop.processBatch([timer('channel', 'timer')])
+    await loop.processBatch([portal(99, '<@bot-user> hi')])
+    await loop.processBatch([portal(101, '<@bot-user> again')])
+    await fetchStarted
+    openFetch()
+    await vi.waitFor(() => expect(loop.activeChannels.has('channel')).toBe(false))
+    await loop.processBatch(queue.pollBatch())
+
+    expect(soma.slice(1)).toEqual([{ channelId: 'channel', reason: 'mention', triggeringMessageId: 'rm_channel_101' }])
+  })
+
   it('still runs an m command an answered context already had', async () => {
     const { loop, soma, deleted } = makeLoop()
     loop.recordAnsweredContext('channel', '100')

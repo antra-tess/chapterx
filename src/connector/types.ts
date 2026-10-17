@@ -73,6 +73,9 @@ export interface FetchContextParams {
  */
 export interface InboundMessage {
   id: string
+  /** The Discord snowflake, when `id` isn't one: on the portal backend `id` is
+   *  the relay's message id. Absent on the Discord backend. */
+  nativeId?: string
   channelId: string
   guildId: string
   content: string

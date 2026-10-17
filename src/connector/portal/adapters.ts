@@ -59,6 +59,7 @@ export function inboundFromPortal(
   const users = new Map<string, unknown>(pm.mentions.users.map((id) => [id, { id }]))
   return {
     id: pm.id,
+    nativeId: pm.nativeId,
     channelId: containerOf(pm),
     guildId: pm.guildId ?? '',
     content: pm.content,
