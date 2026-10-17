@@ -637,7 +637,7 @@ export interface StreamOptions {
   /** Called when tool calls are detected */
   onToolCalls?: (
     calls: Array<{ id: string; name: string; input: Record<string, unknown> }>,
-    context: { depth: number; accumulated: string }
+    context: { depth: number; preamble?: string; accumulated: string }
   ) => Promise<Array<{ toolUseId: string; content: string; isError?: boolean }>>;
 
   /** Called with pre-tool content before executing tools */
@@ -665,4 +665,3 @@ export interface StreamOptions {
    */
   formatterOverride?: 'native' | 'anthropic-xml' | 'completions';
 }
-

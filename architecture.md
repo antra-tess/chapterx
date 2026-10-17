@@ -166,14 +166,16 @@ class DiscordConnector {
 
 **Responsibilities**:
 - Buffer events from Discord Connector
-- Provide batching interface (return all Discord events until a non-Discord event)
+- Provide batching interface (consecutive events of one channel and one category, Discord or internal)
+- Restore events held during a channel's activation ahead of everything queued
 - Thread-safe push/poll operations
 
 **Interface**:
 ```typescript
 class EventQueue {
   push(event: Event): void  // Thread-safe
-  pollBatch(): Event[]      // Returns all consecutive Discord events
+  prepend(events: Event[]): void  // Restores held events ahead of everything queued
+  pollBatch(): Event[]      // Consecutive events of one channel and one category
   isEmpty(): boolean
 }
 
@@ -320,39 +322,40 @@ class ConfigSystem {
 }
 
 interface BotConfig {
-  innerName: string  // Name used in LLM context
+  name: string  // Name used in LLM context
   
   // Model config
-  mode: 'prefill' | 'chat'
-  continuationModel: string
+  mode?: 'prefill' | 'chat' | 'base-model'
+  continuation_model: string
   temperature: number
-  maxTokens: number
-  topP: number
+  max_tokens: number
+  top_p?: number
   
   // Context config
-  recencyWindow: number  // Max messages or chars
-  rollingThreshold: number  // Messages before truncation
+  recency_window_messages?: number  // Max messages
+  recency_window_characters?: number  // Max characters
+  rolling_threshold: number  // Messages before truncation
   
   // Image config
-  includeImages: boolean
-  maxImages: number
+  include_images: boolean
+  max_images: number
   
   // Tool config
-  toolsEnabled: boolean
-  toolOutputVisible: boolean
-  maxToolDepth: number
+  tools_enabled: boolean
+  tool_output_visible: boolean
+  max_tool_depth: number
   
   // Stop sequences
-  stopSequences: string[]
+  stop_sequences: string[]
   
   // Retries
-  llmRetries: number
-  discordBackoffMax: number
+  llm_retries: number
+  discord_backoff_max: number  // nothing reads this
   
   // Misc
-  replyOnRandom: number
-  replyOnName: boolean
-  maxQueuedReplies: number
+  reply_on_random: number
+  reply_on_name: boolean  // nothing reads this
+  max_queued_replies: number  // nothing reads this
 }
 ```
 
@@ -1162,22 +1165,21 @@ See `config_examples.md` for detailed configuration examples.
 name: Claude  # Name used in LLM context
 
 mode: prefill
-continuationModel: claude-3-5-sonnet-20241022
+continuation_model: claude-3-5-sonnet-20241022
 temperature: 1.0
-maxTokens: 4096
+max_tokens: 4096
 
-recencyWindow: 400
-rollingThreshold: 50
+recency_window_messages: 400
+rolling_threshold: 50
 
-includeImages: true
-maxImages: 5
+include_images: true
+max_images: 5
 
-toolsEnabled: true
-toolOutputVisible: false
-maxToolDepth: 100
+tools_enabled: true
+tool_output_visible: false
+max_tool_depth: 100
 
-llmRetries: 3
-discordBackoffMax: 32000
+llm_retries: 3
 ```
 
 ### Vendor Config
@@ -1192,7 +1194,7 @@ vendors:
       - "claude-3-5-sonnet-20241022"
       - "claude-3-opus-20240229"
   
-  aws-bedrock:
+  bedrock:
     config:
       aws_access_key: "AKIA..."
       aws_secret_key: "..."
@@ -1211,7 +1213,7 @@ vendors:
 
 ### Discord Retries
 - Exponential backoff: 1s, 2s, 4s, 8s, ..., max
-- Configurable max backoff (default 32s)
+- Max backoff 32s, fixed in `src/main.ts`
 - Apply to all Discord API calls
 - Log rate limit hits
 
