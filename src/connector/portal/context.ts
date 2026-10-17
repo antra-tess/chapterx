@@ -122,10 +122,12 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
 
   // ── Stage 2: thread-parent assembly ──
   if (meta?.isThread && !historyDidClear && meta.parentId) {
-    // A thread's id is its starter message's snowflake. For a thread started
-    // from a message, the starter is in the parent channel; a forum post's
-    // starter is the thread's own first message, so the starter fetch from the
-    // parent below finds nothing, and the thread's history already has it.
+    // A thread started from a message has that message's snowflake as its id,
+    // and the starter is in the parent channel. A forum post's first message
+    // has the thread's id but is in the thread, and any other thread's id names
+    // no message, so for those the starter fetch from the parent below finds
+    // nothing. A forum post's first message is in the window only when the
+    // thread is no longer than the window, as on the Discord backend.
     const starterSnowflake = meta.native
     const parentResult = await fetchPortalHistory(
       meta.parentId,
@@ -171,11 +173,11 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
     }
 
     if (firstIndex < 0 && oldest && anchor) {
-      // In a thread started from a message, once stage 2 has put parent
-      // messages in the window, the oldest is the starter or older, and both
-      // live in the parent channel. In a forum post the oldest that can be is the
-      // starter, the thread's first message, so nothing is older in either place
-      // and the parent's page comes back empty.
+      // In a thread, once stage 2 has put parent messages in the window, the
+      // oldest is at or before the thread's id and is in the parent channel,
+      // where the extension pages. A forum post's first message has the
+      // thread's id too, but nothing is older than it in either place, so the
+      // parent's page comes back empty.
       const oldestInParent =
         meta?.isThread && meta.parentId && meta.native && !snowflakeLT(meta.native, oldest.nativeId)
       const extendChannel = oldestInParent ? meta.parentId! : channelId
