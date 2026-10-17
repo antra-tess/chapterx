@@ -65,8 +65,15 @@ describe('resolveConnectorSettings: the portal backend', () => {
   const portal = (over: Partial<ConnectorInputs> = {}) =>
     resolveConnectorSettings(inputs({ ...over, env: { CONNECTOR_BACKEND: 'portal', PORTAL_URL: 'wss://relay', ...over.env } }))
 
-  it('needs the relay URL', () => {
-    expect(() => resolveConnectorSettings(inputs({ env: { CONNECTOR_BACKEND: 'portal' } }))).toThrow(/needs the relay URL/)
+  it('needs the relay URL, and says where it can be set', () => {
+    expect(() => resolveConnectorSettings(inputs({ env: { CONNECTOR_BACKEND: 'portal' } }))).toThrow(
+      "The portal backend needs the relay URL: set PORTAL_URL, or portal_url in the bot's config file, which is read when BOT_NAME is set",
+    )
+  })
+
+  it('takes a number in the bot config as the string it was written as', () => {
+    // An invite code of digits, unquoted in YAML, reads as a number.
+    expect(portal({ botConfig: { portal_invite: 123456 } })).toMatchObject({ credentials: { invite: '123456' } })
   })
 
   it('takes a persona\'s credentials from PORTAL_PERSONA and PORTAL_TOKEN together', () => {
@@ -84,7 +91,8 @@ describe('resolveConnectorSettings: the portal backend', () => {
   })
 
   it('saves credentials in the bot\'s EMS directory in the EMS layout', () => {
-    const s = portal({ emsPath: '/srv/ems', configPath: '/srv/ems' })
+    // main() sets configPath to EMS_PATH in that layout; different here, to show which one is read.
+    const s = portal({ emsPath: '/srv/ems', configPath: '/srv/elsewhere' })
     expect(s).toMatchObject({ credentials: { from: 'file', credsPath: '/srv/ems/glm52/portal-creds.json' } })
   })
 
@@ -138,6 +146,30 @@ describe('portalCredentials', () => {
     expect(await portalCredentials('wss://relay', { from: 'file', credsPath, invite: 'inv' })).toEqual({ personaId: 'saved', token: 'saved-token' })
     expect(loadOrEnrollCreds).not.toHaveBeenCalled()
     expect(info).toHaveBeenCalledWith(expect.objectContaining({ personaId: 'saved' }), 'Loaded the saved portal persona credentials')
+  })
+
+  it('names the file when the saved credentials can\'t be read', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'bootstrap-test-'))
+    const credsPath = join(dir, 'portal-creds.json')
+    writeFileSync(credsPath, '{ "personaId": "p1", "tok')
+
+    await expect(portalCredentials('wss://relay', { from: 'file', credsPath, invite: 'inv', desiredName: 'glm52' })).rejects.toThrow(
+      `The saved portal credentials at ${credsPath} can't be read`,
+    )
+    expect(loadOrEnrollCreds).not.toHaveBeenCalled()
+  })
+
+  it('names what enrolling a new persona is missing', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'bootstrap-test-'))
+    const credsPath = join(dir, 'portal-creds.json')
+
+    await expect(portalCredentials('wss://relay', { from: 'file', credsPath, invite: 'inv' })).rejects.toThrow(
+      `No saved portal credentials at ${credsPath}, and enrolling a new persona needs a name (PORTAL_DESIRED_NAME, portal_desired_name or BOT_NAME)`,
+    )
+    await expect(portalCredentials('wss://relay', { from: 'file', credsPath })).rejects.toThrow(
+      'needs an invite (PORTAL_INVITE or portal_invite) and a name (PORTAL_DESIRED_NAME, portal_desired_name or BOT_NAME)',
+    )
+    expect(loadOrEnrollCreds).not.toHaveBeenCalled()
   })
 
   it('enrolls a new persona when none are saved, and says so', async () => {

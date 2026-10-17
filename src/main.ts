@@ -3,7 +3,7 @@
  * Main entry point
  */
 
-import { readFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { EventQueue } from './agent/event-queue.js'
 import { AgentLoop } from './agent/loop.js'
@@ -65,6 +65,12 @@ async function main() {
     // The connector: the bot's own discord.js gateway (the default), or the
     // portal relay. Its settings come from the bot's config file, with env vars
     // overriding (connector/bootstrap.ts lists them).
+    if (botNameOverride && !existsSync(configSystem.botConfigPath(botNameOverride))) {
+      logger.warn(
+        { botName: botNameOverride, path: configSystem.botConfigPath(botNameOverride) },
+        "No config file for BOT_NAME at this path, so the connector's settings come from the environment alone",
+      )
+    }
     const connectorSettings = resolveConnectorSettings({
       env: process.env,
       botConfig: botNameOverride ? configSystem.loadBotConfig(botNameOverride) : {},

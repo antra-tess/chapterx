@@ -62,10 +62,13 @@ function setting(
   if (fromEnv) return { value: fromEnv, from: envName }
   const fromConfig = inputs.botConfig[key]
   if (fromConfig === undefined || fromConfig === null || fromConfig === '') return undefined
+  const from = `${key} in the bot config`
+  // YAML reads an unquoted invite code of digits as a number: take it as written.
+  if (typeof fromConfig === 'number') return { value: String(fromConfig), from }
   if (typeof fromConfig !== 'string') {
     throw new Error(`${key} in the bot config must be a string, and it's ${JSON.stringify(fromConfig)}`)
   }
-  return { value: fromConfig, from: `${key} in the bot config` }
+  return { value: fromConfig, from }
 }
 
 /**
@@ -92,7 +95,9 @@ export function resolveConnectorSettings(inputs: ConnectorInputs): ConnectorSett
   if (backend?.value !== 'portal') return { backend: 'discord', backendFrom }
 
   const url = setting(inputs, 'PORTAL_URL', 'portal_url')
-  if (!url) throw new Error('The portal backend needs the relay URL: set portal_url in the bot config, or PORTAL_URL')
+  if (!url) {
+    throw new Error("The portal backend needs the relay URL: set PORTAL_URL, or portal_url in the bot's config file, which is read when BOT_NAME is set")
+  }
 
   const personaId = inputs.env.PORTAL_PERSONA
   const token = inputs.env.PORTAL_TOKEN
@@ -128,10 +133,24 @@ export function resolveConnectorSettings(inputs: ConnectorInputs): ConnectorSett
 export async function portalCredentials(url: string, source: PortalCredentialsSource): Promise<{ personaId: string; token: string }> {
   if (source.from === 'env') return { personaId: source.personaId, token: source.token }
 
-  const saved = await fileCredsStore(source.credsPath).load()
+  let saved: { personaId: string; token: string } | null
+  try {
+    saved = await fileCredsStore(source.credsPath).load()
+  } catch (err) {
+    throw new Error(
+      `The saved portal credentials at ${source.credsPath} can't be read (${(err as Error).message}). Fix the file, or remove it to enroll a new persona.`,
+    )
+  }
   if (saved) {
     logger.info({ credsPath: source.credsPath, personaId: saved.personaId }, 'Loaded the saved portal persona credentials')
     return saved
+  }
+  const missing = [
+    !source.invite && 'an invite (PORTAL_INVITE or portal_invite)',
+    !source.desiredName && 'a name (PORTAL_DESIRED_NAME, portal_desired_name or BOT_NAME)',
+  ].filter((s): s is string => !!s)
+  if (missing.length > 0) {
+    throw new Error(`No saved portal credentials at ${source.credsPath}, and enrolling a new persona needs ${missing.join(' and ')}`)
   }
   const creds = await loadOrEnrollCreds({
     url,
