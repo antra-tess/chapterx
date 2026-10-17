@@ -50,8 +50,8 @@ export function authorOfMessage(pm: PortalMessage): {
  * `event.data`. `mentions.has(botPersonaId)` is true when the persona's role is
  * mentioned or when the relay addresses the message to this persona (its
  * `addressedToMe`, set for a reply to one of the persona's messages too). A
- * webhook persona can't receive a native reply-ping, and the relay can't tell a
- * reply with the ping on from one with it off, so the loop treats every reply to
+ * webhook persona can't receive a native reply-ping, and the relay's `reply`
+ * reason doesn't say whether the ping was on, so the loop treats every reply to
  * the persona as an account bot's reply with the ping on: a mention. `address`
  * keeps the relay's per-recipient reasons for the loop's trigger reason.
  */

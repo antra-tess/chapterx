@@ -143,8 +143,8 @@ export async function buildPortalContext(params: FetchContextParams, deps: Conte
     const oldest = messages[0]
 
     // Temporal sanity: skip extension if the anchor is far older than the window.
-    // An anchor whose snowflake isn't known (a relay id from before this process
-    // started) can't be dated, so it isn't extended to either.
+    // An anchor whose snowflake isn't known (one the connector no longer
+    // remembers) can't be dated, so it isn't extended to either.
     if (firstIndex < 0 && oldest) {
       if (anchorSnow === undefined) {
         logger.debug({ anchor }, 'portal: cache anchor not in the window and not known, so not extending')
