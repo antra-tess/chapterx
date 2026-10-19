@@ -1411,19 +1411,28 @@ describe('codeRanges', () => {
     expect(codeIn('a `x` b ``c ` @J`` d ```\nk\n``` e')).toEqual(['`x`', '``c ` @J``', '```\nk\n```'])
   })
 
-  it('runs a block nothing closes to the end of the text, and leaves a lone backtick as text', () => {
-    expect(codeIn('a ` b ```\nc')).toEqual(['```\nc'])
+  it('runs a block or span nothing closes to the end of the text, where the splitter closes it', () => {
+    expect(codeIn('a ` b ```\nc')).toEqual(['` b ```\nc'])
+    expect(codeIn('a\n```\nc')).toEqual(['```\nc'])
+    // The splitter's last chunk closes the span it leaves open.
+    const { chunks } = splitPreservingMarkdown('a ` b', 1800)
+    expect(chunks.map((c) => c.text)).toEqual(['a ` b`'])
   })
 
-  it('opens nothing at a backtick escaped with a backslash, as the splitter reads it', () => {
-    expect(codeIn('a \\`b` c')).toEqual([])
-    expect(codeIn('a \\``` b')).toEqual([])
+  it('opens nothing at a backtick escaped with a backslash, and lets a run after it open a span, as the splitter reads it', () => {
+    expect(codeIn('a \\`b` c')).toEqual(['` c'])
+    expect(codeIn('a \\``` b')).toEqual(['`` b'])
     // An escaped backslash leaves the backtick after it unescaped.
     expect(codeIn('a \\\\`b` c')).toEqual(['`b`'])
   })
 
-  it('reads text that begins inside a carried block or span after its reopener', () => {
+  it('reads text that begins inside a carried block or span as code up to its closer, and fresh text after it', () => {
     expect(codeIn('k\n```\nThanks', [{ kind: 'fence', opener: '```py', closer: '```' }])).toEqual(['k\n```'])
     expect(codeIn('x` y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`'])
+    expect(codeIn('x` y `z` w', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`', '`z`'])
+  })
+
+  it('ends a block that opens a line only at a line holding just its marker, as the splitter reads it', () => {
+    expect(codeIn('```\nk\n``` then j\n```\nm')).toEqual(['```\nk\n``` then j\n```'])
   })
 })

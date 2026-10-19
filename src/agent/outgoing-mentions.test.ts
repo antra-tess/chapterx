@@ -69,11 +69,18 @@ describe('mentionsToIds', () => {
 
   it('leaves code spans and code blocks as written', () => {
     expect(mentionsToIds('`@Jack` and `<@jack_h4ndle>`', [jack], byDisplayName)).toBe('`@Jack` and `<@jack_h4ndle>`')
-    expect(mentionsToIds('```\n@Jack\n``` then @Jack', [jack], byDisplayName)).toBe('```\n@Jack\n``` then <@111>')
+    expect(mentionsToIds('```\n@Jack\n```\nthen @Jack', [jack], byDisplayName)).toBe('```\n@Jack\n```\nthen <@111>')
   })
 
-  it('reads a backtick escaped with a backslash as text, as the splitter does', () => {
-    expect(mentionsToIds('\\`a @Jack` @Jack', [jack], byDisplayName)).toBe('\\`a <@111>` <@111>')
+  it('reads code as the splitter does: a span nothing closes runs to the end, and a block that opens a line ends at a line holding just its marker', () => {
+    // The splitter closes the span at the end of the message, so Discord shows it as code.
+    expect(mentionsToIds('Example: `x @Jack', [jack], byDisplayName)).toBe('Example: `x @Jack')
+    // Discord ends this block at the ``` mid-line; the splitter doesn't, so the mention after it pings no one.
+    expect(mentionsToIds('```\n@Jack\n``` then @Jack', [jack], byDisplayName)).toBe('```\n@Jack\n``` then @Jack')
+  })
+
+  it('reads a backtick escaped with a backslash as text, and a run after it as a span, as the splitter does', () => {
+    expect(mentionsToIds('\\`a @Jack` @Jack', [jack], byDisplayName)).toBe('\\`a <@111>` @Jack')
     // An escaped backslash leaves the backtick after it to open a span.
     expect(mentionsToIds('\\\\`a @Jack` @Jack', [jack], byDisplayName)).toBe('\\\\`a @Jack` <@111>')
   })

@@ -32,12 +32,11 @@
  *   connector's lookup, as before.
  * - A mention by id: `<@` and the 17 to 20 digits of a Discord id, even when
  *   someone in the conversation is shown by that number.
- * - Code blocks and inline code, where Discord shows a mention raw
- *   (`codeRanges`, discord-markdown.ts): a block runs from ``` to the next
- *   ```, or to the end of the text if nothing closes it, and an inline span
- *   ends at the next run of as many backticks as opened it. Text that begins
- *   inside a block or span carried open from an earlier message (`carry`) is
- *   code up to its closer.
+ * - Code blocks and inline code, where Discord shows a mention raw, read as
+ *   the markdown splitter reads them (`codeRanges`, discord-markdown.ts): a
+ *   block or span nothing closes runs to the end of the text, where the
+ *   splitter closes it, and text that begins inside a block or span carried
+ *   open from an earlier message (`carry`) is code up to its closer.
  * - `@everyone` and `@here`.
  * - Reply tags: `<reply:@Name>`, and the context's `(replying to @Name)`. A
  *   `<@Name>` in one, as a `<@{name}>` template writes it, is read like any
