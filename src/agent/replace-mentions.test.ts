@@ -4,8 +4,9 @@
  * leaving out the bot's own, and passes the bot's config on, config.name
  * included.
  *
- * The loop is built with stand-ins for everything it holds, since
- * replaceMentions uses none of them.
+ * The loop is built with stand-ins for everything it holds. replaceMentions
+ * uses only the connector's getBotUsername, to join the bot's messages as the
+ * context does.
  *
  * Run with: npx vitest run replace-mentions
  */
@@ -73,12 +74,16 @@ describe('AgentLoop.replaceMentions', () => {
     expect(await replaceMentions()('<@Jack>', [jack, asJack], {})).toBe('@Jack')
   })
 
-  it("holds an override's name only from a message that shows something past its ~Name:", async () => {
+  it("holds an override's name from a message the context drops for showing nothing past it, as it holds an author's", async () => {
     const jack = message('111', 'jack_h4ndle', 'Jack')
     const bare = message('222', 'sam_h4ndle', 'Sam', { content: '~Jack:' })
-    expect(await replaceMentions()('@Jack', [jack, bare], { use_display_names_humans: true })).toBe('<@111>')
-    const withImage = message('222', 'sam_h4ndle', 'Sam', { content: '~Jack:', attachments: [{ id: 'a1' }] })
-    expect(await replaceMentions()('@Jack', [jack, withImage], { use_display_names_humans: true })).toBe('@Jack')
+    expect(await replaceMentions()('@Jack', [jack, bare], { use_display_names_humans: true })).toBe('@Jack')
+  })
+
+  it('holds an override the context shows with ignore_dotted_messages off, a reaction that would hide it included', async () => {
+    const jack = message('111', 'jack_h4ndle', 'Jack')
+    const hidden = message('222', 'sam_h4ndle', 'Sam', { content: '~Jack: I am the other Jack', reactions: [{ emoji: '🫥' }] })
+    expect(await replaceMentions()('@Jack', [jack, hidden], { use_display_names_humans: true, ignore_dotted_messages: false })).toBe('@Jack')
   })
 
   it('holds an override after a reply tag or mentions, and not one the context hides', async () => {
@@ -107,6 +112,33 @@ describe('AgentLoop.replaceMentions', () => {
     expect(await replaceMentions('999', 'sam_bot')('@Jack', [jack, asJack], humans)).toBe('@Jack')
     // The join leaves the messages themselves as they were.
     expect(first.attachments).toEqual([])
+  })
+
+  it("joins the bot's messages before it hides any, as the context does", async () => {
+    const jack = message('111', 'jack_h4ndle', 'Jack')
+    const bot = { id: '999', username: 'sam_bot', displayName: 'sam_bot', bot: true }
+    const hiddenFirst = { author: bot, content: 'Here is the scene.', attachments: [], reactions: [{ emoji: '🫥' }] }
+    const asJack = { author: bot, content: '~Jack: I am the other Jack', attachments: [] }
+    // Joined to the hidden message before it, the override is hidden with it.
+    expect(await replaceMentions('999', 'sam_bot')('@Jack', [jack, hiddenFirst, asJack], { use_display_names_humans: true })).toBe('<@111>')
+  })
+
+  it("keeps the bot's messages apart when preserve_thinking_context does, as the context does", async () => {
+    const jack = message('111', 'jack_h4ndle', 'Jack')
+    const bot = { id: '999', username: 'sam_bot', displayName: 'sam_bot', bot: true }
+    const first = { author: bot, content: 'Here is the scene.', attachments: [] }
+    const asJack = { author: bot, content: '~Jack: I am the other Jack', attachments: [] }
+    const config = { use_display_names_humans: true, preserve_thinking_context: true }
+    expect(await replaceMentions('999', 'sam_bot')('@Jack', [jack, first, asJack], config)).toBe('@Jack')
+  })
+
+  it("joins the bot's messages by config.name while the connector has no username for it", async () => {
+    const jack = message('111', 'jack_h4ndle', 'Jack')
+    const bot = { id: '999', username: 'sam_bot', displayName: 'sam_bot', bot: true }
+    const first = { author: bot, content: 'Here is the scene.', attachments: [] }
+    const asJack = { author: bot, content: '~Jack: I am the other Jack', attachments: [] }
+    const config = { use_display_names_humans: true, name: 'sam_bot' }
+    expect(await replaceMentions('999')('@Jack', [jack, first, asJack], config)).toBe('<@111>')
   })
 
   it("keeps another bot's messages, so its <@Name> goes to its id", async () => {

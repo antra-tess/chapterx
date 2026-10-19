@@ -1086,10 +1086,11 @@ export class AgentLoop {
     const authors = shown
       .filter((msg) => msg.author && msg.author.id !== this.botUserId && msg.author.id !== SYSTEM_PLACEHOLDER_ID)
       .map((msg) => ({ ...msg.author, webhook: Boolean(msg.webhookId) }))
-    // Overrides are read from the messages as the context builder shows
-    // them, the bot's consecutive messages joined first, and only from a
-    // message that shows something past its `~Name:`. The join runs on copies,
-    // since it adds the joined messages' attachments to the first one's.
+    // Overrides are read from the messages as the context builder reads
+    // them, the bot's consecutive messages joined first. An override's name
+    // counts as an author's does, even where the context then drops its
+    // message for having no content or for its limits. The join runs on
+    // copies, since it adds the joined messages' attachments to the first one's.
     const botName = this.connector.getBotUsername() || config.name
     const merged = config.preserve_thinking_context
       ? messages
@@ -1098,10 +1099,8 @@ export class AgentLoop {
           botName,
         )
     for (const msg of filterDotMessages(merged, steerVisible, ignoreDotted)) {
-      const { name, text: rest } = characterOverride(typeof msg.content === 'string' ? msg.content : '')
-      if (name && (rest.trim() || msg.attachments?.length)) {
-        authors.push({ id: '', username: name, displayName: name, bot: false, webhook: true })
-      }
+      const { name } = characterOverride(typeof msg.content === 'string' ? msg.content : '')
+      if (name) authors.push({ id: '', username: name, displayName: name, bot: false, webhook: true })
     }
     return mentionsToIds(text, authors, config, carry)
   }
