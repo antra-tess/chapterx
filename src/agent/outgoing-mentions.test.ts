@@ -72,11 +72,29 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('```\n@Jack\n```\nthen @Jack', [jack], byDisplayName)).toBe('```\n@Jack\n```\nthen <@111>')
   })
 
-  it('reads code as the splitter does: a span nothing closes runs to the end, and a block that opens a line ends at a line holding just its marker', () => {
+  it("reads as code what the splitter or Discord reads as code: a span nothing closes, and a ``` mid-line in a block", () => {
     // The splitter closes the span at the end of the message, so Discord shows it as code.
     expect(mentionsToIds('Example: `x @Jack', [jack], byDisplayName)).toBe('Example: `x @Jack')
-    // Discord ends this block at the ``` mid-line; the splitter doesn't, so the mention after it pings no one.
+    // Discord ends this block at the ``` mid-line, the splitter at its closer line.
     expect(mentionsToIds('```\n@Jack\n``` then @Jack', [jack], byDisplayName)).toBe('```\n@Jack\n``` then @Jack')
+    // Discord pairs the next two ``` as a second block, where the splitter reads prose.
+    const twoBlocks = '```\ncode ``` text\n```\nmore @Jack ```\nafter @Jack'
+    expect(mentionsToIds(twoBlocks, [jack], byDisplayName)).toBe(twoBlocks)
+  })
+
+  it('reads text that begins inside a carried span as the splitter sends it, its reopener fused with a backtick the text starts with', () => {
+    const span = [{ kind: 'inlineCode' as const, opener: '`', closer: '`' }]
+    expect(mentionsToIds('`x @Jack ``y', [jack], byDisplayName, span)).toBe('`x @Jack ``y')
+  })
+
+  it('leaves a mention any part of which is code as written, as a backtick template writes one', () => {
+    expect(mentionsToIds('hi `Jack`', [jack], { use_display_names_humans: true, mention_format: '`{name}`' })).toBe('hi `Jack`')
+  })
+
+  it('leaves a name ending in a backslash as written, since it escapes the character after it', () => {
+    const slash: MentionAuthor = { id: '333', username: 'slash_h4ndle', displayName: 'Jack\\', bot: false }
+    const text = '@Jack\\` then `<@222222222222222222>`'
+    expect(mentionsToIds(text, [slash], byDisplayName)).toBe(text)
   })
 
   it('reads a backtick escaped with a backslash as text, and a run after it as a span, as the splitter does', () => {

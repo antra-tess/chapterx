@@ -32,11 +32,13 @@
  *   connector's lookup, as before.
  * - A mention by id: `<@` and the 17 to 20 digits of a Discord id, even when
  *   someone in the conversation is shown by that number.
- * - Code blocks and inline code, where Discord shows a mention raw, read as
- *   the markdown splitter reads them (`codeRanges`, discord-markdown.ts): a
- *   block or span nothing closes runs to the end of the text, where the
- *   splitter closes it, and text that begins inside a block or span carried
- *   open from an earlier message (`carry`) is code up to its closer.
+ * - Code blocks and inline code, where Discord shows a mention raw, and a
+ *   mention any part of which is code (`codeRanges`, discord-markdown.ts):
+ *   what the markdown splitter's parse reads as code, the text read as the
+ *   splitter sends it after the reopener of a block or span carried open from
+ *   an earlier message (`carry`), and every ``` block as Discord pairs them.
+ * - A name ending in a backslash, in the `@Name` form: the backslash escapes
+ *   the character after it, which replacing the name would unescape.
  * - `@everyone` and `@here`.
  * - Reply tags: `<reply:@Name>`, and the context's `(replying to @Name)`. A
  *   `<@Name>` in one, as a `<@{name}>` template writes it, is read like any
@@ -166,7 +168,8 @@ export function mentionsToIds(
   return text.replace(new RegExp(forms.join('|'), 'giu'), (match: string, ...rest: unknown[]) => {
     const groups = rest[rest.length - 1] as Record<string, string | undefined>
     const offset = rest[rest.length - 3] as number
-    if (code.some(([start, end]) => offset >= start && offset < end)) return match
+    // A mention any part of which is code is left as written.
+    if (code.some(([start, end]) => offset < end && offset + match.length > start)) return match
     if (groups.bracketed !== undefined) {
       if (DISCORD_ID.test(groups.bracketed)) return match
       const key = groups.bracketed.toLowerCase()
@@ -175,6 +178,9 @@ export function mentionsToIds(
       const holder = names.get(key)
       return holder ? `<@${holder.id}>` : `@${groups.bracketed}`
     }
+    // A name ending in a backslash escapes the character after it, which
+    // replacing the name would unescape.
+    if (groups.shown?.endsWith('\\')) return match
     const holder = otherNames.get((groups.shown ?? '').toLowerCase())
     return holder && !holder.bot ? `${groups.lead ?? ''}<@${holder.id}>` : match
   })

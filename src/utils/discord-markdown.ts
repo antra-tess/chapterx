@@ -532,27 +532,47 @@ export function scanMarkdown(text: string, start: MarkdownCarry = []): MarkdownC
   return parse(text, start).endStack
 }
 
+/** A code block as Discord reads one: each ``` opens a block that the next
+ *  ``` ends, anywhere in a line, or that runs to the end of the text if
+ *  nothing ends it. A ``` after an odd run of backslashes is escaped and
+ *  opens nothing. */
+const DISCORD_BLOCK = /(?<=(?:^|[^\\])(?:\\\\)*)```[\s\S]*?(?:```|$)/g
+
 /**
  * Where `text` is code, where Discord shows a mention raw, as `[start, end)`
- * ranges, for reading the mentions a message sends. They are the code blocks
- * and inline spans of the splitter's own parse, so the mention reader and the
- * splitter agree on where code is. A block or span nothing closes runs to the
- * end of the text, where the splitter closes it. A backtick escaped with a
- * backslash opens nothing, and a run after it can. Text that begins inside a
- * block or span carried open from an earlier message (`start`, as
- * `scanMarkdown` reports it) is code up to its closer. A block that opens a
- * line ends only at a line holding just its marker, as the splitter reads it,
- * so a ``` later in a line leaves it open where Discord ends it, and a
- * mention after that ``` pings no one.
+ * ranges in order, for reading the mentions a message sends. The text is read
+ * as the splitter sends it, after the reopener of a block or span carried open
+ * from an earlier message (`start`, as `scanMarkdown` reports it), which a
+ * backtick the text starts with can fuse with. It is code wherever the
+ * splitter's own parse reads a block or span, and wherever Discord reads a ```
+ * block, which a ``` later in a line ends where the splitter's line rules
+ * don't. Reading as code what either reads as code changes no text Discord
+ * might show as code, and where the two differ, a mention pings no one. So does
+ * a mention in a `~~~` block, which the splitter reads as code and Discord
+ * doesn't, and in a span the splitter leaves unclosed because its closer would
+ * fuse with a backtick run the text ends with.
  */
 export function codeRanges(text: string, start: MarkdownCarry = []): Array<[number, number]> {
+  const reopener = reopenMarks(exclusiveOnly(start))
+  const sent = reopener + text
   const ranges: Array<[number, number]> = []
-  for (const construct of parse(text, exclusiveOnly(start)).constructs) {
-    if (construct.kind === 'fence' || construct.kind === 'inlineCode') {
-      ranges.push([Math.max(construct.openStart, 0), construct.closeEnd])
-    }
+  const add = (from: number, to: number): void => {
+    const range: [number, number] = [Math.max(from - reopener.length, 0), to - reopener.length]
+    if (range[1] > range[0]) ranges.push(range)
   }
-  return ranges
+  for (const construct of parse(sent).constructs) {
+    if (construct.kind === 'fence' || construct.kind === 'inlineCode') add(Math.max(construct.openStart, 0), construct.closeEnd)
+  }
+  for (const block of sent.matchAll(DISCORD_BLOCK)) add(block.index, block.index + block[0].length)
+  // In order, and joined where they meet or overlap.
+  ranges.sort((a, b) => a[0] - b[0])
+  const joined: Array<[number, number]> = []
+  for (const range of ranges) {
+    const last = joined[joined.length - 1]
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1])
+    else joined.push([...range])
+  }
+  return joined
 }
 
 // ---------------------------------------------------------------------------

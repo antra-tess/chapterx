@@ -1426,13 +1426,18 @@ describe('codeRanges', () => {
     expect(codeIn('a \\\\`b` c')).toEqual(['`b`'])
   })
 
-  it('reads text that begins inside a carried block or span as code up to its closer, and fresh text after it', () => {
+  it('reads text that begins inside a carried block or span as the splitter sends it, after its reopener', () => {
     expect(codeIn('k\n```\nThanks', [{ kind: 'fence', opener: '```py', closer: '```' }])).toEqual(['k\n```'])
     expect(codeIn('x` y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`'])
     expect(codeIn('x` y `z` w', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`', '`z`'])
+    // The reopener fuses with a backtick the text starts with: the splitter sends ``x @J ``.
+    expect(codeIn('`x @J ``y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['`x @J ``'])
+    const { chunks } = splitPreservingMarkdown('`x @J ``y', 1800, [{ kind: 'inlineCode', opener: '`', closer: '`' }])
+    expect(chunks[0]!.text.startsWith('``x @J ``')).toBe(true)
   })
 
-  it('ends a block that opens a line only at a line holding just its marker, as the splitter reads it', () => {
-    expect(codeIn('```\nk\n``` then j\n```\nm')).toEqual(['```\nk\n``` then j\n```'])
+  it("reads as code both a block that opens a line, up to a line holding just its marker, and each ``` block as Discord pairs them", () => {
+    // The splitter ends the block at its closer line, and Discord at the ``` mid-line, then opens another at the next.
+    expect(codeIn('```\nk\n``` then j\n```\nm')).toEqual(['```\nk\n``` then j\n```\nm'])
   })
 })

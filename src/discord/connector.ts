@@ -1052,7 +1052,7 @@ export class DiscordConnector {
     const mentionPattern = /<@([^>0-9<\n][^><\n]*)>/g
     const code = codeRanges(content, startCarry)
     const matches = [...content.matchAll(mentionPattern)].filter(
-      (match) => !code.some(([start, end]) => match.index >= start && match.index < end),
+      (match) => !code.some(([start, end]) => match.index < end && match.index + match[0].length > start),
     )
     
     if (matches.length === 0) {

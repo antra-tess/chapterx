@@ -167,4 +167,18 @@ describe('DiscordConnector.sendSegmentChunks with its mention lookup', () => {
     await h.connector.sendSegmentChunks(CH, 'ask <@<@jack_h4ndle>', undefined, [])
     expect(h.sent).toEqual(['ask <@<@123>'])
   })
+
+  it('leaves a mention any part of which is code as written', async () => {
+    const ticked = { user: { id: '124', username: 'tick_h4ndle', bot: false }, displayName: '`Jack`', joinedAt: new Date(0) }
+    ;(h.channel as any).guild = { id: 'guild-1', members: { fetch: async () => new Collection([['124', ticked]]) } }
+    await h.connector.sendSegmentChunks(CH, 'ask <@`Jack`>', undefined, [])
+    expect(h.sent).toEqual(['ask <@`Jack`>'])
+  })
+
+  it('reads a segment that begins inside a carried span as it is sent, its reopener fused with a backtick it starts with', async () => {
+    const span = [{ kind: 'inlineCode' as const, opener: '`', closer: '`' }]
+    await h.connector.sendSegmentChunks(CH, '`x <@jack_h4ndle> ``y', undefined, span)
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0]).toContain('``x <@jack_h4ndle> ``')
+  })
 })
