@@ -6,6 +6,7 @@ import { AgentLoop } from './loop.js'
 import { EventQueue } from './event-queue.js'
 import { logger } from '../utils/logger.js'
 import { scanMarkdown } from '../utils/discord-markdown.js'
+import { ToolSystem } from '../tools/system.js'
 
 /**
  * With `scanCarry`, each send ends in the markdown carry its text leaves open
@@ -26,7 +27,7 @@ function makeLoop(toolOutput: { value: unknown } = { value: 'tool result' }, opt
   const toolSystem = {
     executeTool: vi.fn(async () => ({ output: toolOutput.value })),
     persistToolUse: vi.fn(async () => {}),
-    stripToolXml: (text: string) => text,
+    stripToolXml: (text: string) => ToolSystem.prototype.stripToolXml.call(undefined, text),
   }
   const loop = new AgentLoop(
     'test-bot',
@@ -285,7 +286,9 @@ describe('AgentLoop native-tool sending', () => {
     cleanup = harness.cleanup
     const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
 
-    await harness.run(async () => done('    ```\ncode\n``` x\n@Alice'), discordMessages, { use_display_names_humans: true })
+    // The thinking block keeps the indentation past the trim that strips tool XML;
+    // the segment's own trim takes it off.
+    await harness.run(async () => done('<thinking>plan</thinking>\n    ```\ncode\n``` x\n@Alice'), discordMessages, { use_display_names_humans: true })
 
     // Sent without its indentation, the block opens a line and nothing ends it, so @Alice is in it.
     expect(harness.sent()).toEqual(['```\ncode\n``` x\n@Alice'])
@@ -431,5 +434,28 @@ describe('AgentLoop inline-tool sending', () => {
 
     expect(harness.sent()).toEqual(['Thanks, <@111>.'])
     expect(result.completion.content).toEqual([{ type: 'text', text: 'Thanks, @Alice.' }])
+  })
+
+  it('strips the reply tag before it reads mentions, so a mention the reply starts with is read as it is sent', async () => {
+    const harness = makeLoop()
+    cleanup = harness.cleanup
+    const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
+
+    await (harness.loop as any).finalizeInlineExecution({
+      accumulatedOutput: '<reply:@sam>@Alice thanks',
+      pendingToolPersistence: [],
+      allToolCallIds: [],
+      allSentMessageIds: [],
+      messageContexts: {},
+      lastContextEndPos: 0,
+      channelId: 'channel-1',
+      triggeringMessageId: 'trigger-1',
+      config: { name: 'TestBot', use_display_names_humans: true },
+      llmRequest: { stop_sequences: [] },
+      discordMessages,
+      markdownCarry: [],
+    })
+
+    expect(harness.sent()).toEqual(['<@111> thanks'])
   })
 })
