@@ -1430,10 +1430,23 @@ describe('codeRanges', () => {
     expect(codeIn('k\n```\nThanks', [{ kind: 'fence', opener: '```py', closer: '```' }])).toEqual(['k\n```'])
     expect(codeIn('x` y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`'])
     expect(codeIn('x` y `z` w', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`', '`z`'])
-    // The reopener fuses with a backtick the text starts with: the splitter sends ``x @J ``.
-    expect(codeIn('`x @J ``y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['`x @J ``'])
+    // The reopener fuses with a backtick the text starts with: the splitter sends ``x @J ``,
+    // and its own parse, with the span open, reads the "``" before "y" as an opener.
+    expect(codeIn('`x @J ``y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['`x @J ``y'])
     const { chunks } = splitPreservingMarkdown('`x @J ``y', 1800, [{ kind: 'inlineCode', opener: '`', closer: '`' }])
     expect(chunks[0]!.text.startsWith('``x @J ``')).toBe(true)
+  })
+
+  it('reads as code what the splitter reopens in a later message, the text read with the carried span open', () => {
+    const span: MarkdownCarry = [{ kind: 'inlineCode', opener: '`', closer: '`' }]
+    const text = '`x ``' + 'a'.repeat(1800) + ' @J'
+    expect(codeIn(text, span)).toEqual([text])
+    const { chunks } = splitPreservingMarkdown(text, 1800, span)
+    expect(chunks[1]!.text.startsWith('``a')).toBe(true)
+  })
+
+  it('reads a ``` after an even run of backslashes as Discord does, opening a block', () => {
+    expect(codeIn('~~~\n\\\\```\n~~~\n@J')).toEqual(['~~~\n\\\\```\n~~~\n@J'])
   })
 
   it("reads as code both a block that opens a line, up to a line holding just its marker, and each ``` block as Discord pairs them", () => {

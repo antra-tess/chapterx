@@ -540,15 +540,21 @@ const DISCORD_BLOCK = /(?<=(?:^|[^\\])(?:\\\\)*)```[\s\S]*?(?:```|$)/g
 
 /**
  * Where `text` is code, where Discord shows a mention raw, as `[start, end)`
- * ranges in order, for reading the mentions a message sends. The text is read
- * as the splitter sends it, after the reopener of a block or span carried open
- * from an earlier message (`start`, as `scanMarkdown` reports it), which a
- * backtick the text starts with can fuse with. It is code wherever the
- * splitter's own parse reads a block or span, and wherever Discord reads a ```
- * block, which a ``` later in a line ends where the splitter's line rules
- * don't. Reading as code what either reads as code changes no text Discord
- * might show as code, and where the two differ, a mention pings no one. So does
- * a mention in a `~~~` block, which the splitter reads as code and Discord
+ * ranges in order, each position of code in one range, for reading the
+ * mentions a message sends. It is code wherever any of three readings finds a
+ * code block or span:
+ * - the splitter's own parse of the text, with any block or span carried open
+ *   from an earlier message (`start`, as `scanMarkdown` reports it) open at its
+ *   start. The splitter cuts the text by this reading and reopens in each
+ *   later message what it reads as open there;
+ * - the same parse of the text as its first message sends it, after the
+ *   carried construct's reopener, which a backtick the text starts with can
+ *   fuse with;
+ * - Discord's pairing of ``` blocks, which a ``` later in a line ends where the
+ *   splitter's line rules don't.
+ * Reading as code what any of them reads as code changes no text Discord
+ * might show as code, and where they differ, a mention pings no one. So does a
+ * mention in a `~~~` block, which the splitter reads as code and Discord
  * doesn't, and in a span the splitter leaves unclosed because its closer would
  * fuse with a backtick run the text ends with.
  */
@@ -557,13 +563,20 @@ export function codeRanges(text: string, start: MarkdownCarry = []): Array<[numb
   const sent = reopener + text
   const ranges: Array<[number, number]> = []
   const add = (from: number, to: number): void => {
-    const range: [number, number] = [Math.max(from - reopener.length, 0), to - reopener.length]
+    const range: [number, number] = [Math.max(from, 0), to]
     if (range[1] > range[0]) ranges.push(range)
   }
-  for (const construct of parse(sent).constructs) {
-    if (construct.kind === 'fence' || construct.kind === 'inlineCode') add(Math.max(construct.openStart, 0), construct.closeEnd)
+  for (const construct of parse(text, exclusiveOnly(start)).constructs) {
+    if (construct.kind === 'fence' || construct.kind === 'inlineCode') add(construct.openStart, construct.closeEnd)
   }
-  for (const block of sent.matchAll(DISCORD_BLOCK)) add(block.index, block.index + block[0].length)
+  for (const construct of parse(sent).constructs) {
+    if (construct.kind === 'fence' || construct.kind === 'inlineCode') {
+      add(construct.openStart - reopener.length, construct.closeEnd - reopener.length)
+    }
+  }
+  for (const block of sent.matchAll(DISCORD_BLOCK)) {
+    add(block.index - reopener.length, block.index + block[0].length - reopener.length)
+  }
   // In order, and joined where they meet or overlap.
   ranges.sort((a, b) => a[0] - b[0])
   const joined: Array<[number, number]> = []

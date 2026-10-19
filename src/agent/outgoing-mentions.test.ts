@@ -91,6 +91,12 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('hi `Jack`', [jack], { use_display_names_humans: true, mention_format: '`{name}`' })).toBe('hi `Jack`')
   })
 
+  it('reads as code what the splitter reopens in a later message, the text read with the carried span open', () => {
+    const span = [{ kind: 'inlineCode' as const, opener: '`', closer: '`' }]
+    const text = '`x ``' + 'a'.repeat(1800) + ' @Jack'
+    expect(mentionsToIds(text, [jack], byDisplayName, span)).toBe(text)
+  })
+
   it('leaves a name ending in a backslash as written, since it escapes the character after it', () => {
     const slash: MentionAuthor = { id: '333', username: 'slash_h4ndle', displayName: 'Jack\\', bot: false }
     const text = '@Jack\\` then `<@222222222222222222>`'
