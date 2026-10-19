@@ -18,6 +18,20 @@ import { rewriteMentionsForDisplayNames, applyMentionFormat, stripReplyTags } fr
 import { logger } from '../../utils/logger.js'
 
 /**
+ * A character override, `~Name: rest`, after any reply tag or mentions the
+ * message starts with: the name the message appears as sent by, and its text
+ * without the `~Name:` token, its lead-in kept. With no override, the name is
+ * empty and the text is the content as it is.
+ */
+export function characterOverride(content: string): { name: string; text: string } {
+  const leadIn = content.match(/^(?:<reply:@[^>]+>\s*)?(?:<@[^>]+>\s*)*/)?.[0] ?? ''
+  const afterLeadIn = content.slice(leadIn.length)
+  const match = afterLeadIn.match(/^~([^:\n]+):\s?/)
+  const name = match ? match[1]!.trim() : ''
+  return { name, text: name ? leadIn + afterLeadIn.slice(match![0].length) : content }
+}
+
+/**
  * Convert Discord messages to participant-based LLM format.
  *
  * This is the core transformation: raw Discord messages become structured
@@ -187,13 +201,7 @@ export async function formatMessages(
     // not be the literal first character. Skip any such lead-in before looking
     // for `~Name:`; the lead-in is preserved and only the `~Name:` token is
     // removed (matching how filterDotMessages handles dotted commands).
-    const leadIn = msg.content.match(/^(?:<reply:@[^>]+>\s*)?(?:<@[^>]+>\s*)*/)?.[0] ?? ''
-    const afterLeadIn = msg.content.slice(leadIn.length)
-    const characterMatch = afterLeadIn.match(/^~([^:\n]+):\s?/)
-    const overrideParticipant = characterMatch ? characterMatch[1]!.trim() : ''
-    const messageText = overrideParticipant
-      ? leadIn + afterLeadIn.slice(characterMatch![0].length)
-      : msg.content
+    const { name: overrideParticipant, text: messageText } = characterOverride(msg.content)
 
     // Add text content
     if (messageText.trim()) {

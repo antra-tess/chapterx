@@ -19,6 +19,7 @@ import { mentionsToIds } from './outgoing-mentions.js'
 import { sleep } from '../utils/retry.js'
 import { exclusiveOnly, scanMarkdown, type MarkdownCarry } from '../utils/discord-markdown.js'
 import { filterDotMessages } from '../context/stages/message-filtering.js'
+import { characterOverride } from '../context/stages/format-messages.js'
 import { 
   withTrace, 
   TraceCollector, 
@@ -1073,13 +1074,20 @@ export class AgentLoop {
     // placeholder for a message without an author isn't anyone, so it's
     // left out too. Authors of messages the context drops for having no
     // content, or for its limits, still count: their names can appear in
-    // text the context shows, and a name they share pings no one. `carry` is
-    // the code block or span the text begins inside, carried open from an
-    // earlier send.
+    // text the context shows, and a name they share pings no one. A
+    // character override's name (`~Name:`) is shown as a message's author
+    // too, and is no one to ping, so it's held as a webhook persona's name
+    // is, and a person shown by the same name shares it. `carry` is the code
+    // block or span the text begins inside, carried open from an earlier
+    // send.
     const shown = filterDotMessages(messages, config.steer_visible === true, config.ignore_dotted_messages !== false)
     const authors = shown
       .filter((msg) => msg.author && msg.author.id !== this.botUserId && msg.author.id !== SYSTEM_PLACEHOLDER_ID)
       .map((msg) => ({ ...msg.author, webhook: Boolean(msg.webhookId) }))
+    for (const msg of shown) {
+      const { name } = characterOverride(typeof msg.content === 'string' ? msg.content : '')
+      if (name) authors.push({ id: '', username: name, displayName: name, bot: false, webhook: true })
+    }
     return mentionsToIds(text, authors, config, carry)
   }
 

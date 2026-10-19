@@ -61,6 +61,16 @@ describe('AgentLoop.replaceMentions', () => {
     expect(await replaceMentions()('@Sam', messages, { use_display_names_humans: true })).toBe('@Sam')
   })
 
+  it("holds a character override's name, so a person shown by the same name pings no one", async () => {
+    const jack = message('111', 'jack_h4ndle', 'Jack')
+    const sam = message('222', 'sam_h4ndle', 'Sam')
+    const asJack = message('222', 'sam_h4ndle', 'Sam', { content: '~Jack: I am the other Jack' })
+    expect(await replaceMentions()('@Jack', [jack, asJack], { use_display_names_humans: true })).toBe('@Jack')
+    expect(await replaceMentions()('@Jack', [jack, sam], { use_display_names_humans: true })).toBe('<@111>')
+    // Its <@Name> form stays out of the connector's lookup, which could find the real Jack.
+    expect(await replaceMentions()('<@Jack>', [jack, asJack], {})).toBe('@Jack')
+  })
+
   it("keeps another bot's messages, so its <@Name> goes to its id", async () => {
     const self = { id: '999', username: 'sam_bot', displayName: 'Sam', bot: true }
     const helper = { id: '333', username: 'helperbot', displayName: 'Helper', bot: true }
