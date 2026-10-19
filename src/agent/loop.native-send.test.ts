@@ -280,6 +280,17 @@ describe('AgentLoop native-tool sending', () => {
     ])
   })
 
+  it("reads the reply's mentions as each segment is sent, with its leading indentation gone", async () => {
+    const harness = makeLoop(undefined, { scanCarry: true })
+    cleanup = harness.cleanup
+    const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
+
+    await harness.run(async () => done('    ```\ncode\n``` x\n@Alice'), discordMessages, { use_display_names_humans: true })
+
+    // Sent without its indentation, the block opens a line and nothing ends it, so @Alice is in it.
+    expect(harness.sent()).toEqual(['```\ncode\n``` x\n@Alice'])
+  })
+
   it('finds the posted prose behind a whitespace-only round that membrane never flushed', async () => {
     const harness = makeLoop()
     cleanup = harness.cleanup

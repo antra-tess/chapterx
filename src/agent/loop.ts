@@ -3052,18 +3052,17 @@ export class AgentLoop {
         }
       }
 
-      // Mentions become <@USER_ID> in the text sent now, read from the
-      // markdown carry it is sent in. The response the completion returns
-      // keeps the model's words: the image branch stores it for later
-      // contexts, and an id is nothing the model wrote.
-      if (discordMessages) {
-        remainingDisplayText = await this.replaceMentions(remainingDisplayText, discordMessages, config, markdownCarry)
-      }
-
       // Send remaining text to Discord (text not already sent via onPreToolContent)
       if (remainingDisplayText.trim()) {
         const segments = this.parseIntoSegments(remainingDisplayText)
         if (segments.length > 0) {
+          // Mentions become <@USER_ID> in each segment as it is sent, read
+          // from the markdown carry it starts in. The response the completion
+          // returns keeps the model's words: the image branch stores it for
+          // later contexts, and an id is nothing the model wrote.
+          if (discordMessages) {
+            await this.replaceMentionsInSegments(segments, discordMessages, config, markdownCarry)
+          }
           const sendResult = await this.sendSegments(
             channelId,
             segments,
@@ -3658,8 +3657,8 @@ export class AgentLoop {
   
   /**
    * Finalize inline tool execution - truncate, persist, send remaining text, and build result.
-   * This ensures the trace holds what was actually sent to Discord, truncated
-   * as it was sent, with mentions as the model wrote them.
+   * The trace holds the response as it was sent, truncated where it was, in
+   * the model's words: its mentions and any reply tag as the model wrote them.
    */
   private async finalizeInlineExecution(params: {
     accumulatedOutput: string;
@@ -3725,12 +3724,7 @@ export class AgentLoop {
     const suffixText = suffix ? `\n${suffix}` : ''
     let segments = this.parseIntoSegments(truncatedRemaining + suffixText)
     
-    // 5. Replace <@username> with <@USER_ID> for Discord mentions in segments
-    if (discordMessages) {
-      await this.replaceMentionsInSegments(segments, discordMessages, config, markdownCarry)
-    }
-    
-    // 6. Strip <reply:@username> prefix from first segment if present
+    // 5. Strip <reply:@username> prefix from first segment if present
     const replyPattern = /^\s*<reply:@[^>]+>\s*/
     if (segments.length > 0 && replyPattern.test(segments[0]!.visible)) {
       segments[0]!.visible = segments[0]!.visible.replace(replyPattern, '').trim()
@@ -3742,6 +3736,12 @@ export class AgentLoop {
         }
         segments.shift()
       }
+    }
+
+    // 6. Replace <@username> with <@USER_ID> for Discord mentions in the
+    // segments as they are sent, the reply tag gone
+    if (discordMessages) {
+      await this.replaceMentionsInSegments(segments, discordMessages, config, markdownCarry)
     }
     
     // 7. Extract thinking content and post debug messages BEFORE the visible response

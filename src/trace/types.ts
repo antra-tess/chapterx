@@ -338,7 +338,9 @@ export interface OutcomeInfo {
   /** Did we successfully send a response? */
   success: boolean
   
-  /** The response text we sent (or tried to send) */
+  /** The response text we sent (or tried to send), in the model's words:
+   *  its mentions as the model wrote them, where Discord received
+   *  <@USER_ID>, and a reply tag the model wrote kept. */
   responseText: string
   responseLength: number
   
