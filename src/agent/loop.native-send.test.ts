@@ -249,10 +249,11 @@ describe('AgentLoop native-tool sending', () => {
     // The next context shows the cache as written, so it keeps the model's
     // words, not the id that was sent.
     expect(harness.persisted()).toEqual([{ text: 'Asking @Alice.', covers: ['sent-1'] }])
-    expect(result.completion.content).toEqual([{ type: 'text', text: 'Asking <@111>. Thanks, <@111>.' }])
+    // The response the completion returns keeps the model's words too.
+    expect(result.completion.content).toEqual([{ type: 'text', text: 'Asking @Alice. Thanks, @Alice.' }])
   })
 
-  it("reads the reply's mentions from the code block its round left open, and the record's from the response's start", async () => {
+  it("reads the reply's mentions from the code block its round left open", async () => {
     const harness = makeLoop(undefined, { scanCarry: true })
     cleanup = harness.cleanup
     const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
@@ -275,7 +276,7 @@ describe('AgentLoop native-tool sending', () => {
     // The round's post leaves the code block open, so the reply starts in it.
     expect(harness.sent()).toEqual(['Run this:\n```\nping <@alice>', 'more <@alice>\n```\nDone, <@111>.'])
     expect(result.completion.content).toEqual([
-      { type: 'text', text: 'Run this:\n```\nping <@alice>\nmore <@alice>\n```\nDone, <@111>.' },
+      { type: 'text', text: 'Run this:\n```\nping <@alice>\nmore <@alice>\n```\nDone, <@alice>.' },
     ])
   })
 
@@ -386,5 +387,38 @@ describe('AgentLoop native-tool sending', () => {
 
     expect(filter({ preserve_thinking_context: false }).map((m: any) => m.id)).toEqual(['trigger', 'final'])
     expect(filter({ preserve_thinking_context: true }).map((m: any) => m.id)).toEqual(['trigger', 'preamble', 'final'])
+  })
+})
+
+describe('AgentLoop inline-tool sending', () => {
+  let cleanup: (() => void) | undefined
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    cleanup?.()
+  })
+
+  it("pings a mention in the text it sends, and returns the response in the model's words", async () => {
+    const harness = makeLoop()
+    cleanup = harness.cleanup
+    const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
+
+    const result = await (harness.loop as any).finalizeInlineExecution({
+      accumulatedOutput: 'Thanks, @Alice.',
+      pendingToolPersistence: [],
+      allToolCallIds: [],
+      allSentMessageIds: [],
+      messageContexts: {},
+      lastContextEndPos: 0,
+      channelId: 'channel-1',
+      triggeringMessageId: 'trigger-1',
+      config: { name: 'TestBot', use_display_names_humans: true },
+      llmRequest: { stop_sequences: [] },
+      discordMessages,
+      markdownCarry: [],
+    })
+
+    expect(harness.sent()).toEqual(['Thanks, <@111>.'])
+    expect(result.completion.content).toEqual([{ type: 'text', text: 'Thanks, @Alice.' }])
   })
 })

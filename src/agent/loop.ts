@@ -3037,11 +3037,11 @@ export class AgentLoop {
         }
       }
 
-      // Replace mentions: in the text sent now, from the markdown carry it is
-      // sent in, and in the whole response the completion records, from its
-      // start
+      // Mentions become <@USER_ID> in the text sent now, read from the
+      // markdown carry it is sent in. The response the completion returns
+      // keeps the model's words: the image branch stores it for later
+      // contexts, and an id is nothing the model wrote.
       if (discordMessages) {
-        displayText = await this.replaceMentions(displayText, discordMessages, config)
         remainingDisplayText = await this.replaceMentions(remainingDisplayText, discordMessages, config, markdownCarry)
       }
 
@@ -3643,7 +3643,8 @@ export class AgentLoop {
   
   /**
    * Finalize inline tool execution - truncate, persist, send remaining text, and build result.
-   * This ensures trace always matches what was actually sent to Discord.
+   * This ensures the trace holds what was actually sent to Discord, truncated
+   * as it was sent, with mentions as the model wrote them.
    */
   private async finalizeInlineExecution(params: {
     accumulatedOutput: string;
@@ -3784,11 +3785,10 @@ export class AgentLoop {
       }
     }
     
-    // 10. Calculate full display text for trace
-    let displayText = stripped
-    if (discordMessages) {
-      displayText = await this.replaceMentions(displayText, discordMessages, config)
-    }
+    // 10. Full display text for the trace, in the model's words: only the
+    // text sent to Discord takes <@USER_ID>, and the image branch stores this
+    // for later contexts.
+    const displayText = stripped
     
     // 11. Build final completion text for trace
     const fullCompletionText = accumulatedOutput + suffixText
