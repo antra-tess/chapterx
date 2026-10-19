@@ -97,6 +97,16 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds(text, [jack], byDisplayName, span)).toBe(text)
   })
 
+  it("keeps the '>' of a <@Name\\> held by no one, so its backslash escapes what it escaped", () => {
+    const slash: MentionAuthor = { id: 'w1', username: 'Slash\\', displayName: 'Slash\\', bot: false, webhook: true }
+    expect(mentionsToIds('<@Slash\\>`<@jack_h4ndle>`', [slash, jack], byDisplayName)).toBe('@Slash\\>`<@jack_h4ndle>`')
+  })
+
+  it('reads a name ending in a backslash in a form that goes on past the name, where replacing it unescapes nothing', () => {
+    const slash: MentionAuthor = { id: '333', username: 'slash_h4ndle', displayName: 'Jack\\', bot: false }
+    expect(mentionsToIds('hello [Jack\\]!', [slash], { use_display_names_humans: true, mention_format: '[{name}]' })).toBe('hello <@333>!')
+  })
+
   it('leaves a name ending in a backslash as written, since it escapes the character after it', () => {
     const slash: MentionAuthor = { id: '333', username: 'slash_h4ndle', displayName: 'Jack\\', bot: false }
     const text = '@Jack\\` then `<@222222222222222222>`'

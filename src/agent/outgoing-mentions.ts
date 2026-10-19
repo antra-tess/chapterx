@@ -37,8 +37,10 @@
  *   what the markdown splitter's parse reads as code, the text read as the
  *   splitter sends it after the reopener of a block or span carried open from
  *   an earlier message (`carry`), and every ``` block as Discord pairs them.
- * - A name ending in a backslash, in the `@Name` form: the backslash escapes
- *   the character after it, which replacing the name would unescape.
+ * - A name ending in a backslash, in a form that ends at the name, such as
+ *   `@Name`: the backslash escapes the character after the mention, which
+ *   replacing the name would unescape. Left as plain text, a `<@Name\>` held
+ *   by no one keeps its `>`, so the backslash escapes what it escaped.
  * - `@everyone` and `@here`.
  * - Reply tags: `<reply:@Name>`, and the context's `(replying to @Name)`. A
  *   `<@Name>` in one, as a `<@{name}>` template writes it, is read like any
@@ -176,11 +178,14 @@ export function mentionsToIds(
       const names = [bracketedNames, otherNames, usernames].find((n) => n.has(key))
       if (!names) return match
       const holder = names.get(key)
-      return holder ? `<@${holder.id}>` : `@${groups.bracketed}`
+      if (holder) return `<@${holder.id}>`
+      // Held by no one, it's left as plain text. A name ending in a backslash
+      // keeps the `>` it escapes, so what follows reads as it did.
+      return `@${groups.bracketed}${groups.bracketed.endsWith('\\') ? '>' : ''}`
     }
-    // A name ending in a backslash escapes the character after it, which
-    // replacing the name would unescape.
-    if (groups.shown?.endsWith('\\')) return match
+    // In a form that ends at the name, a name ending in a backslash escapes
+    // the character after the mention, which replacing the name would unescape.
+    if (!suffix && groups.shown?.endsWith('\\')) return match
     const holder = otherNames.get((groups.shown ?? '').toLowerCase())
     return holder && !holder.bot ? `${groups.lead ?? ''}<@${holder.id}>` : match
   })
