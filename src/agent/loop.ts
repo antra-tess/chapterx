@@ -9,7 +9,9 @@ import { ChannelStateManager } from './state-manager.js'
 import { DiscordConnector, SYSTEM_PLACEHOLDER_ID, type PinnedSteer } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
+import { collectCoveredToolMessageIds } from '../context/stages/tool-interleave.js'
 import { ToolSystem } from '../tools/system.js'
+import { toolOutputText } from '../tools/output-text.js'
 import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult, VendorConfig } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
 import { displayNameClasses } from '../discord/member-names.js'
@@ -71,12 +73,53 @@ function refusalCategory(completion: { raw?: unknown }): string | undefined {
   return raw?.stop_details?.category ?? undefined
 }
 
+/**
+ * Where `completion` continues past `posted`, matching the two while skipping
+ * whitespace in both: the index just after the character that matches
+ * posted's last non-whitespace one, so whitespace that follows it stays with
+ * what comes next. Undefined when `completion` doesn't start with `posted`.
+ */
+function endOfPostedPrefix(completion: string, posted: string): number | undefined {
+  let at = 0
+  for (const char of posted) {
+    if (/\s/.test(char)) continue
+    while (at < completion.length && /\s/.test(completion[at]!)) at++
+    if (!completion.startsWith(char, at)) return undefined
+    at += char.length
+  }
+  return at
+}
+
+/**
+ * Whether Discord message id `id` is at or before `newest`. Snowflakes are
+ * decimal strings that grow with time, so a shorter one is older and ids of
+ * one length compare as strings. Anything that isn't a snowflake is never
+ * at or before, and nothing is at or before no id.
+ */
+function snowflakeAtOrBefore(id: unknown, newest: string | undefined): boolean {
+  if (typeof id !== 'string' || newest === undefined || !/^\d+$/.test(id) || !/^\d+$/.test(newest)) return false
+  return id.length < newest.length || (id.length === newest.length && id <= newest)
+}
+
 export class AgentLoop {
   private running = false
   private botUserId?: string
   private botMessageIds = new Set<string>()  // Track bot's own message IDs
   private mcpInitialized = false
   private activeChannels = new Set<string>()  // Track channels currently being processed
+  // Events polled while their channel's activation runs, kept in arrival order
+  // and put back at the front of the queue when it ends. Bounded per channel,
+  // keeping the newest: nothing gives an activation a deadline, so a hung one
+  // would otherwise hold a busy channel's events until restart.
+  private pendingChannelEvents = new Map<string, { events: Event[]; dropped: number }>()
+  private static readonly MAX_PENDING_CHANNEL_EVENTS = 500
+  // Per channel, the newest message id in the context of an activation whose
+  // model has answered. A message at or before it was in that context, or was
+  // left out of it (filtered, cut by .history, or older than its window), so a
+  // new activation wouldn't show it either. It can't trigger another
+  // activation by mention or random roll, whether it was held during that
+  // activation or is polled later.
+  private answeredContextNewestId = new Map<string, string>()
   private activationStore: ActivationStore
   private cacheDir: string
   private somaClient?: SomaClient  // Optional Soma credit system client
@@ -497,14 +540,38 @@ export class AgentLoop {
     const firstEvent = events[0]
     if (!firstEvent) return
 
+    const { channelId, guildId } = firstEvent
+
+    // The run loop keeps polling while activations run asynchronously. An
+    // event for an active channel is held before any of this method's effects
+    // and replayed when the activation ends, so each effect (a deleted bot
+    // message's tool-cache removal, sleep counting, the random roll, an m
+    // command's deletion) happens once, at its replay.
+    if (this.activeChannels.has(channelId)) {
+      this.deferChannelEvents(channelId, events)
+      return
+    }
+
     // Profile: time from Discord event receipt to batch processing
     const eventReceivedAt = (firstEvent as any).receivedAt
     if (eventReceivedAt) {
       logger.debug({ eventAgeMs: batchStart - eventReceivedAt }, 'Event age (discord.js + queue poll)')
     }
     
+    // A batch is decided by its first deciding event and consumed through it.
+    // The events after it go back to the front of the queue to be decided on
+    // their own, so a trigger behind a command isn't lost, and each event's
+    // effects still happen once.
+    const shouldActivateStart = Date.now()
+    const decidingEvent = await this.shouldActivate(events, channelId, guildId)
+    logger.debug({ durationMs: Date.now() - shouldActivateStart }, 'shouldActivate completed')
+    const consumed = decidingEvent ? events.slice(0, events.indexOf(decidingEvent) + 1) : events
+    if (consumed.length < events.length) {
+      this.queue.prepend(events.slice(consumed.length))
+    }
+
     // Handle delete events - remove tool cache entries for deleted bot messages
-    for (const event of events) {
+    for (const event of consumed) {
       if (event.type === 'delete') {
         const message = event.data as any
         // Check if this is one of our bot messages
@@ -518,22 +585,23 @@ export class AgentLoop {
       }
     }
 
-    // Check if activation is needed
-    const shouldActivateStart = Date.now()
-    if (!await this.shouldActivate(events, firstEvent.channelId, firstEvent.guildId)) {
+    if (!decidingEvent) {
       logger.debug('No activation needed')
       return
     }
-    logger.debug({ durationMs: Date.now() - shouldActivateStart }, 'shouldActivate completed')
 
-    const { channelId, guildId } = firstEvent
-
-    // Get triggering message ID for tool tracking (prefer non-system messages)
-    const triggeringEvent = this.findTriggeringMessageEvent(events)
+    // The trigger is the message that decided. For a reaction or a timer it's
+    // the first message from someone other than this bot among the events
+    // consumed, a non-system one if there is one.
+    const triggeringEvent = decidingEvent.type === 'message'
+      ? decidingEvent
+      : this.findTriggeringMessageEvent(consumed)
     const triggeringMessageId = triggeringEvent?.data?.id
 
     // Check for m command
-    const mCommandEvent = events.find((e) => e.type === 'message' && (e.data as any)._isMCommand)
+    const mCommandEvent = decidingEvent.type === 'message' && (decidingEvent.data as any)._isMCommand
+      ? decidingEvent
+      : undefined
     if (mCommandEvent) {
       const message = mCommandEvent.data as any
       const mContent = (message.content?.trim() || '') as string
@@ -601,7 +669,9 @@ export class AgentLoop {
     }
 
     // Check for reaction-triggered continuation (same flow as m-command but no message to delete)
-    const reactionEvent = events.find((e) => e.type === 'reaction' && (e.data as any)._isReactionContinue)
+    const reactionEvent = decidingEvent.type === 'reaction' && (decidingEvent.data as any)._isReactionContinue
+      ? decidingEvent
+      : undefined
     if (reactionEvent) {
       const reaction = reactionEvent.data as any
 
@@ -632,20 +702,15 @@ export class AgentLoop {
       logger.debug({ channelId }, 'Cancelled pending deferred activation due to new activity')
     }
 
-    // Check if this channel is already being processed
-    if (this.activeChannels.has(channelId)) {
-      logger.debug({ channelId }, 'Channel already being processed, skipping')
-      return
-    }
-
     // Mark channel as active and process asynchronously (don't await)
     this.activeChannels.add(channelId)
     
-    // Determine activation reason for tracing
-    const activationReason = this.determineActivationReason(events)
+    // Determine activation reason for tracing: the deciding event is the last
+    // one consumed, so it sets the reason.
+    const activationReason = this.determineActivationReason(consumed)
 
     // Extract deferred retry state if this is a retry activation
-    const deferredEvent = events.find((e) => (e.data as any)?.type === 'deferred_retry')
+    const deferredEvent = consumed.find((e) => (e.data as any)?.type === 'deferred_retry')
     const deferredRetryState = deferredEvent
       ? { retryAttempt: (deferredEvent.data as any).retryAttempt ?? 0, createdAt: (deferredEvent.data as any).createdAt }
       : undefined
@@ -655,7 +720,7 @@ export class AgentLoop {
     // Only charge for human-initiated triggers (mention, reply, m_command) - not random
     const somaStart = Date.now()
     const somaCheckResult = await this.checkSomaCredits(
-      events,
+      triggeringEvent ? [triggeringEvent] : consumed,
       channelId,
       guildId,
       activationReason.reason,
@@ -665,7 +730,7 @@ export class AgentLoop {
 
     if (somaCheckResult.status === 'blocked') {
       // User doesn't have enough ichor - message already sent
-      this.activeChannels.delete(channelId)
+      this.completeChannelActivation(channelId)
       return
     }
 
@@ -759,8 +824,53 @@ export class AgentLoop {
         }, 'Failed to handle activation')
       })
       .finally(() => {
-        this.activeChannels.delete(channelId)
+        this.completeChannelActivation(channelId)
       })
+  }
+
+  /** Hold an active channel's events for its replay, keeping the newest MAX_PENDING_CHANNEL_EVENTS. */
+  private deferChannelEvents(channelId: string, events: Event[]): void {
+    const pending = this.pendingChannelEvents.get(channelId) ?? { events: [], dropped: 0 }
+    pending.events.push(...events)
+    const excess = pending.events.length - AgentLoop.MAX_PENDING_CHANNEL_EVENTS
+    if (excess > 0) {
+      // A dropped event is never handled: an m command in it doesn't run or
+      // get deleted, a continuation reaction or a deferred retry doesn't fire,
+      // and a delete doesn't clear the tool cache.
+      const droppedTypes = [...new Set(pending.events.splice(0, excess).map((event) => event.type))]
+      const droppedBefore = pending.dropped
+      pending.dropped += excess
+      // At the first drop, then each time the count passes another hundred.
+      if (droppedBefore === 0 || Math.floor(droppedBefore / 100) !== Math.floor(pending.dropped / 100)) {
+        logger.warn({
+          channelId,
+          dropped: pending.dropped,
+          droppedTypes,
+          kept: pending.events.length,
+        }, 'Deferred-event buffer full while the channel is active: dropped the oldest held events, which are never handled')
+      }
+    }
+    this.pendingChannelEvents.set(channelId, pending)
+    logger.debug({ channelId, pendingEventCount: pending.events.length }, 'Channel active, deferred events')
+  }
+
+  /** Note that the model has answered a context whose newest message is `newestId`. */
+  private recordAnsweredContext(channelId: string, newestId: string | undefined): void {
+    if (newestId !== undefined) this.answeredContextNewestId.set(channelId, newestId)
+  }
+
+  /** Release a channel and put the events held during its activation back on the queue. */
+  private completeChannelActivation(channelId: string): void {
+    this.activeChannels.delete(channelId)
+
+    const pending = this.pendingChannelEvents.get(channelId)
+    if (!pending) return
+    this.pendingChannelEvents.delete(channelId)
+
+    // These events were polled before anything still in the queue, so they go
+    // back at its front, which keeps this channel's arrival order.
+    this.queue.prepend(pending.events)
+    logger.debug({ channelId, pendingEventCount: pending.events.length }, 'Requeued deferred channel events')
   }
   
   private determineActivationReason(events: Event[]): {
@@ -789,6 +899,8 @@ export class AgentLoop {
         })
       } else if (event.type === 'message') {
         const message = event.data as any
+        // This bot's own reply chunks are never what triggered it.
+        if (message.author?.id === this.botUserId) continue
         const content = message.content?.trim() || ''
 
         if ((event.data as any)._isMCommand) {
@@ -1002,8 +1114,8 @@ export class AgentLoop {
   }
 
   private findTriggeringMessageEvent(events: Event[]): (Event & { data: any }) | undefined {
-    return events.find((event) => event.type === 'message' && !this.isSystemDiscordMessage(event.data))
-      || events.find((event) => event.type === 'message')
+    const fromOthers = events.filter((event) => event.type === 'message' && event.data?.author?.id !== this.botUserId)
+    return fromOthers.find((event) => !this.isSystemDiscordMessage(event.data)) || fromOthers[0]
   }
 
   private isSystemDiscordMessage(message: any): boolean {
@@ -1212,7 +1324,8 @@ export class AgentLoop {
     return { stripped: result, content }
   }
 
-  private async shouldActivate(events: Event[], channelId: string, guildId: string): Promise<boolean> {
+  /** The event that decides the batch (activates it), or undefined when none does. */
+  private async shouldActivate(events: Event[], channelId: string, guildId: string): Promise<Event | undefined> {
     // Self_activation events (timer fires + deferred-retry fires) are handled
     // inside the main event loop below rather than as an early exit, so they
     // also respect the sleep gate. A sleeping channel should stay quiet
@@ -1248,10 +1361,10 @@ export class AgentLoop {
     }
 
     // Check API-only mode early
-    if (!loadConfig()) return false
+    if (!loadConfig()) return undefined
     if (config?.api_only) {
       logger.debug('API-only mode enabled - skipping activation')
-      return false
+      return undefined
     }
 
     // may_speak gate: placed pre-event-loop so it covers both user-triggered
@@ -1266,7 +1379,7 @@ export class AgentLoop {
       })
       if (!allowed) {
         logger.debug({ channelId, botId: this.botId, may_speak: config.may_speak }, 'Skipping activation — bot not in may_speak list')
-        return false
+        return undefined
       }
     }
 
@@ -1298,7 +1411,7 @@ export class AgentLoop {
           timerId: event.data?.timerId,
           contextNote: event.data?.contextNote?.slice(0, 50),
         }, 'Activated by timer (self_activation)')
-        return true
+        return event
       }
 
       // Check reaction events for continuation emoji
@@ -1316,7 +1429,7 @@ export class AgentLoop {
           logger.debug({ messageId: reaction.messageId, emoji: reaction.emoji, userId: reaction.userId },
             'Activated by continuation emoji on bot message')
           event.data._isReactionContinue = true
-          return true
+          return event
         }
         continue
       }
@@ -1389,11 +1502,18 @@ export class AgentLoop {
           logger.debug({ messageId: message.id, command: content, mentionsUs, repliesTo }, 'Activated by m command addressed to us')
           // Store m command event for deletion (only if addressed to us)
           event.data._isMCommand = true
-          return true
+          return event
         }
-        // m command not addressed to us - ignore
+        // m command not addressed to us: skip it, and go on to the next event
         logger.debug({ messageId: message.id, command: content }, 'm command not addressed to us - ignoring')
-        return false
+        continue
+      }
+
+      // A message at or before the newest of a context the model answered
+      // (see answeredContextNewestId) is counted for sleep above, and an m
+      // command in it runs, but it can't trigger here.
+      if (snowflakeAtOrBefore(message.id, this.answeredContextNewestId.get(channelId))) {
+        continue
       }
 
       // 2. Check for bot mention
@@ -1401,7 +1521,7 @@ export class AgentLoop {
         // Check bot reply chain depth to prevent bot loops
         const chainDepth = await this.connector.getBotReplyChainDepth(channelId, message)
 
-        if (!loadConfig()) return false
+        if (!loadConfig()) return undefined
 
         if (chainDepth >= config.max_bot_reply_chain_depth) {
           logger.info({
@@ -1416,7 +1536,7 @@ export class AgentLoop {
         }
 
         logger.debug({ messageId: message.id, chainDepth }, 'Activated by mention')
-        return true
+        return event
       }
 
       // 3. Replies do NOT auto-activate (hard rule).
@@ -1425,18 +1545,43 @@ export class AgentLoop {
       // not wake the bot — fall through to the remaining triggers (random / name / etc.).
 
       // 4. Random chance activation
-      if (!loadConfig()) return false
+      if (!loadConfig()) return undefined
 
       if (config.reply_on_random > 0) {
         const chance = Math.random()
         if (chance < 1 / config.reply_on_random) {
           logger.debug({ messageId: message.id, chance, threshold: 1 / config.reply_on_random }, 'Activated by random chance')
-          return true
+          return event
         }
       }
     }
 
-    return false
+    return undefined
+  }
+
+  /**
+   * The Discord history the next context reads: without the messages that
+   * cached tool exchanges reconstruct, which it shows through those exchanges
+   * instead. With preserve_thinking_context on, the activation store supplies
+   * full completions and needs the original messages, so none are removed.
+   */
+  private messagesNotCoveredByToolCache(
+    messages: DiscordMessage[],
+    toolCache: Array<{ call: ToolCall; result: any }>,
+    config: BotConfig
+  ): DiscordMessage[] {
+    if (config.preserve_thinking_context) {
+      logger.debug('Skipping tool cache message filter (preserve_thinking_context enabled)')
+      return messages
+    }
+    const covered = collectCoveredToolMessageIds(toolCache, messages)
+    if (covered.size === 0) return messages
+    const remaining = messages.filter((message) => !covered.has(message.id))
+    logger.debug({
+      filtered: messages.length - remaining.length,
+      remaining: remaining.length,
+    }, 'Filtered Discord messages covered by tool cache')
+    return remaining
   }
 
   private async handleActivation(
@@ -1492,7 +1637,7 @@ export class AgentLoop {
       })
       endProfile('pinnedConfigFetch')
       
-      // Use config values: recency_window + rolling_threshold + buffer for .history commands
+      // Use config values: recency_window_messages + rolling_threshold + buffer for .history commands
       const recencyWindow = preConfig.recency_window_messages || 200
       const rollingBuffer = preConfig.rolling_threshold || 50
       let fetchDepth = recencyWindow + rollingBuffer + 50  // +50 for .history boundary tolerance
@@ -1524,6 +1669,9 @@ export class AgentLoop {
         displayNames: displayNameClasses(preConfig),  // Server nicknames for display-name labels
       })
       endProfile('fetchContext')
+      // Once the model has answered this context, messages up to its newest
+      // can't trigger again in this channel (see answeredContextNewestId).
+      const newestFetchedId = discordContext.messages[discordContext.messages.length - 1]?.id
 
       // Cache stability: maintain a consistent starting point for prompt caching
       // Note: fetch overshoot trimming is now handled in fetchContext Stage 3.
@@ -1801,32 +1949,12 @@ export class AgentLoop {
         }, 'Updated visible images with cached MCP results')
       }
       
-      // 4c. Filter out Discord messages that are in tool cache's botMessageIds
-      // ONLY when preserve_thinking_context is DISABLED
-      // When enabled, the activation store handles full completions and needs the original messages
-      if (!config.preserve_thinking_context) {
-        const toolCacheBotMessageIds = new Set<string>()
-        for (const entry of toolCacheForContext) {
-          if (entry.call.botMessageIds) {
-            entry.call.botMessageIds.forEach(id => toolCacheBotMessageIds.add(id))
-          }
-        }
-        
-        if (toolCacheBotMessageIds.size > 0) {
-          const beforeFilter = discordContext.messages.length
-          discordContext.messages = discordContext.messages.filter(msg => 
-            !toolCacheBotMessageIds.has(msg.id)
-          )
-          if (discordContext.messages.length < beforeFilter) {
-            logger.debug({ 
-              filtered: beforeFilter - discordContext.messages.length,
-              remaining: discordContext.messages.length
-            }, 'Filtered Discord messages covered by tool cache')
-          }
-        }
-      } else {
-        logger.debug('Skipping tool cache message filter (preserve_thinking_context enabled)')
-      }
+      // 4c. Filter only Discord messages whose text the tool cache reconstructs
+      discordContext.messages = this.messagesNotCoveredByToolCache(
+        discordContext.messages,
+        toolCacheForContext,
+        config
+      )
 
       // 4d. Load activations for preserve_thinking_context
       let activationsForContext: Activation[] | undefined
@@ -1986,7 +2114,6 @@ export class AgentLoop {
       let executionResult: {
         completion: any;
         toolCallIds: string[];
-        preambleMessageIds: string[];
         fullCompletionText?: string;
         sentMessageIds: string[];
         messageContexts: Record<string, MessageContext>;
@@ -2016,12 +2143,12 @@ export class AgentLoop {
       const {
         completion,
         toolCallIds,
-        preambleMessageIds,
         fullCompletionText,
         sentMessageIds: inlineSentMessageIds,
         messageContexts: inlineMessageContexts
       } = executionResult
       endProfile('llmCall')
+      this.recordAnsweredContext(channelId, newestFetchedId)
 
       // 6.5. Send steering readout if active and opted in
       if (activeSteering && config.steer_readout === true) {
@@ -2119,7 +2246,8 @@ export class AgentLoop {
         }
 
         // Combine text message IDs (already sent by inline execution) with image IDs
-        const allMessageIds = [...(inlineSentMessageIds ?? []), ...imageSentIds]
+        const textMessageIds = inlineSentMessageIds ?? []
+        const allMessageIds = [...new Set([...textMessageIds, ...imageSentIds])]
         const responseText = completion.content
           .filter((c: any) => c.type === 'text')
           .map((c: any) => c.text)
@@ -2142,6 +2270,22 @@ export class AgentLoop {
             }
           }
           await this.activationStore.completeActivation(activation.id)
+        }
+
+        // This branch returns before normal response finalization below, so it
+        // must also attach liveness and reconstruction metadata to tool entries.
+        // Native tool calls carry their round's coverage from persistence.
+        const coveredMessageIds = toolMode === 'native'
+          ? []
+          : [...new Set(textMessageIds)]
+        if (toolCallIds.length > 0 && allMessageIds.length > 0) {
+          await this.toolSystem.updateBotMessageIds(
+            this.botId,
+            channelId,
+            toolCallIds,
+            allMessageIds,
+            coveredMessageIds
+          )
         }
 
         // Update state and trace for image response
@@ -2232,11 +2376,22 @@ export class AgentLoop {
         await this.activationStore.completeActivation(activation.id)
       }
       
-      // Update tool cache entries with bot message IDs (for existence checking on reload)
-      // Include both preamble message IDs and final response message IDs
-      const allBotMessageIds = [...preambleMessageIds, ...sentMessageIds]
+      // Every emitted message is a liveness anchor. Coverage, the messages a
+      // cached completion reconstructs, is set here only for entries without
+      // their own: a native tool call carries its round's from persistence, and
+      // an inline call's completion is the whole output, covering every message.
+      const allBotMessageIds = [...new Set(sentMessageIds)]
+      const coveredMessageIds = toolMode === 'native'
+        ? []
+        : allBotMessageIds
       if (toolCallIds.length > 0 && allBotMessageIds.length > 0) {
-        await this.toolSystem.updateBotMessageIds(this.botId, channelId, toolCallIds, allBotMessageIds)
+        await this.toolSystem.updateBotMessageIds(
+          this.botId,
+          channelId,
+          toolCallIds,
+          allBotMessageIds,
+          coveredMessageIds
+        )
       }
 
       // 9. Update state
@@ -2520,7 +2675,6 @@ export class AgentLoop {
   ): Promise<{
     completion: any;
     toolCallIds: string[];
-    preambleMessageIds: string[];
     fullCompletionText?: string;
     sentMessageIds: string[];
     messageContexts: Record<string, MessageContext>;
@@ -2530,6 +2684,18 @@ export class AgentLoop {
     const messageContexts: Record<string, MessageContext> = {}
     const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
     let accumulatedPreToolText = ''
+    // The visible prose onPreToolContent posted in the current round, and the
+    // messages that carried it. Each of the round's tool calls caches exactly
+    // this text and covers exactly these messages, so the next context shows
+    // what Discord showed: not the round's thinking, which membrane's preamble
+    // includes, nor <thinking> or tool markup the model wrote in its text, nor
+    // anything from a round withheld at a participant name.
+    let roundPostedText = ''
+    let roundPostedMessageIds: string[] = []
+    // Membrane's final native response includes all text from every tool round,
+    // including prose already delivered through onPreToolContent. Keep the raw
+    // flushed prefix so the final Discord send can advance past it exactly once.
+    let flushedPreToolText = ''
     // Open markdown construct carried across this activation's messages
     // (pre-tool flushes + final send).
     let markdownCarry: MarkdownCarry = []
@@ -2611,7 +2777,16 @@ export class AgentLoop {
                 logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncating native pre-tool text at participant')
                 return  // Don't send hallucinated content
               }
+            }
 
+            // The history joins consecutive bot messages with a space, so the
+            // cache joins the round's pieces with one too; a piece past the
+            // message limit goes out as several messages and stays whole here.
+            // The cache holds the model's words, read before mentions become
+            // <@USER_ID>: the next context shows it as written, and an id is
+            // nothing the model wrote.
+            const postedVisibleText = segments.map(s => s.visible).join(' ')
+            if (discordMessages) {
               // Mentions become <@USER_ID>, as in the final reply
               await this.replaceMentionsInSegments(segments, discordMessages, config, markdownCarry)
             }
@@ -2624,10 +2799,13 @@ export class AgentLoop {
             )
             markdownCarry = sendResult.endCarry
             allSentMessageIds.push(...sendResult.sentMessageIds)
+            roundPostedMessageIds.push(...sendResult.sentMessageIds)
             for (const [msgId, ctx] of Object.entries(sendResult.messageContexts)) {
               messageContexts[msgId] = ctx
             }
             // Reset so we don't re-send
+            flushedPreToolText += accumulatedPreToolText
+            roundPostedText = roundPostedText ? `${roundPostedText} ${postedVisibleText}` : postedVisibleText
             accumulatedPreToolText = ''
           }
         },
@@ -2651,7 +2829,8 @@ export class AgentLoop {
               input: call.input as Record<string, any>,
               messageId: triggeringMessageId,
               timestamp: new Date(),
-              originalCompletionText: context.accumulated || '',
+              originalCompletionText: roundPostedText,
+              coveredMessageIds: [...roundPostedMessageIds],
             }
 
             const toolResult = await this.toolSystem.executeTool(cxCall)
@@ -2660,9 +2839,7 @@ export class AgentLoop {
             allToolCallIds.push(call.id)
 
             // Format output
-            const outputStr = typeof toolResult.output === 'string'
-              ? toolResult.output
-              : JSON.stringify(toolResult.output)
+            const outputStr = toolOutputText(toolResult.output)
 
             let content: string
             let isError = false
@@ -2696,7 +2873,7 @@ export class AgentLoop {
             // Send tool output to Discord if visible
             if (config.tool_output_visible) {
               const inputStr = JSON.stringify(call.input)
-              const rawOutput = typeof toolResult.output === 'string' ? toolResult.output : JSON.stringify(toolResult.output)
+              const rawOutput = toolOutputText(toolResult.output)
               const flatOutput = rawOutput.replace(/\n/g, ' ').replace(/\s+/g, ' ')
               const maxLen = 200
               const trimmedOutput = flatOutput.length > maxLen
@@ -2738,6 +2915,9 @@ export class AgentLoop {
             })
           }
 
+          // The next round starts with nothing posted.
+          roundPostedText = ''
+          roundPostedMessageIds = []
           return results
         },
       })
@@ -2753,6 +2933,25 @@ export class AgentLoop {
         .map((c: any) => c.text)
         .join('')
 
+      // onPreToolContent is a preview callback, not a destructive read: the
+      // text it posted is at the front of the final aggregate response too.
+      // Membrane doesn't pass it a round whose text is blank but keeps that
+      // text in the response, so the match skips whitespace. Only what follows
+      // the posted text is sent. If the response doesn't start with it, all of
+      // it is sent, with a warning; an empty response has nothing to send.
+      let remainingCompletionText = completionText
+      if (flushedPreToolText) {
+        const postedEnd = endOfPostedPrefix(completionText, flushedPreToolText)
+        if (postedEnd !== undefined) {
+          remainingCompletionText = completionText.slice(postedEnd)
+        } else if (completionText) {
+          logger.warn({
+            completionLength: completionText.length,
+            flushedLength: flushedPreToolText.length,
+          }, 'Native tool response did not start with the prose already posted; sending all of it')
+        }
+      }
+
       // Capture generated image blocks (from image generation models like Gemini)
       const generatedImageBlocks: ContentBlock[] = (result?.content || [])
         .filter((c: any) => c.type === 'image')
@@ -2766,6 +2965,9 @@ export class AgentLoop {
       // Strip thinking blocks and tool XML
       const { stripped, content: textThinkingContent } = this.stripThinkingBlocks(
         this.toolSystem.stripToolXml(completionText)
+      )
+      const { stripped: remainingStripped } = this.stripThinkingBlocks(
+        this.toolSystem.stripToolXml(remainingCompletionText)
       )
 
       // Thinking for debug display: structured blocks (native thinking) plus
@@ -2801,6 +3003,7 @@ export class AgentLoop {
 
       // Truncate at participant names
       let displayText = stripped
+      let remainingDisplayText = remainingStripped
       if (discordMessages) {
         const truncResult = this.truncateAtParticipant(
           displayText,
@@ -2813,16 +3016,30 @@ export class AgentLoop {
           logger.info({ truncatedAt: truncResult.truncatedAt }, 'Truncated native output at participant')
           displayText = truncResult.text
         }
+
+        const remainingTruncResult = this.truncateAtParticipant(
+          remainingDisplayText,
+          discordMessages,
+          this.connector.getBotUsername() || config.name,
+          llmRequest.stop_sequences,
+          config
+        )
+        if (remainingTruncResult.truncatedAt) {
+          remainingDisplayText = remainingTruncResult.text
+        }
       }
 
-      // Replace mentions, from the markdown carry the remaining text is sent in
+      // Replace mentions: in the text sent now, from the markdown carry it is
+      // sent in, and in the whole response the completion records, from its
+      // start
       if (discordMessages) {
-        displayText = await this.replaceMentions(displayText, discordMessages, config, markdownCarry)
+        displayText = await this.replaceMentions(displayText, discordMessages, config)
+        remainingDisplayText = await this.replaceMentions(remainingDisplayText, discordMessages, config, markdownCarry)
       }
 
       // Send remaining text to Discord (text not already sent via onPreToolContent)
-      if (displayText.trim()) {
-        const segments = this.parseIntoSegments(displayText)
+      if (remainingDisplayText.trim()) {
+        const segments = this.parseIntoSegments(remainingDisplayText)
         if (segments.length > 0) {
           const sendResult = await this.sendSegments(
             channelId,
@@ -2877,7 +3094,6 @@ export class AgentLoop {
           raw: result?.raw ?? null,
         },
         toolCallIds: allToolCallIds,
-        preambleMessageIds: [],
         fullCompletionText: completionText,
         sentMessageIds: allSentMessageIds,
         messageContexts,
@@ -2909,7 +3125,6 @@ export class AgentLoop {
             model: 'interrupted',
           },
           toolCallIds: allToolCallIds,
-          preambleMessageIds: [],
           fullCompletionText: ttsCtx.interruptedText,
           sentMessageIds: allSentMessageIds,
           messageContexts,
@@ -2956,7 +3171,6 @@ export class AgentLoop {
   ): Promise<{ 
     completion: any; 
     toolCallIds: string[]; 
-    preambleMessageIds: string[]; 
     fullCompletionText?: string;
     sentMessageIds: string[];
     messageContexts: Record<string, MessageContext>;
@@ -2967,7 +3181,6 @@ export class AgentLoop {
     // (per-iteration pre-tool flushes + the final send).
     let markdownCarry: MarkdownCarry = []
     const allToolCallIds: string[] = []
-    const allPreambleMessageIds: string[] = []
     const allSentMessageIds: string[] = []
     const messageContexts: Record<string, MessageContext> = {}
     const maxToolDepth = config.max_tool_depth
@@ -3128,7 +3341,6 @@ export class AgentLoop {
             accumulatedOutput,
             pendingToolPersistence,
             allToolCallIds,
-            allPreambleMessageIds,
             allSentMessageIds,
             messageContexts,
             lastContextEndPos,
@@ -3165,7 +3377,6 @@ export class AgentLoop {
           accumulatedOutput,
           pendingToolPersistence,
           allToolCallIds,
-          allPreambleMessageIds,
           allSentMessageIds,
           messageContexts,
           lastContextEndPos,
@@ -3209,7 +3420,6 @@ export class AgentLoop {
             accumulatedOutput: '',  // Discard everything
             pendingToolPersistence,
             allToolCallIds,
-            allPreambleMessageIds,
             allSentMessageIds,
             messageContexts,
             lastContextEndPos,
@@ -3271,7 +3481,7 @@ export class AgentLoop {
         allToolCallIds.push(call.id)
         
         // Collect result for injection
-        const outputStr = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
+        const outputStr = toolOutputText(result.output)
         
         // Build result text - include note about images if present
         let resultText = ''
@@ -3344,7 +3554,7 @@ export class AgentLoop {
         // Send tool output to Discord if visible
         if (config.tool_output_visible) {
           const inputStr = JSON.stringify(call.input)
-          const rawOutput = typeof result.output === 'string' ? result.output : JSON.stringify(result.output)
+          const rawOutput = toolOutputText(result.output)
           const flatOutput = rawOutput.replace(/\n/g, ' ').replace(/\s+/g, ' ')
           const maxLen = 200
           const trimmedOutput = flatOutput.length > maxLen 
@@ -3408,7 +3618,6 @@ export class AgentLoop {
       accumulatedOutput,
       pendingToolPersistence,
       allToolCallIds,
-      allPreambleMessageIds,
       allSentMessageIds,
       messageContexts,
       lastContextEndPos,
@@ -3432,7 +3641,6 @@ export class AgentLoop {
     accumulatedOutput: string;
     pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }>;
     allToolCallIds: string[];
-    allPreambleMessageIds: string[];
     allSentMessageIds: string[];
     messageContexts: Record<string, MessageContext>;
     lastContextEndPos: number;
@@ -3449,7 +3657,6 @@ export class AgentLoop {
   }): Promise<{
     completion: any;
     toolCallIds: string[];
-    preambleMessageIds: string[];
     fullCompletionText: string;
     sentMessageIds: string[];
     messageContexts: Record<string, MessageContext>;
@@ -3457,7 +3664,7 @@ export class AgentLoop {
   }> {
     let { accumulatedOutput } = params
     const { 
-      pendingToolPersistence, allToolCallIds, allPreambleMessageIds,
+      pendingToolPersistence, allToolCallIds,
       allSentMessageIds, messageContexts, lastContextEndPos,
       channelId, triggeringMessageId, config, llmRequest, discordMessages,
       suffix, stopReason, generatedImageBlocks, markdownCarry
@@ -3606,7 +3813,6 @@ export class AgentLoop {
         raw: params.raw ?? null,
       },
       toolCallIds: allToolCallIds,
-      preambleMessageIds: allPreambleMessageIds,
       fullCompletionText,
       sentMessageIds: allSentMessageIds,
       messageContexts,
@@ -4078,4 +4284,3 @@ export class AgentLoop {
     )
   }
 }
-

@@ -1106,6 +1106,95 @@ describe('splitPreservingMarkdown — edge cases', () => {
       expect(reconstruct(r.chunks)).toBe(ch)
     }
   })
+  // A chunk with no content, only whitespace or a construct's markers, is a
+  // message with nothing in it to show.
+  it('sends a paragraph break between two full chunks at the start of the next one', () => {
+    const text = 'x'.repeat(1800) + '\n\n' + 'y'.repeat(1800)
+    const r = splitPreservingMarkdown(text, 1800)
+    expect(r.chunks.map((c) => c.text)).toEqual(['x'.repeat(1800), '\n\n' + 'y'.repeat(1798), 'yy'])
+  })
+
+  it('never makes a chunk of whitespace alone from a blank line between two full chunks', () => {
+    for (const sep of ['\n \n', ' \n', '\n\n\n']) {
+      const text = 'x'.repeat(1800) + sep + 'y'.repeat(1800)
+      const r = splitPreservingMarkdown(text, 1800)
+      for (const c of r.chunks) expect(c.text.trim()).not.toBe('')
+      expect(reconstruct(r.chunks)).toBe(text)
+      assertAllWithinLimit(r.chunks, 1800)
+    }
+  })
+
+  it('keeps trailing whitespace after a full chunk with the text\'s last content', () => {
+    expect(splitPreservingMarkdown('x'.repeat(1800) + '\n\n', 1800).chunks.map((c) => c.text)).toEqual([
+      'x'.repeat(1799),
+      'x\n\n',
+    ])
+    expect(splitPreservingMarkdown('x'.repeat(1799) + '\n\n', 1800).chunks.map((c) => c.text)).toEqual([
+      'x'.repeat(1798),
+      'x\n\n',
+    ])
+  })
+
+  it('never sends a fence\'s opening line alone when its first line of code fills the window', () => {
+    const text = '```js\n' + 'x'.repeat(1800) + '\n```'
+    const r = splitPreservingMarkdown(text, 1800)
+    for (const c of r.chunks) expect(c.text).toContain('x')
+    expect(reconstruct(r.chunks)).toBe(text)
+    assertAllWithinLimit(r.chunks, 1800)
+  })
+
+  it('never sends an empty code block when a carried fence continues with blank lines', () => {
+    const carry: MarkdownCarry = [{ kind: 'fence', opener: '```', closer: '```' }]
+    const text = '\n\n' + 'y'.repeat(1800)
+    const r = splitPreservingMarkdown(text, 1800, carry)
+    for (const c of r.chunks) expect(c.text).toContain('y')
+    expect(reconstruct(r.chunks)).toBe(text)
+    assertAllWithinLimit(r.chunks, 1800)
+  })
+
+  it('keeps a closer and the whitespace after it with the text\'s last content', () => {
+    // Bold or a code block that ends with the text's content, then a paragraph
+    // break: the last chunk takes some of that content, not just the closer
+    // and the break, which would be an empty bold or an empty code block.
+    for (const text of ['**' + 'a'.repeat(1796) + '**\n\n', '```\n' + 'a'.repeat(1792) + '\n```\n\n']) {
+      const r = splitPreservingMarkdown(text, 1800)
+      for (const c of r.chunks) expect(c.text).toContain('a')
+      expect(reconstruct(r.chunks)).toBe(text)
+      assertAllWithinLimit(r.chunks, 1800)
+    }
+  })
+
+  it('keeps the last content with trailing blank lines when the closer makes the last window too long', () => {
+    // The whole text fits the window, but not with the closer an unclosed fence
+    // needs at the end, so the chunk shrinks to fit: the blank lines and the
+    // closer must not end up in a chunk of their own, an empty code block.
+    const text = '```\n' + 'a'.repeat(1790) + '\n'.repeat(5)
+    const r = splitPreservingMarkdown(text, 1800)
+    expect(r.chunks.length).toBeGreaterThan(1)
+    for (const c of r.chunks) expect(c.text).toContain('a')
+    expect(reconstruct(r.chunks)).toBe(text)
+    assertAllWithinLimit(r.chunks, 1800)
+  })
+
+  it('leaves a short text with markup and trailing whitespace in one chunk', () => {
+    expect(splitPreservingMarkdown('**ab**\n\n', 1800).chunks.map((c) => c.text)).toEqual(['**ab**\n\n'])
+  })
+
+  it('splits a text whose only content is its first character, then more whitespace than a chunk holds', () => {
+    // Nothing can keep the trailing whitespace with content here; the split
+    // still ends, with the content in the first chunk.
+    const text = 'z' + '\n'.repeat(2000)
+    const r = splitPreservingMarkdown(text, 1800)
+    expect(r.chunks[0]!.text.startsWith('z')).toBe(true)
+    expect(reconstruct(r.chunks)).toBe(text)
+    assertAllWithinLimit(r.chunks, 1800)
+  })
+
+  it('still cuts at the paragraph break when the chunk before it holds text', () => {
+    const text = 'x'.repeat(900) + '\n\n' + 'y'.repeat(1800)
+    const r = splitPreservingMarkdown(text, 1800)
+    expect(r.chunks.map((c) => c.text)).toEqual(['x'.repeat(900) + '\n\n', 'y'.repeat(1800)])
+  })
 })
 
 // ---------------------------------------------------------------------------

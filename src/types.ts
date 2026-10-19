@@ -421,8 +421,22 @@ export interface ToolCall {
   input: Record<string, any>
   messageId: string  // For pruning old calls (triggering user message)
   timestamp: Date
-  originalCompletionText: string  // The bot's original text including XML tool call
-  botMessageIds?: string[]  // Discord message IDs from bot's response (for existence checking)
+  /**
+   * The bot's text that the cached exchange reconstructs: for inline tools the
+   * activation's whole output, XML tool calls included; for a native tool call
+   * the visible prose posted in its round, or '' when the round posted none.
+   */
+  originalCompletionText: string
+  /** All Discord messages emitted by the activation (tool-cache liveness anchors). */
+  botMessageIds?: string[]
+  /**
+   * Subset of botMessageIds whose visible text is reconstructed by
+   * originalCompletionText: for a native tool call, the messages that posted
+   * its round's prose. Only these messages may be removed from raw Discord
+   * context before the cached tool exchange is interleaved. An entry written
+   * before this field existed has none, and covers all its botMessageIds.
+   */
+  coveredMessageIds?: string[]
 }
 
 export interface ToolCallWithResult {
@@ -615,4 +629,3 @@ export class ToolError extends Chapter3Error {
     this.name = 'ToolError'
   }
 }
-
