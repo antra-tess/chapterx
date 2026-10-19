@@ -83,6 +83,15 @@ describe("DiscordConnector's replies", () => {
     expect(sent).toEqual([REPLY_MENTIONS, REPLY_MENTIONS, REPLY_MENTIONS])
   })
 
+  it("keep users parsed when a text reply goes without its reply, the reply's target gone", async () => {
+    h.channel.send.mockRejectedValueOnce(Object.assign(new Error('Unknown Message'), { code: 10008 }))
+    await h.connector.sendSegmentChunks(CH, `thanks <@${JACK}>, and @everyone`, TRIGGER, [])
+    expect(h.channel.send.mock.calls.length).toBe(2)
+    const fallback = h.channel.send.mock.calls[1]![0]
+    expect(fallback.reply).toBeUndefined()
+    expect(allowedMentionsSent(fallback)).toEqual({ parse: ['users'], replied_user: false })
+  })
+
   it("keep users parsed when an attachment goes without its reply, the reply's target gone", async () => {
     h.channel.send.mockRejectedValueOnce(Object.assign(new Error('Unknown Message'), { code: 10008 }))
     await h.connector.sendFileAttachment(CH, Buffer.from('x'), 'data.bin', 'application/octet-stream', `for <@${JACK}>`, TRIGGER)

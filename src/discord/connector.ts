@@ -1248,7 +1248,9 @@ export class DiscordConnector {
       } catch (error: any) {
         if (error.code === 10008 || error.message?.includes('Unknown message')) {
           logger.warn({ replyToMessageId, channelId: channel.id }, 'Reply target deleted, sending without reply')
-          const sent = await channel.send({ content })
+          // It keeps the reply's allowedMentions, as the attachment senders'
+          // fallbacks do, so its text pings no role and no @everyone.
+          const sent = await channel.send({ content, allowedMentions: replyAllowedMentions() })
           return sent.id
         }
         throw error
