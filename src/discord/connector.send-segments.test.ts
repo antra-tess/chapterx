@@ -162,4 +162,9 @@ describe('DiscordConnector.sendSegmentChunks with its mention lookup', () => {
     await h.connector.sendSegmentChunks(CH, 'type `<@` then ask <@jack_h4ndle>', undefined, [])
     expect(h.sent).toEqual(['type `<@` then ask <@123>'])
   })
+
+  it("reads the mention inside a '<@' written just before it", async () => {
+    await h.connector.sendSegmentChunks(CH, 'ask <@<@jack_h4ndle>', undefined, [])
+    expect(h.sent).toEqual(['ask <@<@123>'])
+  })
 })

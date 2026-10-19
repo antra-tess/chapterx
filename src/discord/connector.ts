@@ -1045,8 +1045,10 @@ export class DiscordConnector {
    */
   private async resolveMentions(content: string, channelId: string, startCarry: MarkdownCarry = []): Promise<string> {
     // Find all <@username> patterns (not already numeric IDs), outside code.
-    // A name stops short of another '<' or a line end, so a '<@' left open
-    // in code doesn't run on to a mention after it and take it out with it.
+    // A name holds no '<': so a '<@' left open in code doesn't run on to a
+    // mention after it and take it out with it, and '<@<@name>' reads the
+    // mention inside. It holds no line end either, since no member's name
+    // has one, which spares a lookup that could find no one.
     const mentionPattern = /<@([^>0-9<\n][^><\n]*)>/g
     const code = codeRanges(content, startCarry)
     const matches = [...content.matchAll(mentionPattern)].filter(
