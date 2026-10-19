@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { AgentLoop } from './loop.js'
+import { characterOverride } from '../context/stages/format-messages.js'
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -23,12 +24,13 @@ afterEach(() => {
 
 type ReplaceMentions = (text: string, messages: unknown[], config: object) => Promise<string>
 
-/** The loop's replaceMentions, on a loop that knows its bot's user id if one is given. */
-function replaceMentions(botUserId?: string): ReplaceMentions {
+/** The loop's replaceMentions, on a loop that knows its bot's user id and Discord username if given. */
+function replaceMentions(botUserId?: string, botUsername?: string): ReplaceMentions {
   const dir = mkdtempSync(join(tmpdir(), 'replace-mentions-test-'))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const unused = {} as never
-  const loop = new AgentLoop('bot', unused, unused, unused, unused, unused, unused, dir)
+  const connector = { getBotUsername: () => botUsername } as never
+  const loop = new AgentLoop('bot', unused, connector, unused, unused, unused, unused, dir)
   if (botUserId) loop.setBotUserId(botUserId)
   const helper = (loop as unknown as { replaceMentions: ReplaceMentions }).replaceMentions
   return helper.bind(loop)
@@ -69,6 +71,42 @@ describe('AgentLoop.replaceMentions', () => {
     expect(await replaceMentions()('@Jack', [jack, sam], { use_display_names_humans: true })).toBe('<@111>')
     // Its <@Name> form stays out of the connector's lookup, which could find the real Jack.
     expect(await replaceMentions()('<@Jack>', [jack, asJack], {})).toBe('@Jack')
+  })
+
+  it("holds an override's name only from a message that shows something past its ~Name:", async () => {
+    const jack = message('111', 'jack_h4ndle', 'Jack')
+    const bare = message('222', 'sam_h4ndle', 'Sam', { content: '~Jack:' })
+    expect(await replaceMentions()('@Jack', [jack, bare], { use_display_names_humans: true })).toBe('<@111>')
+    const withImage = message('222', 'sam_h4ndle', 'Sam', { content: '~Jack:', attachments: [{ id: 'a1' }] })
+    expect(await replaceMentions()('@Jack', [jack, withImage], { use_display_names_humans: true })).toBe('@Jack')
+  })
+
+  it('holds an override after a reply tag or mentions, and not one the context hides', async () => {
+    const jack = message('111', 'jack_h4ndle', 'Jack')
+    const humans = { use_display_names_humans: true }
+    const afterMention = message('222', 'sam_h4ndle', 'Sam', { content: '<@999> ~Jack: I am the other Jack' })
+    expect(await replaceMentions()('@Jack', [jack, afterMention], humans)).toBe('@Jack')
+    const hidden = message('222', 'sam_h4ndle', 'Sam', { content: '~Jack: I am the other Jack', reactions: [{ emoji: '🫥' }] })
+    expect(await replaceMentions()('@Jack', [jack, hidden], humans)).toBe('<@111>')
+  })
+
+  it('holds an override as a person is shown, so its @Name form is held when bots are shown by username', async () => {
+    const jack = message('111', 'jack_h4ndle', 'Jack')
+    const asJack = message('222', 'sam_h4ndle', 'Sam', { content: '~Jack: I am the other Jack' })
+    expect(await replaceMentions()('@Jack', [jack, asJack], { use_display_names_humans: true, use_display_names_bots: false })).toBe('@Jack')
+  })
+
+  it("reads overrides from the bot's messages as the context joins them", async () => {
+    const jack = message('111', 'jack_h4ndle', 'Jack')
+    const bot = { id: '999', username: 'sam_bot', displayName: 'sam_bot', bot: true }
+    const first = { author: bot, content: 'Here is the scene.', attachments: [] }
+    const asJack = { author: bot, content: '~Jack: I am the other Jack', attachments: [{ id: 'a2' }] }
+    const humans = { use_display_names_humans: true }
+    // Joined to the message before it, its ~Jack: is mid-text, and no Jack is shown.
+    expect(await replaceMentions('999', 'sam_bot')('@Jack', [jack, first, asJack], humans)).toBe('<@111>')
+    expect(await replaceMentions('999', 'sam_bot')('@Jack', [jack, asJack], humans)).toBe('@Jack')
+    // The join leaves the messages themselves as they were.
+    expect(first.attachments).toEqual([])
   })
 
   it("keeps another bot's messages, so its <@Name> goes to its id", async () => {
@@ -131,7 +169,7 @@ describe('AgentLoop.replaceMentionsInSegments', () => {
     const dir = mkdtempSync(join(tmpdir(), 'replace-mentions-test-'))
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
     const unused = {} as never
-    const loop = new AgentLoop('bot', unused, unused, unused, unused, unused, unused, dir)
+    const loop = new AgentLoop('bot', unused, { getBotUsername: () => undefined } as never, unused, unused, unused, unused, dir)
     const inSegments = (loop as unknown as { replaceMentionsInSegments: InSegments }).replaceMentionsInSegments.bind(loop)
     const segments: Segment[] = [
       { prefix: '', visible: 'see:\n```\n@Jack' },
@@ -140,5 +178,13 @@ describe('AgentLoop.replaceMentionsInSegments', () => {
     ]
     await inSegments(segments, [message('111', 'jack_h4ndle', 'Jack')], { use_display_names_humans: true }, [])
     expect(segments.map((s) => s.visible)).toEqual(['see:\n```\n@Jack', '', '```\nThanks <@111>'])
+  })
+})
+
+describe('characterOverride', () => {
+  it('takes the ~Name: after a reply tag or mentions, and keeps them in the text', () => {
+    expect(characterOverride('<@Claude> ~Narrator: scene opens')).toEqual({ name: 'Narrator', text: '<@Claude> scene opens' })
+    expect(characterOverride('<reply:@sam> ~Jack: hi')).toEqual({ name: 'Jack', text: '<reply:@sam> hi' })
+    expect(characterOverride('no override')).toEqual({ name: '', text: 'no override' })
   })
 })

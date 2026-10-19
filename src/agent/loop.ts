@@ -18,7 +18,7 @@ import { displayNameClasses } from '../discord/member-names.js'
 import { mentionsToIds } from './outgoing-mentions.js'
 import { sleep } from '../utils/retry.js'
 import { exclusiveOnly, scanMarkdown, type MarkdownCarry } from '../utils/discord-markdown.js'
-import { filterDotMessages } from '../context/stages/message-filtering.js'
+import { filterDotMessages, mergeConsecutiveBotMessages } from '../context/stages/message-filtering.js'
 import { characterOverride } from '../context/stages/format-messages.js'
 import { 
   withTrace, 
@@ -1080,13 +1080,28 @@ export class AgentLoop {
     // is, and a person shown by the same name shares it. `carry` is the code
     // block or span the text begins inside, carried open from an earlier
     // send.
-    const shown = filterDotMessages(messages, config.steer_visible === true, config.ignore_dotted_messages !== false)
+    const steerVisible = config.steer_visible === true
+    const ignoreDotted = config.ignore_dotted_messages !== false
+    const shown = filterDotMessages(messages, steerVisible, ignoreDotted)
     const authors = shown
       .filter((msg) => msg.author && msg.author.id !== this.botUserId && msg.author.id !== SYSTEM_PLACEHOLDER_ID)
       .map((msg) => ({ ...msg.author, webhook: Boolean(msg.webhookId) }))
-    for (const msg of shown) {
-      const { name } = characterOverride(typeof msg.content === 'string' ? msg.content : '')
-      if (name) authors.push({ id: '', username: name, displayName: name, bot: false, webhook: true })
+    // Overrides are read from the messages as the context builder shows
+    // them, the bot's consecutive messages joined first, and only from a
+    // message that shows something past its `~Name:`. The join runs on copies,
+    // since it adds the joined messages' attachments to the first one's.
+    const botName = this.connector.getBotUsername() || config.name
+    const merged = config.preserve_thinking_context
+      ? messages
+      : mergeConsecutiveBotMessages(
+          messages.filter((msg) => msg.author).map((msg) => ({ ...msg, attachments: [...(msg.attachments ?? [])] })),
+          botName,
+        )
+    for (const msg of filterDotMessages(merged, steerVisible, ignoreDotted)) {
+      const { name, text: rest } = characterOverride(typeof msg.content === 'string' ? msg.content : '')
+      if (name && (rest.trim() || msg.attachments?.length)) {
+        authors.push({ id: '', username: name, displayName: name, bot: false, webhook: true })
+      }
     }
     return mentionsToIds(text, authors, config, carry)
   }
