@@ -843,11 +843,14 @@ function closeMarksForBody(body: string, stack: MarkdownCarry): string {
  * run of backslashes ends at the cut, outside code, and either the character
  * after the cut, which would lose its escape, or the first closer the chunk
  * appends, which the backslash would escape, is one Discord's markdown escapes:
- * anything but an ASCII letter, a digit or whitespace. Inside a code block or
- * span, where a backslash is literal, it escapes nothing.
+ * anything but an ASCII letter, a digit or whitespace. Inside a ``` block or a
+ * code span, where a backslash is literal, it escapes nothing. A `~~~` block
+ * is prose to Discord, so its backslashes escape as anywhere else.
  */
 function splitsEscape(text: string, chunkStart: number, pos: number, closeStack: MarkdownCarry): boolean {
-  if (closeStack.some((mark) => mark.kind === 'fence' || mark.kind === 'inlineCode')) return false
+  const code = (mark: OpenMark): boolean =>
+    mark.kind === 'inlineCode' || (mark.kind === 'fence' && mark.opener.startsWith('`'))
+  if (closeStack.some(code)) return false
   let run = 0
   while (run < pos && text[pos - 1 - run] === '\\') run++
   if (run % 2 === 0) return false

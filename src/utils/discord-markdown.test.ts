@@ -1426,6 +1426,13 @@ describe('splitPreservingMarkdown and backslash escapes', () => {
     expect(splitPreservingMarkdown(text, 1800).chunks[0]!.text).toBe('**' + 'a'.repeat(1795) + '**')
   })
 
+  it('cuts after a backslash inside a ``` block, where it escapes nothing, and before one in a ~~~ block, which is prose to Discord', () => {
+    const backtick = splitPreservingMarkdown('a'.repeat(1791) + '\\`b\n```', 1800, [{ kind: 'fence', opener: '```', closer: '```' }])
+    expect(backtick.chunks[0]!.text.endsWith('a\\\n```')).toBe(true)
+    const tilde = splitPreservingMarkdown('a'.repeat(1791) + '\\`b\n~~~', 1800, [{ kind: 'fence', opener: '~~~', closer: '~~~' }])
+    expect(tilde.chunks[0]!.text.endsWith('a\n~~~')).toBe(true)
+  })
+
   it('cuts after a backslash inside a code span, where it escapes nothing, its closer included', () => {
     const text = '`' + 'a'.repeat(1797) + '\\bc`'
     expect(splitPreservingMarkdown(text, 1800).chunks[0]!.text).toBe('`' + 'a'.repeat(1797) + '\\`')
