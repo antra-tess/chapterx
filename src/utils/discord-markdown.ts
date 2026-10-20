@@ -797,11 +797,12 @@ export function splitPreservingMarkdown(
 
     // Avoid a seam that would fuse a bridge string with a same-char delimiter run
     // in the adjacent body (which merges runs and changes parsing), or that
-    // would leave a backslash at this chunk's end and the character it escapes
-    // unescaped at the next one's start. Pull the cut left — off the offending
-    // delimiter or backslash and out of any construct it straddled — until the
-    // seam clears. A smaller body only shrinks the fit, so invariant A still
-    // holds. Monotonic (cut strictly decreases) so it always terminates.
+    // would leave a backslash at this chunk's end and the character it would
+    // escape unescaped at the next one's start (`splitsEscape`). Pull the cut
+    // left — off the offending delimiter or backslash and out of any construct
+    // it straddled — until the seam clears. A smaller body only shrinks the fit,
+    // so invariant A still holds. Monotonic (cut strictly decreases) so it
+    // always terminates.
     if (!isLast) {
       let guard = 0
       while (cut > chunkStart + 1 && (seamMerges(cut, closeStack, isLast) || splitsEscape(text, cut)) && guard++ <= text.length) {
@@ -837,8 +838,15 @@ function closeMarksForBody(body: string, stack: MarkdownCarry): string {
   return out
 }
 
-/** Whether a cut at `pos` falls between a backslash and the character it escapes. */
+/**
+ * Whether a cut at `pos` falls between a backslash and a character it would
+ * escape: an odd run of backslashes ends at the cut, and the character after
+ * it is one Discord's markdown escapes, anything but an ASCII letter, a digit
+ * or whitespace. Inside code, where a backslash is literal, it answers the
+ * same, and pulling the cut back there changes nothing.
+ */
 function splitsEscape(text: string, pos: number): boolean {
+  if (pos >= text.length || /[0-9A-Za-z\s]/.test(text[pos]!)) return false
   let run = 0
   while (run < pos && text[pos - 1 - run] === '\\') run++
   return run % 2 === 1

@@ -1413,6 +1413,17 @@ describe('splitPreservingMarkdown and backslash escapes', () => {
     const text = 'a'.repeat(1798) + '\\\\` x`'
     expect(splitPreservingMarkdown(text, 1800).chunks[0]!.text).toBe('a'.repeat(1798) + '\\\\')
   })
+
+  it('cuts after a backslash before a letter, a digit or whitespace, which it escapes nothing in', () => {
+    expect(splitPreservingMarkdown('a'.repeat(1799) + '\\x y', 1800).chunks[0]!.text).toBe('a'.repeat(1799) + '\\')
+    expect(splitPreservingMarkdown('\n'.repeat(1799) + '\\x', 1800).chunks[0]!.text).toBe('\n'.repeat(1799) + '\\')
+  })
+
+  it('keeps a fence whose opener line ends in a backslash bridged across the cut after it', () => {
+    const text = '```' + 'a'.repeat(1792) + '\\\n@everyone\n```\n'
+    const { chunks } = splitPreservingMarkdown(text, 1800)
+    expect(chunks[1]!.text.startsWith('```')).toBe(true)
+  })
 })
 
 describe('codeRanges', () => {
