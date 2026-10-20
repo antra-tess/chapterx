@@ -52,10 +52,11 @@
  * Outside code, a name a mention is written or left as has any `<@` in it
  * escaped as `<\@`, so it makes no mention for the connector's lookup or for
  * Discord, and so does a mention left as written because part of it is code.
- * Nor does a `<@` form across a mention's edges outside code, whatever it is
- * written as: each is read with the characters around it as they're written,
- * a mention just before it included. A `<@name>` the conversation doesn't hold
- * keeps its own `<@` for the connector's lookup, as before.
+ * Nor does a `<@` form across a mention's edges, whatever it is written as:
+ * each is read with the characters around it as they're written, a mention
+ * just before it included, and the backslash between goes in code too, where
+ * Discord shows it. A `<@name>` the conversation doesn't hold keeps its own
+ * `<@` for the connector's lookup, as before.
  *
  * Outside `<@Name>`, a mention starts at the start of the text, after
  * whitespace, or after an opening bracket, quote or markdown mark. An `@`
@@ -218,16 +219,12 @@ export function mentionsToIds(
     // No `<@` forms across a mention's edges, whatever it was written as: with
     // the character before it, as written, a mention just before it included,
     // as `<<@Name>>` would, or with the one after it, as a name ending in `<`
-    // would before an `@`. Only a `<@Name>` written as plain text, which is
-    // outside code, can start with `@` after a `<`. A mention that ends in code
-    // is left as it is there, where a backslash would show and `<@` is no
-    // mention.
+    // would before an `@`. The backslash goes in code too, where Discord shows
+    // it: what's read as code here reaches past what Discord shows as code, and
+    // where Discord reads prose, the `<@` could ping.
     const before = offset === lastEnd ? lastWritten.slice(-1) : text.slice(Math.max(offset - 1, 0), offset)
-    const last = offset + match.length - 1
     if (before === '<' && written.startsWith('@')) written = `\\${written}`
-    if (written.endsWith('<') && text[last + 1] === '@' && !code.some(([start, end]) => last >= start && last < end)) {
-      written = `${written}\\`
-    }
+    if (written.endsWith('<') && text[offset + match.length] === '@') written = `${written}\\`
     lastWritten = written
     lastEnd = offset + match.length
     return written

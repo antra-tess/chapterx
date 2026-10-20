@@ -151,8 +151,8 @@ describe('mentionsToIds', () => {
     // A name left as written that ends in < before an @.
     const botLt: MentionAuthor = { id: '901', username: 'xbot', displayName: 'X<', bot: true }
     expect(mentionsToIds('@X<@Sam>', [botLt, sam1, sam2], byDisplayName)).toBe('@X<\\@Sam>')
-    // In code it's left as it is, where a backslash would show.
-    expect(mentionsToIds('```\n@X<@Sam>\n```', [botLt, sam1, sam2], byDisplayName)).toBe('```\n@X<@Sam>\n```')
+    // In code too, where Discord shows the backslash: what's read as code here reaches past what Discord shows as code.
+    expect(mentionsToIds('```\n@X<@Sam>\n```', [botLt, sam1, sam2], byDisplayName)).toBe('```\n@X<\\@Sam>\n```')
     // A mention written as <@id> after a < keeps its <@.
     expect(mentionsToIds('<<@Jack>>', [jack], byDisplayName)).toBe('<<@111>>')
   })
