@@ -48,6 +48,10 @@
  *   `<@Name>` in one, as a `<@{name}>` template writes it, is read like any
  *   other `<@Name>`, as before.
  *
+ * Outside code, a name a mention is written or left as has any `<@` in it
+ * escaped as `<\@`, so it makes no mention for the connector's lookup or for
+ * Discord.
+ *
  * Outside `<@Name>`, a mention starts at the start of the text, after
  * whitespace, or after an opening bracket, quote or markdown mark. An `@`
  * right after a letter, digit or `/` isn't read, so URLs and addresses such as
@@ -98,6 +102,10 @@ const LEAD = `(?<lead>^|[\\s([{"'“‘*_~|])`
 const END = '(?![\\p{L}\\p{M}\\p{N}_])'
 /** After a template ending in `]`: not a markdown link's target. */
 const NOT_LINK = '(?!\\()'
+/** Plain text in which a `<@` reads as no mention: Discord shows `<\@` as
+ *  `<@`, and neither it nor the connector's lookup reads a mention there. A
+ *  name a mention is written or left as can hold one. */
+const inert = (text: string): string => text.replaceAll('<@', '<\\@')
 /** Never read as a name, since Discord gives them to everyone in a channel. */
 const CHANNEL_WIDE = new Set(['everyone', 'here'])
 
@@ -185,12 +193,12 @@ export function mentionsToIds(
       // in an odd run of backslashes gets one more, so the run escapes nothing
       // after it, as the `>` kept it from doing.
       const run = /\\*$/.exec(groups.bracketed)![0].length
-      return `@${groups.bracketed}${run % 2 ? '\\' : ''}`
+      return inert(`@${groups.bracketed}${run % 2 ? '\\' : ''}`)
     }
     // A mention that ends in a backslash, as `@Name\` does, escapes the
     // character after it, which replacing the mention would unescape.
-    if (match.endsWith('\\')) return match
+    if (match.endsWith('\\')) return inert(match)
     const holder = otherNames.get((groups.shown ?? '').toLowerCase())
-    return holder && !holder.bot ? `${groups.lead ?? ''}<@${holder.id}>` : match
+    return holder && !holder.bot ? `${groups.lead ?? ''}<@${holder.id}>` : inert(match)
   })
 }
