@@ -37,8 +37,8 @@
  *   what the markdown splitter's parse reads as code, both with a block or
  *   span carried open from an earlier message (`carry`) open at the text's
  *   start, as the splitter cuts the text, and after that construct's reopener,
- *   as the first message sends it; and Discord's ``` blocks and its inline
- *   spans, each read on its own in the text as the first message sends it.
+ *   as the first message sends it; and what Discord reads as code in the text
+ *   as the first message sends it, its ``` blocks also read on their own.
  * - A mention that ends in a backslash, as `@Name\` does: the backslash
  *   escapes the character after the mention, which replacing the mention would
  *   unescape. Left as plain text, a `<@Name\>` held by no one loses its `>`,

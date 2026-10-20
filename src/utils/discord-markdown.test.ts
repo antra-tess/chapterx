@@ -1457,6 +1457,8 @@ describe('codeRanges', () => {
     expect(codeIn('~~~\n`x\n~~~\n@J`')).toEqual(['~~~\n`x\n~~~\n@J`'])
     // It ends only at a run as long as its opener, here after @J, and the text after the splitter's span is prose.
     expect(codeIn('~~~\n``a ` x\n~~~\n@J `` b `` @K')).toEqual(['~~~\n``a ` x\n~~~\n@J `` b ``'])
+    // And at the first such run: here inside the ~~~ block, so @J after the block is prose.
+    expect(codeIn('~~~\n``a`` x\n~~~\n@J ``')).toEqual(['~~~\n``a`` x\n~~~', '``'])
   })
 
   it('runs a block or span nothing closes to the end of the text, where the splitter closes it', () => {

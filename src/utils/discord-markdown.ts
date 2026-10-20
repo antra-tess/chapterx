@@ -538,13 +538,15 @@ export function scanMarkdown(text: string, start: MarkdownCarry = []): MarkdownC
  *  opens nothing, though the backticks after it can. */
 const DISCORD_BLOCK = /(?<=(?:^|[^\\])(?:\\\\)*)```[\s\S]*?(?:```|$)/g
 
-/** An inline code span as Discord's inline code rule reads one: an opening
- *  run of backticks, or when nothing ends the whole run, its first backticks,
- *  ended by the next run of exactly as many after some other character,
- *  across lines too. Discord has no `~~~` blocks, so a span can open inside
- *  one the splitter reads. A backtick after an odd run of backslashes is
- *  escaped and opens nothing, though the backticks after it can. */
-const DISCORD_SPAN = /(?<=(?:^|[^\\])(?:\\\\)*)(`+)[\s\S]*?[^`]\1(?!`)/g
+/** Code as Discord reads it, from left to right. Each ``` opens a block that
+ *  the next ``` ends, anywhere in a line, or that runs to the end of the text
+ *  if nothing ends it. Outside a block, backticks open a span by Discord's
+ *  inline code rule: an opening run, or when nothing ends the whole run, its
+ *  first backticks, ended by the next run of exactly as many after some other
+ *  character, across lines too. A backtick after an odd run of backslashes is
+ *  escaped and opens nothing, though the backticks after it can. Discord has
+ *  no `~~~` blocks, so a span can open inside one the splitter reads. */
+const DISCORD_CODE = /(?<=(?:^|[^\\])(?:\\\\)*)(?:```[\s\S]*?(?:```|$)|(`+)[\s\S]*?[^`]\1(?!`))/g
 
 /**
  * Where `text` is code, where Discord shows a mention raw, as `[start, end)`
@@ -558,12 +560,13 @@ const DISCORD_SPAN = /(?<=(?:^|[^\\])(?:\\\\)*)(`+)[\s\S]*?[^`]\1(?!`)/g
  * - the same parse of the text as its first message sends it, after the
  *   carried construct's reopener, which a backtick the text starts with can
  *   fuse with;
- * - Discord's ``` blocks, which a ``` later in a line ends where the
- *   splitter's line rules don't, and Discord's inline spans, which can open
- *   inside a `~~~` block the splitter reads and end after it, each read on its
- *   own in the text as its first message sends it. Read on their own, a span
- *   doesn't hide a ``` that opens a block in a later message, once a cut
- *   leaves the span's opener behind.
+ * - Discord's own reading of the text as its first message sends it, its
+ *   ``` blocks and inline spans read from left to right, where a ``` later in
+ *   a line ends a block the splitter's line rules don't, and a span can open
+ *   inside a `~~~` block the splitter reads and end after it;
+ * - Discord's ``` blocks read on their own, so a ``` a span holds still opens
+ *   a block, as it does in a later message once a cut leaves the span's opener
+ *   behind.
  * Reading as code what any of them reads as code changes no text Discord
  * might show as code, and where they differ, a mention pings no one. So does a
  * mention in a `~~~` block, which the splitter reads as code and Discord
@@ -589,7 +592,7 @@ export function codeRanges(text: string, start: MarkdownCarry = []): Array<[numb
       add(construct.openStart - reopener.length, construct.closeEnd - reopener.length)
     }
   }
-  for (const pattern of [DISCORD_BLOCK, DISCORD_SPAN]) {
+  for (const pattern of [DISCORD_CODE, DISCORD_BLOCK]) {
     for (const code of sent.matchAll(pattern)) {
       add(code.index - reopener.length, code.index + code[0].length - reopener.length)
     }
