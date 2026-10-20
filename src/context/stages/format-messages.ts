@@ -12,9 +12,11 @@ import type {
   CachedImage,
   CachedDocument,
   BotConfig,
+  ImageContent,
 } from '../../types.js'
 import { prepareImage, resampleImage, MAX_IMAGE_BASE64_BYTES } from '../image-processing.js'
 import { rewriteMentionsForDisplayNames, applyMentionFormat, stripReplyTags } from './mentions.js'
+import { uncarriedAttachmentLine } from './attachment-lines.js'
 import { logger } from '../../utils/logger.js'
 
 /**
@@ -70,6 +72,9 @@ export async function formatMessages(
   }, 'Starting image selection')
 
   const messagesWithImages = new Set<string>()
+  // Each image block's line, by its attachment's URL, for limitImages to put in
+  // the place of an image it takes out.
+  const imageLines = new Map<string, string>()
   if (config.include_images) {
     let prefixImageCount = 0
     let ephemeralImageCount = 0
@@ -177,6 +182,9 @@ export async function formatMessages(
   // Process messages in order, only including pre-selected images
   for (const msg of messages) {
     const content: ContentBlock[] = []
+    // The attachments this message's content carries, by URL. Each one it
+    // doesn't gets a line, after everything else in the message.
+    const carried = new Set<string>()
 
     // Character override prefix: `~Name: rest` makes the message appear as if
     // sent by `Name`, hiding the real author from the LLM. Lets users seed
@@ -206,6 +214,7 @@ export async function formatMessages(
     const docAttachments = documentsByMessageId.get(msg.id)
     if (docAttachments && docAttachments.length > 0) {
       for (const doc of docAttachments) {
+        carried.add(doc.url)
         const truncatedNotice = doc.truncated ? '\n[Attachment truncated]' : ''
         content.push({
           type: 'text',
@@ -282,6 +291,8 @@ export async function formatMessages(
               tokenEstimate,
               sourceUrl: attachment.url,
             } as any)
+            carried.add(attachment.url)
+            imageLines.set(attachment.url, uncarriedAttachmentLine(attachment))
 
             logger.debug({
               messageId: msg.id,
@@ -371,6 +382,15 @@ export async function formatMessages(
       stripReplyTags(content)
     }
 
+    // A line for each attachment the request doesn't carry, so the model is
+    // told it was sent: without one, a message whose only content it was would
+    // be dropped below, and a message with text would show no sign of it. The
+    // lines go in after the rewrites above, so a name reads as Discord gave it.
+    for (const attachment of msg.attachments) {
+      if (carried.has(attachment.url)) continue
+      content.push({ type: 'text', text: uncarriedAttachmentLine(attachment) })
+    }
+
     // Skip messages with no usable content (sticker-only, embed-only, etc.)
     if (content.length === 0) continue
 
@@ -386,16 +406,23 @@ export async function formatMessages(
 
   // Limit images if needed
   if (config.include_images && config.max_images > 0) {
-    limitImages(participantMessages, config.max_images)
+    // Every image block here was pushed above, which recorded its line.
+    limitImages(participantMessages, config.max_images, (sourceUrl) => imageLines.get(sourceUrl)!)
   }
 
   return participantMessages
 }
 
 /**
- * Remove oldest images from participant messages if over the limit.
+ * Keep the newest max_images image blocks, and put a line in the place of each
+ * older one: `lineFor` gives the line for the attachment an image block came
+ * from, by its source URL.
  */
-export function limitImages(messages: ParticipantMessage[], max_images: number): void {
+export function limitImages(
+  messages: ParticipantMessage[],
+  max_images: number,
+  lineFor: (sourceUrl: string) => string
+): void {
   let imageCount = 0
   const imagePositions: Array<{ msgIndex: number; contentIndex: number }> = []
 
@@ -413,7 +440,11 @@ export function limitImages(messages: ParticipantMessage[], max_images: number):
     const toRemove = imageCount - max_images
     for (let i = 0; i < toRemove; i++) {
       const pos = imagePositions[i]!
-      messages[pos.msgIndex]!.content.splice(pos.contentIndex, 1)
+      const content = messages[pos.msgIndex]!.content
+      const image = content[pos.contentIndex] as ImageContent & { sourceUrl: string }
+      // In place, so the positions recorded after it in the same message
+      // still point at their images.
+      content[pos.contentIndex] = { type: 'text', text: lineFor(image.sourceUrl) }
     }
   }
 }
