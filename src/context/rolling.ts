@@ -52,7 +52,10 @@ export function toMembraneConfig(config: BotConfig): ContextConfig {
     },
     limits: {
       maxCharacters: config.hard_max_characters || 500000,
-      maxMessages: config.recency_window_messages,
+      // No maxMessages: membrane checks it against the messageCount that
+      // shouldRoll() below hands it, which is ChapterX's count of activations
+      // since the last roll, not a number of messages. applyLimits applies
+      // recency_window_messages itself.
     },
     cache: {
       enabled: config.prompt_caching !== false,
@@ -103,10 +106,13 @@ export function shouldRoll(
     };
   }
   
-  // Use membrane's shouldRoll for threshold check
+  // Use membrane's shouldRoll for threshold check. Membrane 0.5.80 and earlier
+  // compare the threshold with state.messagesSinceRoll, and 0.5.81 and later
+  // with messageCount. ^0.5.47 installs either, so the count goes in both
+  // places, which gives the same decision on each.
   const decision = membranesShouldRoll(
     membraneState,
-    0, // messageCount - not used when unit is 'messages' and we pass state
+    messagesSinceRoll, // messageCount
     0, // totalTokens - not used
     totalCharacters,
     membraneConfig
