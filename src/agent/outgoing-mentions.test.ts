@@ -128,9 +128,20 @@ describe('mentionsToIds', () => {
     const bob: MentionAuthor = { id: '444', username: 'bob', displayName: 'bob', bot: false }
     const config = { mention_format: '[{name}]\\', use_display_names_humans: true }
     expect(mentionsToIds('[X <@bob>]\\', [tagged, bob], config)).toBe('[X <\\@bob>]\\')
-    // A bot's @Name, left as written.
-    const bot: MentionAuthor = { id: '777', username: 'botty', displayName: 'Helper <@bob>', bot: true }
-    expect(mentionsToIds('ask @Helper <@bob>', [bot, bob], byDisplayName)).toBe('ask @Helper <\\@bob>')
+    // A bot's @Name, left as written, each <@ in it.
+    const bot: MentionAuthor = { id: '777', username: 'botty', displayName: 'Helper <@alice> <@bob>', bot: true }
+    expect(mentionsToIds('ask @Helper <@alice> <@bob>', [bot, bob], byDisplayName)).toBe('ask @Helper <\\@alice> <\\@bob>')
+    // A mention left as written because part of it is code, outside the code.
+    const coded: MentionAuthor = { id: 'w5', username: 'X `y` <@bob>', displayName: 'X `y` <@bob>', bot: false, webhook: true }
+    expect(mentionsToIds('<@X `y` <@bob>>', [coded, bob], byDisplayName)).toBe('<\\@X `y` <\\@bob>>')
+  })
+
+  it('writes a <@Name> held by no one so that no <@ forms with the characters around it', () => {
+    const sam1: MentionAuthor = { id: '801', username: 'sam_a', displayName: 'Sam', bot: false }
+    const sam2: MentionAuthor = { id: '802', username: 'sam_b', displayName: 'Sam', bot: false }
+    expect(mentionsToIds('<<@Sam>>', [sam1, sam2], byDisplayName)).toBe('<\\@Sam>')
+    const lt: MentionAuthor = { id: 'w4', username: 'X<', displayName: 'X<', bot: false, webhook: true }
+    expect(mentionsToIds('<@X<>@&111111111111111111>', [lt], byDisplayName)).toBe('@X<\\@&111111111111111111>')
   })
 
   it('reads a name ending in a backslash in a form that goes on past the name, where replacing it unescapes nothing', () => {

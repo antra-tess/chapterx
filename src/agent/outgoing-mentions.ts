@@ -50,7 +50,9 @@
  *
  * Outside code, a name a mention is written or left as has any `<@` in it
  * escaped as `<\@`, so it makes no mention for the connector's lookup or for
- * Discord.
+ * Discord, and so does a mention left as written because part of it is code.
+ * A `<@Name>` written as plain text is read with the characters around it, so
+ * no `<@` forms across its edges.
  *
  * Outside `<@Name>`, a mention starts at the start of the text, after
  * whitespace, or after an opening bracket, quote or markdown mark. An `@`
@@ -180,8 +182,12 @@ export function mentionsToIds(
   return text.replace(new RegExp(forms.join('|'), 'giu'), (match: string, ...rest: unknown[]) => {
     const groups = rest[rest.length - 1] as Record<string, string | undefined>
     const offset = rest[rest.length - 3] as number
-    // A mention any part of which is code is left as written.
-    if (code.some(([start, end]) => offset < end && offset + match.length > start)) return match
+    // A mention any part of which is code is left as written, but for a `<@`
+    // in it outside the code, which is escaped.
+    if (code.some(([start, end]) => offset < end && offset + match.length > start)) {
+      return match.replace(/<@/g, (lt: string, at: number) =>
+        code.some(([start, end]) => offset + at >= start && offset + at < end) ? lt : '<\\@')
+    }
     if (groups.bracketed !== undefined) {
       if (DISCORD_ID.test(groups.bracketed)) return match
       const key = groups.bracketed.toLowerCase()
@@ -191,9 +197,14 @@ export function mentionsToIds(
       if (holder) return `<@${holder.id}>`
       // Held by no one, it's left as plain text, without its `>`. A name ending
       // in an odd run of backslashes gets one more, so the run escapes nothing
-      // after it, as the `>` kept it from doing.
+      // after it, as the `>` kept it from doing. The text is made inert with
+      // the characters around the match, so no `<@` forms across its edges
+      // either, as `<<@Name>>` would.
       const run = /\\*$/.exec(groups.bracketed)![0].length
-      return inert(`@${groups.bracketed}${run % 2 ? '\\' : ''}`)
+      const before = text.slice(Math.max(offset - 1, 0), offset)
+      const after = text.slice(offset + match.length, offset + match.length + 1)
+      const written = inert(`${before}@${groups.bracketed}${run % 2 ? '\\' : ''}${after}`)
+      return written.slice(before.length, written.length - after.length)
     }
     // A mention that ends in a backslash, as `@Name\` does, escapes the
     // character after it, which replacing the mention would unescape.
