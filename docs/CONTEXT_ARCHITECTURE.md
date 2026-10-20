@@ -208,7 +208,7 @@ Converts `discord.js Message` to internal `DiscordMessage`:
 2. **Oblique bridge**: Extract real name from `displayname[oblique:...]` webhook format (lines 2134-2141)
 3. **Reply handling**: Prepend `<reply:@targetname>` to content (lines 2164-2176)
    - If target not in message map: `<reply:@someone>` (fallback)
-4. **Fields extracted**: `id, channelId, guildId, author{id, username, displayName, bot}, content, timestamp, attachments[], reactions[], mentions[], referencedMessage`
+4. **Fields extracted**: `id, channelId, guildId, author{id, username, displayName, bot}, content, timestamp, attachments[], reactions[], mentions[], referencedMessage`, with each attachment's `duration` when Discord reports one, and `voiceMessage` on the attachment of a message Discord flags IsVoiceMessage
 
 ### Image Processing — `connector.ts:2304-2430`
 
@@ -311,6 +311,7 @@ Pinned configs can target specific bots with `target: botname` field (case-insen
 - Converts `DiscordMessage[]` → `ParticipantMessage[]`
 - Adds image content (selected based on cache marker position)
 - Adds document attachments (wrapped in `<attachment>` XML tags)
+- Adds a line for each attachment it doesn't carry, after the rest of the message and after mention rewriting, so a name reads as Discord gave it: `[voice message, 0:34, not included]` for a voice message, `[attachment "song.mp3", audio, 3:12, 4.2 MB, not included]` for anything else: an image that isn't selected, isn't cached or can't be brought under the size limit, every image when `include_images` is off, and audio, video and other files. An image that the `max_images` limit takes out after selection gets its line in the image's place. A message whose only content was such an attachment stays in the context as its line.
 - Normalizes bot mentions: `<@DiscordUsername>` → `<@ConfigName>`
 - Optionally strips `<reply:@username>` tags (`include_reply_tags` config)
 
