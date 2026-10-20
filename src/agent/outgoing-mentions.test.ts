@@ -194,6 +194,17 @@ describe('mentionsToIds', () => {
       .toBe('Use `x ```y` <\\@&222222222222222222> <\\@!555555555555555555> <@777777777777777777> ```')
   })
 
+  it("escapes a template's own <@ in code: past a mention's start, and at it where a user's mention by ! and an id follows", () => {
+    expect(mentionsToIds('`a (<@Jack)` b', [jack], { use_display_names_humans: true, mention_format: '(<@{name})' }))
+      .toBe('`a (<\\@Jack)` b')
+    const numbered: MentionAuthor = { id: '444444444444444444', username: 'num', displayName: '555555555555555555', bot: false }
+    const bang = { use_display_names_humans: true, mention_format: '<@!{name}>' }
+    expect(mentionsToIds('<@!555555555555555555> x', [numbered], bang)).toBe('<@444444444444444444> x')
+    // Text that begins inside a carried span.
+    const span = [{ kind: 'inlineCode' as const, opener: '`', closer: '`' }]
+    expect(mentionsToIds('<@!555555555555555555> x` y', [numbered], bang, span)).toBe('<\\@!555555555555555555> x` y')
+  })
+
   it('reads a name ending in a backslash in a form that goes on past the name, where replacing it unescapes nothing', () => {
     const slash: MentionAuthor = { id: '333', username: 'slash_h4ndle', displayName: 'Jack\\', bot: false }
     expect(mentionsToIds('hello [Jack\\]!', [slash], { use_display_names_humans: true, mention_format: '[{name}]' })).toBe('hello <@333>!')

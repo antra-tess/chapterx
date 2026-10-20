@@ -201,9 +201,9 @@ export function mentionsToIds(
     // past what Discord shows as code, and where Discord reads prose, a `<@`
     // could ping. The `<@` it starts with is escaped too where its start is
     // outside code, or where what follows reads as Discord's mention of a role,
-    // or of a user by `!` and an id. Otherwise it stays in code as the model
-    // wrote it, a mention by id `<@id>` included, which pings as it would
-    // outside code.
+    // or of a user by `!` and an id. Otherwise it stays as the model wrote it,
+    // a mention by id `<@id>` included, which pings its id where Discord reads
+    // prose, as it does outside code.
     if (code.some(([start, end]) => offset < end && offset + match.length > start)) {
       DISCORD_MENTION.lastIndex = offset
       const kept = code.some(([start, end]) => offset >= start && offset < end) && !DISCORD_MENTION.test(text)
