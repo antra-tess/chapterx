@@ -1426,6 +1426,11 @@ describe('splitPreservingMarkdown and backslash escapes', () => {
     expect(splitPreservingMarkdown(text, 1800).chunks[0]!.text).toBe('**' + 'a'.repeat(1795) + '**')
   })
 
+  it('cuts after a backslash inside a code span, where it escapes nothing, its closer included', () => {
+    const text = '`' + 'a'.repeat(1797) + '\\bc`'
+    expect(splitPreservingMarkdown(text, 1800).chunks[0]!.text).toBe('`' + 'a'.repeat(1797) + '\\`')
+  })
+
   it('keeps a fence whose opener line ends in a backslash bridged across the cut after it', () => {
     const text = '```' + 'a'.repeat(1792) + '\\\n@everyone\n```\n'
     const { chunks } = splitPreservingMarkdown(text, 1800)
