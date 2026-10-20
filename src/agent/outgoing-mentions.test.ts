@@ -97,9 +97,21 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds(text, [jack], byDisplayName, span)).toBe(text)
   })
 
-  it("keeps the '>' of a <@Name\\> held by no one, so its backslash escapes what it escaped", () => {
+  it('leaves a <@Name\\> held by no one as plain text whose backslashes escape nothing after it, and closes no <@ in the name', () => {
     const slash: MentionAuthor = { id: 'w1', username: 'Slash\\', displayName: 'Slash\\', bot: false, webhook: true }
-    expect(mentionsToIds('<@Slash\\>`<@jack_h4ndle>`', [slash, jack], byDisplayName)).toBe('@Slash\\>`<@jack_h4ndle>`')
+    expect(mentionsToIds('<@Slash\\>`<@jack_h4ndle>`', [slash, jack], byDisplayName)).toBe('@Slash\\\\`<@jack_h4ndle>`')
+    const even: MentionAuthor = { id: 'w2', username: 'Even\\\\', displayName: 'Even\\\\', bot: false, webhook: true }
+    expect(mentionsToIds('<@Even\\\\> hi', [even], byDisplayName)).toBe('@Even\\\\ hi')
+    // A name holding a <@ is closed by no > of the mention's own.
+    const nested: MentionAuthor = { id: 'w3', username: 'X<@Jack\\', displayName: 'X<@Jack\\', bot: false, webhook: true }
+    expect(mentionsToIds('<@X<@Jack\\>', [nested], byDisplayName)).toBe('@X<@Jack\\\\')
+  })
+
+  it("leaves a mention that ends in a template's backslash as written, since it escapes the character after it", () => {
+    const slash: MentionAuthor = { id: '333', username: 'slash_h4ndle', displayName: 'Jack\\', bot: false }
+    const bob: MentionAuthor = { id: '444', username: 'bob', displayName: 'bob', bot: false }
+    const config = { mention_format: '[{name}]\\', use_display_names_humans: true }
+    expect(mentionsToIds('[Jack\\]\\` <@bob> `', [slash, bob], config)).toBe('[Jack\\]\\` <@444> `')
   })
 
   it('reads a name ending in a backslash in a form that goes on past the name, where replacing it unescapes nothing', () => {

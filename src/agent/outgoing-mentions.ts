@@ -34,13 +34,15 @@
  *   someone in the conversation is shown by that number.
  * - Code blocks and inline code, where Discord shows a mention raw, and a
  *   mention any part of which is code (`codeRanges`, discord-markdown.ts):
- *   what the markdown splitter's parse reads as code, the text read as the
- *   splitter sends it after the reopener of a block or span carried open from
- *   an earlier message (`carry`), and every ``` block as Discord pairs them.
- * - A name ending in a backslash, in a form that ends at the name, such as
- *   `@Name`: the backslash escapes the character after the mention, which
- *   replacing the name would unescape. Left as plain text, a `<@Name\>` held
- *   by no one keeps its `>`, so the backslash escapes what it escaped.
+ *   what the markdown splitter's parse reads as code, both with a block or
+ *   span carried open from an earlier message (`carry`) open at the text's
+ *   start, as the splitter cuts the text, and after that construct's reopener,
+ *   as the first message sends it; and every ``` block as Discord pairs them.
+ * - A mention that ends in a backslash, as `@Name\` does: the backslash
+ *   escapes the character after the mention, which replacing the mention would
+ *   unescape. Left as plain text, a `<@Name\>` held by no one loses its `>`,
+ *   so a name ending in an odd run of backslashes gets one more, and the run
+ *   escapes nothing after it.
  * - `@everyone` and `@here`.
  * - Reply tags: `<reply:@Name>`, and the context's `(replying to @Name)`. A
  *   `<@Name>` in one, as a `<@{name}>` template writes it, is read like any
@@ -179,13 +181,15 @@ export function mentionsToIds(
       if (!names) return match
       const holder = names.get(key)
       if (holder) return `<@${holder.id}>`
-      // Held by no one, it's left as plain text. A name ending in a backslash
-      // keeps the `>` it escapes, so what follows reads as it did.
-      return `@${groups.bracketed}${groups.bracketed.endsWith('\\') ? '>' : ''}`
+      // Held by no one, it's left as plain text, without its `>`. A name ending
+      // in an odd run of backslashes gets one more, so the run escapes nothing
+      // after it, as the `>` kept it from doing.
+      const run = /\\*$/.exec(groups.bracketed)![0].length
+      return `@${groups.bracketed}${run % 2 ? '\\' : ''}`
     }
-    // In a form that ends at the name, a name ending in a backslash escapes
-    // the character after the mention, which replacing the name would unescape.
-    if (!suffix && groups.shown?.endsWith('\\')) return match
+    // A mention that ends in a backslash, as `@Name\` does, escapes the
+    // character after it, which replacing the mention would unescape.
+    if (match.endsWith('\\')) return match
     const holder = otherNames.get((groups.shown ?? '').toLowerCase())
     return holder && !holder.bot ? `${groups.lead ?? ''}<@${holder.id}>` : match
   })
