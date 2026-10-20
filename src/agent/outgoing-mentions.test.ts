@@ -82,6 +82,12 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds(twoBlocks, [jack], byDisplayName)).toBe(twoBlocks)
     // Discord has no ~~~ blocks, so a span can open inside one the splitter reads and end after it.
     expect(mentionsToIds('~~~\n`x\n~~~\n@Jack`', [jack], byDisplayName)).toBe('~~~\n`x\n~~~\n@Jack`')
+    // A span doesn't hide a ``` that opens a block once a cut inside the ~~~ block leaves the span's opener in an earlier message.
+    const hidden = '~~~\n`' + 'a'.repeat(1800) + ' ```b`\n~~~\n@Jack\n```'
+    expect(mentionsToIds(hidden, [jack], byDisplayName)).toBe(hidden)
+    // Nor does a span read from a carried span's fused reopener end where a later message's span would.
+    const fused = '`x\n~~~\n' + 'a'.repeat(1800) + '`\n~~~\n@Jack`'
+    expect(mentionsToIds(fused, [jack], byDisplayName, [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toBe(fused)
   })
 
   it('reads text that begins inside a carried span as the splitter sends it, its reopener fused with a backtick the text starts with', () => {
