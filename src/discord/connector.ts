@@ -3,7 +3,7 @@
  * Handles all Discord API interactions
  */
 
-import { Attachment, Client, Collection, GatewayIntentBits, Message, Partials, PermissionFlagsBits, OAuth2Scopes, TextChannel, type MessageMentionOptions } from 'discord.js'
+import { Attachment, Client, Collection, GatewayIntentBits, Message, MessageFlags, Partials, PermissionFlagsBits, OAuth2Scopes, TextChannel, type MessageMentionOptions } from 'discord.js'
 import { pinAddressesBot } from '../agent/pin-target.js'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
@@ -2549,6 +2549,8 @@ export class DiscordConnector {
       }
     }
     
+    const voiceMessage = msg.flags.has(MessageFlags.IsVoiceMessage)
+
     return {
       id: msg.id,
       channelId: msg.channelId,
@@ -2569,6 +2571,8 @@ export class DiscordConnector {
         size: att.size,
         width: att.width || undefined,
         height: att.height || undefined,
+        ...(att.duration != null ? { duration: att.duration } : {}),
+        ...(voiceMessage ? { voiceMessage: true } : {}),
       })),
       reactions: Array.from(msg.reactions.cache.values()).map((reaction) => ({
         emoji: reaction.emoji.name || reaction.emoji.toString(),

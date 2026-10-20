@@ -61,6 +61,19 @@ interface Membrane {
 // Provider Implementation
 // ============================================================================
 
+/** What the request logs write in place of a media payload: its length. */
+function base64Marker(payload: string): string {
+  return `[BASE64_DATA_${payload.length}_BYTES]`;
+}
+
+/** A `data:...;base64,` URL with its payload replaced by `base64Marker`, keeping
+ *  its media type; any other string as it was. */
+function stripDataUrl(value: string): string {
+  const header = value.slice(0, value.indexOf(',') + 1);
+  if (!header.startsWith('data:') || !header.endsWith(';base64,')) return value;
+  return `${header}${base64Marker(value.slice(header.length))}`;
+}
+
 export class MembraneProvider {
   readonly name = 'membrane';
 
@@ -247,7 +260,15 @@ export class MembraneProvider {
           metricsCollector.recordBlock(event);
           options.onBlock?.(event);
         },
-        onToolCalls: options.onToolCalls,
+        // With streaming off, membrane's stream() goes to complete(), which has
+        // no tool loop, and in 0.5.81 to 0.6.0 it refuses onToolCalls instead.
+        // A request without tools has nothing for the callback to run, so it
+        // goes without and gets its answer. A request with tools keeps it, so
+        // that 0.5.81 to 0.6.0 refuse tools that can't run rather than return
+        // the model's calls unexecuted, as 0.5.47 does.
+        onToolCalls: normalizedRequest.streaming === false && !normalizedRequest.tools?.length
+          ? undefined
+          : options.onToolCalls,
         onPreToolContent: options.onPreToolContent,
         onUsage: options.onUsage,
         maxToolDepth: options.maxToolDepth ?? 10,
@@ -475,7 +496,7 @@ export class MembraneProvider {
       const basename = `request-${timestamp}.json`;
       const filename = join(dir, basename);
 
-      // Strip large base64 data from images before logging
+      // Replace each image, audio or document block's data with its length before logging
       const processedRequest = this.stripBase64FromRequest(request);
       writeFileSync(filename, JSON.stringify(processedRequest, null, 2));
       logger.debug({ filename }, 'Logged LLM API request to file');
@@ -500,7 +521,7 @@ export class MembraneProvider {
       const basename = `membrane-${timestamp}.json`;
       const filename = join(dir, basename);
 
-      // Strip large base64 data from images before logging
+      // Replace each image, audio or document block's data with its length before logging
       const processedRequest = this.stripBase64FromRequest(request);
       writeFileSync(filename, JSON.stringify(processedRequest, null, 2));
       logger.debug({ filename }, 'Logged membrane request to file');
@@ -554,24 +575,33 @@ export class MembraneProvider {
     }
   }
 
+  /**
+   * A copy of a request for the request logs, with each media block's payload
+   * (an image, audio or a document) replaced by `[BASE64_DATA_<length>_BYTES]`,
+   * the payload's base64 length, wherever in the request's structure it sits:
+   * - the `data` of a `source` of type 'base64' (Anthropic's and membrane's),
+   *   of Gemini's `inlineData`, and of an `input_audio`;
+   * - the payload of a `data:...;base64,` URL under a `url` key, where the
+   *   OpenAI-style adapters put an image, or in an `image` array, where the
+   *   Images API adapter puts an edit's input images. The URL keeps its media
+   *   type.
+   * These shapes are replaced wherever they sit, a tool's structured arguments
+   * included. Everything else is kept as written: text, a data URL inside it
+   * included, and anything an adapter sends as JSON text, such as a tool
+   * result or a tool call's arguments.
+   */
   private stripBase64FromRequest(request: any): any {
-    // Deep clone to avoid mutating original
-    const clone = JSON.parse(JSON.stringify(request));
-
-    // Strip base64 data from messages
-    if (clone.messages) {
-      for (const msg of clone.messages) {
-        if (msg.content && Array.isArray(msg.content)) {
-          for (const block of msg.content) {
-            if (block.type === 'image' && block.source?.type === 'base64') {
-              block.source.data = `[BASE64_DATA_${block.source.data?.length || 0}_BYTES]`;
-            }
-          }
-        }
+    return JSON.parse(JSON.stringify(request), (key, value) => {
+      if (typeof value === 'string') return key === 'url' ? stripDataUrl(value) : value;
+      if (key === 'image' && Array.isArray(value)) {
+        return value.map((item) => (typeof item === 'string' ? stripDataUrl(item) : item));
       }
-    }
-
-    return clone;
+      if (value && typeof value.data === 'string'
+          && ((key === 'source' && value.type === 'base64') || key === 'inlineData' || key === 'input_audio')) {
+        return { ...value, data: base64Marker(value.data) };
+      }
+      return value;
+    });
   }
 }
 

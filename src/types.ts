@@ -507,6 +507,12 @@ export interface DiscordAttachment {
   size: number
   width?: number
   height?: number
+  /** Length in seconds, when Discord reports one (a voice message's). */
+  duration?: number
+  /** True for the attachment of a voice message, a message Discord flags
+   *  IsVoiceMessage: one audio attachment and no text. Kept on the attachment
+   *  so it stays with its file when messages are merged. */
+  voiceMessage?: boolean
 }
 
 /**

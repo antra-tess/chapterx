@@ -14,7 +14,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { MessageType, type Message } from 'discord.js'
+import { MessageFlagsBitField, MessageType, type Message } from 'discord.js'
 import { DiscordConnector } from './connector.js'
 import { EventQueue } from '../agent/event-queue.js'
 
@@ -74,6 +74,7 @@ function harness(authors: string[], notMembers: string[] = [], webhooks: Record<
       mentions: { users: new Map(), roles: new Map() },
       client: { users: { cache: new Map() } },
       attachments: new Map(),
+      flags: new MessageFlagsBitField(0),
       reactions: { cache: new Map() },
       reference: null,
       webhookId,
