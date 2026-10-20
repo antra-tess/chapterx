@@ -567,14 +567,14 @@ const DISCORD_CODE = /(?<=(?:^|[^\\])(?:\\\\)*)(?:```[\s\S]*?(?:```|$)|(`+)[\s\S
  * - Discord's ``` blocks read on their own, so a ``` a span holds still opens
  *   a block, as it does in a later message once a cut leaves the span's opener
  *   behind.
- * Reading as code what any of them reads as code changes no text Discord
- * might show as code, and where they differ, a mention pings no one. So does a
- * mention in a `~~~` block, which the splitter reads as code and Discord
- * doesn't, and in a span the splitter leaves unclosed because its closer would
- * fuse with a backtick run the text ends with. Discord's other markdown rules,
- * such as its links', aren't read here, and each reading reads the text whole,
- * not each message a cut makes, so where Discord pairs backticks otherwise, a
- * mention converted there can show its id inside code.
+ * Reading as code what any of them reads as code converts no mention where
+ * Discord might show code, and where they differ, a mention pings no one. So
+ * does a mention in a `~~~` block, which the splitter reads as code and
+ * Discord doesn't, and in a span the splitter leaves unclosed because its
+ * closer would fuse with a backtick run the text ends with. Discord's other
+ * markdown rules, such as its links', aren't read here, and each reading reads
+ * the text whole, not each message a cut makes, so where Discord pairs
+ * backticks otherwise, a mention converted there can show its id inside code.
  */
 export function codeRanges(text: string, start: MarkdownCarry = []): Array<[number, number]> {
   const reopener = reopenMarks(exclusiveOnly(start))

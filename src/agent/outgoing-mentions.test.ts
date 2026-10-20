@@ -93,6 +93,9 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds(spanThenBlock, [jack], byDisplayName)).toBe(spanThenBlock)
     const blockThenSpan = '~~~\n```a````b `` c\n~~~\n@Jack`'
     expect(mentionsToIds(blockThenSpan, [jack], byDisplayName)).toBe(blockThenSpan)
+    // A span's closer is a whole run: the first backtick of a run of four doesn't end a one-backtick span, which runs on past @Jack to the last backtick.
+    const longerRun = '~~~\n`x ```` y ```\n~~~\n@Jack`'
+    expect(mentionsToIds(longerRun, [jack], byDisplayName)).toBe(longerRun)
   })
 
   it('reads text that begins inside a carried span as the splitter sends it, its reopener fused with a backtick the text starts with', () => {
