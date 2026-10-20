@@ -6,7 +6,7 @@
  * come to and whether resampling works.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { CachedDocument, CachedImage, DiscordAttachment, DiscordMessage, ParticipantMessage } from '../../types.js'
+import type { CachedDocument, CachedImage, CachedVoiceMessage, DiscordAttachment, DiscordMessage, ParticipantMessage } from '../../types.js'
 
 const imageProcessing = vi.hoisted(() => ({
   prepareImage: vi.fn(),
@@ -202,6 +202,47 @@ describe('formatMessages: an attachment the request does not carry', () => {
       '<attachment filename="notes.txt">\nline one\n</attachment>',
       '[attachment "clip.mp4", video, 900 B, not included]',
     ]]])
+  })
+})
+
+describe('formatMessages: the voice message a bot hears', () => {
+  const voiceFile = (duration = 34.4) => file('voice-message.ogg', 'audio/ogg', 28290, { duration, voiceMessage: true })
+  const heard = (attachment: DiscordAttachment): CachedVoiceMessage =>
+    ({ url: attachment.url, data: Buffer.from('OggS voice'), mediaType: 'audio/ogg' })
+  const formatHeard = (messages: DiscordMessage[], voiceMessage: CachedVoiceMessage | undefined) =>
+    formatMessages(messages, [], [], config(), 'Bot', undefined, voiceMessage)
+
+  it('sends its audio beside its line, which loses "not included"', async () => {
+    const attachment = voiceFile()
+    const out = await formatHeard([message('bob', '', [attachment]), message('carol', 'bot, what did bob say?')], heard(attachment))
+    expect(shown(out)).toEqual([
+      ['bob', ['[voice message, 0:34]', '<audio>']],
+      ['carol', ['bot, what did bob say?']],
+    ])
+    expect(out[0]!.content[1]).toEqual({
+      type: 'audio',
+      source: { type: 'base64', data: Buffer.from('OggS voice').toString('base64'), mediaType: 'audio/ogg' },
+    })
+  })
+
+  it('carries only the voice message it was given, and the others keep their lines', async () => {
+    const older = voiceFile(5)
+    const newer = voiceFile(9)
+    const out = await formatHeard([message('bob', '', [older]), message('dave', '', [newer])], heard(newer))
+    expect(shown(out)).toEqual([
+      ['bob', ['[voice message, 0:05, not included]']],
+      ['dave', ['[voice message, 0:09]', '<audio>']],
+    ])
+  })
+
+  it('carries a voice message that merging moved into an earlier bot message', async () => {
+    const bot = (content: string, attachments: DiscordAttachment[]) =>
+      message('Bot', content, attachments, { author: { id: 'u-bot', username: 'Bot', displayName: 'Bot', bot: true } })
+    const attachment = voiceFile(12)
+    const merged = mergeConsecutiveBotMessages([bot('first', []), bot('', [attachment])], 'Bot')
+    expect(merged).toHaveLength(1)
+    const out = await formatHeard(merged, heard(attachment))
+    expect(shown(out)[0]![1].slice(-2)).toEqual(['[voice message, 0:12]', '<audio>'])
   })
 })
 

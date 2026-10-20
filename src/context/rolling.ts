@@ -106,10 +106,10 @@ export function shouldRoll(
     };
   }
   
-  // Use membrane's shouldRoll for threshold check. Membrane 0.5.80 and earlier
-  // compare the threshold with state.messagesSinceRoll, and 0.5.81 and later
-  // with messageCount. ^0.5.47 installs either, so the count goes in both
-  // places, which gives the same decision on each.
+  // Use membrane's shouldRoll for threshold check. Membrane 0.5.81 and later,
+  // which ^0.5.87 installs, compare the threshold with messageCount, and 0.5.80
+  // and earlier compared it with state.messagesSinceRoll. The count goes in
+  // both places, which gives the same decision under each rule.
   const decision = membranesShouldRoll(
     membraneState,
     messagesSinceRoll, // messageCount

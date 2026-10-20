@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { uncarriedAttachmentLine, attachmentKind, formatDuration, formatSize } from './attachment-lines.js'
+import { uncarriedAttachmentLine, voiceMessageLine, attachmentKind, formatDuration, formatSize } from './attachment-lines.js'
 import type { DiscordAttachment } from '../../types.js'
 
 const attachment = (overrides: Partial<DiscordAttachment> = {}): DiscordAttachment => ({
@@ -9,6 +9,19 @@ const attachment = (overrides: Partial<DiscordAttachment> = {}): DiscordAttachme
   contentType: 'audio/mpeg',
   size: 4.2 * 1024 * 1024,
   ...overrides,
+})
+
+describe('voiceMessageLine', () => {
+  const voice = (overrides: Partial<DiscordAttachment> = {}) =>
+    attachment({ filename: 'voice-message.ogg', contentType: 'audio/ogg', voiceMessage: true, ...overrides })
+
+  it('gives a carried voice message its length, and no "not included"', () => {
+    expect(voiceMessageLine(voice({ duration: 34.2 }), true)).toBe('[voice message, 0:34]')
+  })
+
+  it('leaves the length out of a carried voice message Discord gave none', () => {
+    expect(voiceMessageLine(voice(), true)).toBe('[voice message]')
+  })
 })
 
 describe('uncarriedAttachmentLine', () => {

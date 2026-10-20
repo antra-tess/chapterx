@@ -15,10 +15,8 @@ import type { DiscordAttachment } from '../../types.js'
  *   [attachment "song.mp3", audio, 3:12, 4.2 MB, not included]
  */
 export function uncarriedAttachmentLine(attachment: DiscordAttachment): string {
+  if (attachment.voiceMessage === true) return voiceMessageLine(attachment, false)
   const duration = formatDuration(attachment.duration)
-  if (attachment.voiceMessage === true) {
-    return `[voice message, ${duration ? `${duration}, ` : ''}not included]`
-  }
   const parts = [
     `attachment ${JSON.stringify(attachment.filename)}`,
     attachmentKind(attachment.contentType),
@@ -26,6 +24,17 @@ export function uncarriedAttachmentLine(attachment: DiscordAttachment): string {
     formatSize(attachment.size),
   ].filter((part): part is string => Boolean(part))
   return `[${parts.join(', ')}, not included]`
+}
+
+/**
+ * A voice message's line, given its length when Discord reports one: beside
+ * its audio when the request carries it, standing in for it when not.
+ *   [voice message, 0:34]
+ *   [voice message, 0:34, not included]
+ */
+export function voiceMessageLine(attachment: DiscordAttachment, carried: boolean): string {
+  const parts = ['voice message', formatDuration(attachment.duration), carried ? undefined : 'not included']
+  return `[${parts.filter((part): part is string => Boolean(part)).join(', ')}]`
 }
 
 /** audio, video or image by the content type's top level; file otherwise,

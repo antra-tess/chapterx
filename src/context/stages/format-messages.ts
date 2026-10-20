@@ -11,12 +11,13 @@ import type {
   ContentBlock,
   CachedImage,
   CachedDocument,
+  CachedVoiceMessage,
   BotConfig,
   ImageContent,
 } from '../../types.js'
 import { prepareImage, resampleImage, MAX_IMAGE_BASE64_BYTES } from '../image-processing.js'
 import { rewriteMentionsForDisplayNames, applyMentionFormat, stripReplyTags } from './mentions.js'
-import { uncarriedAttachmentLine } from './attachment-lines.js'
+import { uncarriedAttachmentLine, voiceMessageLine } from './attachment-lines.js'
 import { logger } from '../../utils/logger.js'
 
 /**
@@ -37,7 +38,9 @@ export function characterOverride(content: string): { name: string; text: string
  * Convert Discord messages to participant-based LLM format.
  *
  * This is the core transformation: raw Discord messages become structured
- * ParticipantMessages with embedded images, documents, and normalized mentions.
+ * ParticipantMessages with embedded images, documents, and normalized mentions,
+ * a line for each attachment they don't carry, and `voiceMessage`'s audio
+ * beside its line when one is given.
  */
 export async function formatMessages(
   messages: DiscordMessage[],
@@ -45,9 +48,15 @@ export async function formatMessages(
   documents: CachedDocument[],
   config: BotConfig,
   botDiscordUsername?: string,
-  cacheMarkerMessageId?: string | null
+  cacheMarkerMessageId?: string | null,
+  voiceMessage?: CachedVoiceMessage
 ): Promise<ParticipantMessage[]> {
   const participantMessages: ParticipantMessage[] = []
+
+  const heardAudio: ContentBlock | undefined = voiceMessage && {
+    type: 'audio',
+    source: { type: 'base64', data: voiceMessage.data.toString('base64'), mediaType: voiceMessage.mediaType },
+  }
 
   // Create image lookup
   const imageMap = new Map(images.map((img) => [img.url, img]))
@@ -394,8 +403,14 @@ export async function formatMessages(
     // told it was sent: without one, a message whose only content it was would
     // be dropped below, and a message with text would show no sign of it. The
     // lines go in after the rewrites above, so a name reads as Discord gave it.
+    // The voice message sent as audio keeps its line, without "not included",
+    // so the model is told whose voice message it hears and how long it is.
     for (const attachment of msg.attachments) {
       if (carried.has(attachment.url)) continue
+      if (heardAudio && attachment.url === voiceMessage!.url) {
+        content.push({ type: 'text', text: voiceMessageLine(attachment, true) }, heardAudio)
+        continue
+      }
       content.push({ type: 'text', text: uncarriedAttachmentLine(attachment) })
     }
 

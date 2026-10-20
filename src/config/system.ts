@@ -296,6 +296,9 @@ export class ConfigSystem {
       generate_images: config.generate_images,
       provider_params: config.provider_params,
 
+      // Voice message config
+      include_voice_messages: config.include_voice_messages === true,  // Default: false (opt-in)
+
       // Text attachment config
       include_text_attachments: config.include_text_attachments ?? true,
       max_text_attachment_kb: config.max_text_attachment_kb || 100,  // 100KB default

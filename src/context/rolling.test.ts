@@ -1,9 +1,9 @@
 /**
- * The rolling threshold under both rules @animalabs/membrane's shouldRoll()
- * has had within ^0.5.47: 0.5.80 and earlier compare the threshold with
- * state.messagesSinceRoll, and 0.5.81 and later with the messageCount
- * argument. package-lock.json installs 0.5.47, while an install without it
- * takes the newest 0.5.x.
+ * The rolling threshold under the installed @animalabs/membrane's shouldRoll()
+ * and under a stand-in for 0.5.81's rule, which compares the threshold with
+ * the messageCount argument where 0.5.80 and earlier compared it with
+ * state.messagesSinceRoll. package-lock.json installs 0.5.87, which has
+ * 0.5.81's rule, and package.json asks for ^0.5.87.
  *
  * Run with: npx vitest run rolling
  */
@@ -23,9 +23,10 @@ const actual = await vi.importActual<typeof import('@animalabs/membrane')>('@ani
 /**
  * A stand-in for membrane 0.5.81 to 0.6.0's shouldRoll(), as far as ChapterX's
  * config and its reading of `shouldRoll` and `reason` reach, written from
- * shouldRoll() in those versions' dist/context/process.js, which the lockfile
- * doesn't install: 0.5.80's checks, with the threshold compared with
- * messageCount rather than state.messagesSinceRoll.
+ * shouldRoll() in those versions' dist/context/process.js: 0.5.80's checks,
+ * with the threshold compared with messageCount rather than
+ * state.messagesSinceRoll. It keeps that rule pinned whichever version the
+ * lockfile installs.
  */
 const shouldRollFrom0581: typeof membrane.shouldRoll = (_state, messageCount, totalTokens, totalCharacters, config) => {
   const { rolling, limits } = config

@@ -10,7 +10,7 @@
  * Run with: npx vitest run builder
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { ContextBuilder, type BuildContextParams } from './builder.js'
 import {
   mergeConsecutiveBotMessages,
@@ -1512,6 +1512,78 @@ describe('buildContext (integration)', () => {
     expect(pMsgs[2].participant).toBe('alice')
     expect(pMsgs[3].participant).toBe('Claude') // empty completion
     expect(textOf(pMsgs[3])).toBe('')
+  })
+
+  describe('voice messages', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals()
+    })
+
+    const bob = { id: 'user-2', username: 'bob', displayName: 'Bob', bot: false }
+    const voice = (id: string, contentType = 'audio/ogg') =>
+      ({ id, url: `https://cdn.example/${id}/voice-message.ogg`, filename: 'voice-message.ogg', contentType, size: 28290, duration: 7, voiceMessage: true })
+    /** Builds bob's voice messages for a Gemini bot, with a fetch that answers
+     *  each URL with its own bytes. */
+    const build = async (messages: DiscordMessage[], include_voice_messages: boolean, overrides: Partial<BotConfig> = {}) => {
+      const fetched: string[] = []
+      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+        fetched.push(url)
+        return new Response(Buffer.from(url))
+      }))
+      const result = await builder.buildContext({
+        discordContext: makeDiscordContext(messages),
+        toolCacheWithResults: [],
+        lastCacheMarker: null,
+        messagesSinceRoll: 0,
+        config: makeConfig({ include_voice_messages, continuation_model: 'gemini-3.5-flash-lite', ...overrides }),
+        botDiscordUsername: 'BotUser',
+      })
+      // Every message but the last, the empty turn the bot completes
+      return { fetched, content: result.request.messages.slice(0, -1).map((m) => m.content) }
+    }
+
+    it('sends the newest voice message as audio, in its own type, beside its line', async () => {
+      const older = voice('a1')
+      const newer = voice('a2', 'audio/mpeg')
+      const { fetched, content } = await build([
+        makeDiscordMessage({ id: 'u1', content: '', attachments: [older], author: bob }),
+        makeDiscordMessage({ id: 'u2', content: '', attachments: [newer], author: bob }),
+      ], true)
+      expect(fetched).toEqual([newer.url])
+      expect(content).toEqual([
+        [{ type: 'text', text: '[voice message, 0:07, not included]' }],
+        [
+          { type: 'text', text: '[voice message, 0:07]' },
+          { type: 'audio', source: { type: 'base64', data: Buffer.from(newer.url).toString('base64'), mediaType: 'audio/mpeg' } },
+        ],
+      ])
+    })
+
+    it('hears the newest voice message the model sees, passing over one hidden with 🫥', async () => {
+      const visible = voice('b1')
+      const hidden = voice('b2')
+      const { fetched, content } = await build([
+        makeDiscordMessage({ id: 'u1', content: '', attachments: [visible], author: bob }),
+        makeDiscordMessage({ id: 'u2', content: '', attachments: [hidden], author: bob, reactions: [{ emoji: '🫥', count: 1 }] }),
+      ], true)
+      expect(fetched).toEqual([visible.url])
+      expect(content).toHaveLength(1)
+      expect(content[0]![1]).toMatchObject({ type: 'audio' })
+    })
+
+    it('downloads nothing and sends only the line when the setting is off', async () => {
+      const { fetched, content } = await build([makeDiscordMessage({ id: 'u1', content: '', attachments: [voice('c1')], author: bob })], false)
+      expect(fetched).toEqual([])
+      expect(content).toEqual([[{ type: 'text', text: '[voice message, 0:07, not included]' }]])
+    })
+
+    it('downloads nothing and sends only the line when the setting is on but the request goes through the XML formatter', async () => {
+      for (const overrides of [{ continuation_model: 'claude-sonnet-4-5' }, { mode: 'prefill' as const }]) {
+        const { fetched, content } = await build([makeDiscordMessage({ id: 'u1', content: '', attachments: [voice('d1')], author: bob })], true, overrides)
+        expect(fetched).toEqual([])
+        expect(content).toEqual([[{ type: 'text', text: '[voice message, 0:07, not included]' }]])
+      }
+    })
   })
 
   it('filters dot commands from context', async () => {

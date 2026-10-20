@@ -18,24 +18,9 @@ import {
   type NormalizedRequest,
   type NormalizedResponse,
 } from './adapter.js';
-import { getFormatterForModel } from './factory.js';
+import { resolveFormatterForModel } from './factory.js';
 import { NativeFormatter, AnthropicXmlFormatter, CompletionsFormatter } from '@animalabs/membrane';
 import type { CompleteOptions, StreamOptions as MembraneStreamOptions } from '@animalabs/membrane';
-
-// ============================================================================
-// Mode → Formatter Mapping
-// ============================================================================
-
-/**
- * Resolve formatter type from explicit config mode.
- * Returns undefined when mode is not set, falling back to model-name heuristics.
- */
-function formatterFromMode(mode?: string): 'native' | 'anthropic-xml' | 'completions' | undefined {
-  if (mode === 'chat') return 'native';
-  if (mode === 'prefill') return 'anthropic-xml';
-  if (mode === 'base-model') return 'completions';
-  return undefined;
-}
 
 // ============================================================================
 // Membrane Interface (local definition until package is installed)
@@ -102,10 +87,7 @@ export class MembraneProvider {
     try {
       const normalizedRequest = toMembraneRequest(request);
 
-      // Determine formatter: config mode > per-model config > smart default by model name
-      const formatterType = formatterFromMode(request.config.mode)
-        ?? getFormatterForModel(request.config.model)
-        ?? (request.config.model.startsWith('claude-') || request.config.model.includes('anthropic.claude') ? 'anthropic-xml' : 'native');
+      const formatterType = resolveFormatterForModel(request.config.model, request.config.mode);
       const formatter = formatterType === 'native'
         ? new NativeFormatter()
         : formatterType === 'anthropic-xml'
@@ -232,11 +214,9 @@ export class MembraneProvider {
     );
 
     try {
-      // Determine formatter: explicit override > config mode > per-model config > smart default by model name
+      // Determine formatter: explicit override, else as resolveFormatterForModel resolves it
       const formatterType = options.formatterOverride
-        ?? formatterFromMode(request.config.mode)
-        ?? getFormatterForModel(request.config.model)
-        ?? (request.config.model.startsWith('claude-') || request.config.model.includes('anthropic.claude') ? 'anthropic-xml' : 'native');
+        ?? resolveFormatterForModel(request.config.model, request.config.mode);
       const formatter = formatterType === 'native'
         ? new NativeFormatter()
         : formatterType === 'anthropic-xml'
@@ -543,7 +523,12 @@ export class MembraneProvider {
       const basename = `membrane-response-${timestamp}.json`;
       const filename = join(dir, basename);
 
-      writeFileSync(filename, JSON.stringify(response, null, 2));
+      // A streamed response carries the provider request it answered, media
+      // inline, which is logged as the request logs log it
+      const logged = response?.raw?.request
+        ? { ...response, raw: { ...response.raw, request: this.stripBase64FromRequest(response.raw.request) } }
+        : response;
+      writeFileSync(filename, JSON.stringify(logged, null, 2));
       logger.debug({ filename }, 'Logged membrane response to file');
       return basename;
     } catch (error) {
@@ -576,7 +561,8 @@ export class MembraneProvider {
   }
 
   /**
-   * A copy of a request for the request logs, with each media block's payload
+   * A copy of a request for the request logs, and for the copy of it a streamed
+   * response carries in the response log, with each media block's payload
    * (an image, audio or a document) replaced by `[BASE64_DATA_<length>_BYTES]`,
    * the payload's base64 length, wherever in the request's structure it sits:
    * - the `data` of a `source` of type 'base64' (Anthropic's and membrane's),

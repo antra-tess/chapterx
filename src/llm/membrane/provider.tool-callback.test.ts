@@ -19,9 +19,9 @@ vi.mock('fs', async (importOriginal) => {
 const TOOL = { name: 'lookup', description: 'Look something up', inputSchema: { type: 'object', properties: {} } }
 
 /**
- * A stand-in for membrane 0.5.81 to 0.6.0's stream(), which the lockfile
- * doesn't install: with streaming off it refuses onToolCalls before any
- * provider call, and otherwise answers. It records what it was handed.
+ * A stand-in for membrane 0.5.81 to 0.6.0's stream(): with streaming off it
+ * refuses onToolCalls before any provider call, and otherwise answers. It
+ * records what it was handed.
  */
 function membraneFrom0581() {
   const handed: Array<{ streaming?: boolean; tools: number; onToolCalls: unknown }> = []
@@ -100,10 +100,10 @@ describe('MembraneProvider.stream', () => {
     }
   })
 
-  // The installed membrane itself, with a stand-in for the provider's API. On
-  // 0.5.47, the lockfile's, stream() takes a streaming-off request to
-  // complete() whatever it is handed; from 0.5.81 it answers only without a
-  // callback.
+  // The installed membrane itself (0.5.87, the lockfile's), with a stand-in
+  // for the provider's API. On 0.5.80 and earlier, stream() took a
+  // streaming-off request to complete() whatever it was handed; from 0.5.81 it
+  // answers only without a callback.
   it('answers a request with streaming off and no tools through the installed membrane', async () => {
     const calls: string[] = []
     const answer = { content: [{ type: 'text', text: 'It is noon.' }], stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 }, model: 'stub-model', rawRequest: {}, raw: {} }
