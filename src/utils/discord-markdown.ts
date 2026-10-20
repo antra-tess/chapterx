@@ -532,31 +532,37 @@ export function scanMarkdown(text: string, start: MarkdownCarry = []): MarkdownC
   return parse(text, start).endStack
 }
 
-/** A code block as Discord reads one: each ``` opens a block that the next
- *  ``` ends, anywhere in a line, or that runs to the end of the text if
- *  nothing ends it. A ``` after an odd run of backslashes is escaped and
- *  opens nothing. */
-const DISCORD_BLOCK = /(?<=(?:^|[^\\])(?:\\\\)*)```[\s\S]*?(?:```|$)/g
+/** Code as Discord reads it. Each ``` opens a block that the next ``` ends,
+ *  anywhere in a line, or that runs to the end of the text if nothing ends
+ *  it. Outside a block, backticks open a span by Discord's inline code rule:
+ *  an opening run, or when nothing ends the whole run, its first backticks,
+ *  ended by the next run of exactly as many after some other character,
+ *  across lines too. A ``` or a run after an odd run of backslashes is
+ *  escaped and opens nothing. Discord has no `~~~` blocks, so a span can open
+ *  inside one the splitter reads. */
+const DISCORD_CODE = /(?<=(?:^|[^\\])(?:\\\\)*)(?:```[\s\S]*?(?:```|$)|(`+)[\s\S]*?[^`]\1(?!`))/g
 
 /**
  * Where `text` is code, where Discord shows a mention raw, as `[start, end)`
  * ranges in order, each position of code in one range, for reading the
- * mentions a message sends. It is code wherever any of three readings finds a
- * code block or span:
+ * mentions a message sends. It is code wherever either of two readings finds
+ * a code block or span:
  * - the splitter's own parse of the text, with any block or span carried open
  *   from an earlier message (`start`, as `scanMarkdown` reports it) open at its
  *   start. The splitter cuts the text by this reading and reopens in each
  *   later message what it reads as open there;
- * - the same parse of the text as its first message sends it, after the
- *   carried construct's reopener, which a backtick the text starts with can
- *   fuse with;
- * - Discord's pairing of ``` blocks, which a ``` later in a line ends where the
- *   splitter's line rules don't.
- * Reading as code what any of them reads as code changes no text Discord
+ * - Discord's own reading of the text as its first message sends it, after
+ *   the carried construct's reopener, which a backtick the text starts with
+ *   can fuse with: its ``` blocks, which a ``` later in a line ends where the
+ *   splitter's line rules don't, and its inline spans, which can open inside a
+ *   `~~~` block the splitter reads and end after it.
+ * Reading as code what either of them reads as code changes no text Discord
  * might show as code, and where they differ, a mention pings no one. So does a
  * mention in a `~~~` block, which the splitter reads as code and Discord
  * doesn't, and in a span the splitter leaves unclosed because its closer would
- * fuse with a backtick run the text ends with.
+ * fuse with a backtick run the text ends with. Discord's other markdown rules,
+ * such as its links', aren't read here, so where one of them pairs backticks
+ * otherwise, a mention converted there can show its id inside code.
  */
 export function codeRanges(text: string, start: MarkdownCarry = []): Array<[number, number]> {
   const reopener = reopenMarks(exclusiveOnly(start))
@@ -569,13 +575,8 @@ export function codeRanges(text: string, start: MarkdownCarry = []): Array<[numb
   for (const construct of parse(text, exclusiveOnly(start)).constructs) {
     if (construct.kind === 'fence' || construct.kind === 'inlineCode') add(construct.openStart, construct.closeEnd)
   }
-  for (const construct of parse(sent).constructs) {
-    if (construct.kind === 'fence' || construct.kind === 'inlineCode') {
-      add(construct.openStart - reopener.length, construct.closeEnd - reopener.length)
-    }
-  }
-  for (const block of sent.matchAll(DISCORD_BLOCK)) {
-    add(block.index - reopener.length, block.index + block[0].length - reopener.length)
+  for (const code of sent.matchAll(DISCORD_CODE)) {
+    add(code.index - reopener.length, code.index + code[0].length - reopener.length)
   }
   // In order, and joined where they meet or overlap.
   ranges.sort((a, b) => a[0] - b[0])

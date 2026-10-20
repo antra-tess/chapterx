@@ -1453,6 +1453,12 @@ describe('codeRanges', () => {
     expect(codeIn('a `x` b ``c ` @J`` d ```\nk\n``` e')).toEqual(['`x`', '``c ` @J``', '```\nk\n```'])
   })
 
+  it("reads as code Discord's inline span that opens in a ~~~ block, which Discord has no blocks for, and ends after it", () => {
+    expect(codeIn('~~~\n`x\n~~~\n@J`')).toEqual(['~~~\n`x\n~~~\n@J`'])
+    // It ends only at a run as long as its opener, here after @J.
+    expect(codeIn('~~~\n``a ` x\n~~~\n@J `` b ``')).toEqual(['~~~\n``a ` x\n~~~\n@J `` b ``'])
+  })
+
   it('runs a block or span nothing closes to the end of the text, where the splitter closes it', () => {
     expect(codeIn('a ` b ```\nc')).toEqual(['` b ```\nc'])
     expect(codeIn('a\n```\nc')).toEqual(['```\nc'])

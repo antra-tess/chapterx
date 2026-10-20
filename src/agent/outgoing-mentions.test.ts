@@ -72,7 +72,7 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('```\n@Jack\n```\nthen @Jack', [jack], byDisplayName)).toBe('```\n@Jack\n```\nthen <@111>')
   })
 
-  it("reads as code what the splitter or Discord reads as code: a span nothing closes, and a ``` mid-line in a block", () => {
+  it("reads as code what the splitter or Discord reads as code: a span nothing closes, a ``` mid-line in a block, and a span opened in a ~~~ block", () => {
     // The splitter closes the span at the end of the message, so Discord shows it as code.
     expect(mentionsToIds('Example: `x @Jack', [jack], byDisplayName)).toBe('Example: `x @Jack')
     // Discord ends this block at the ``` mid-line, the splitter at its closer line.
@@ -80,6 +80,8 @@ describe('mentionsToIds', () => {
     // Discord pairs the next two ``` as a second block, where the splitter reads prose.
     const twoBlocks = '```\ncode ``` text\n```\nmore @Jack ```\nafter @Jack'
     expect(mentionsToIds(twoBlocks, [jack], byDisplayName)).toBe(twoBlocks)
+    // Discord has no ~~~ blocks, so a span can open inside one the splitter reads and end after it.
+    expect(mentionsToIds('~~~\n`x\n~~~\n@Jack`', [jack], byDisplayName)).toBe('~~~\n`x\n~~~\n@Jack`')
   })
 
   it('reads text that begins inside a carried span as the splitter sends it, its reopener fused with a backtick the text starts with', () => {

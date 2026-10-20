@@ -34,10 +34,11 @@
  *   someone in the conversation is shown by that number.
  * - Code blocks and inline code, where Discord shows a mention raw, and a
  *   mention any part of which is code (`codeRanges`, discord-markdown.ts):
- *   what the markdown splitter's parse reads as code, both with a block or
- *   span carried open from an earlier message (`carry`) open at the text's
- *   start, as the splitter cuts the text, and after that construct's reopener,
- *   as the first message sends it; and every ``` block as Discord pairs them.
+ *   what the markdown splitter's parse reads as code, with a block or span
+ *   carried open from an earlier message (`carry`) open at the text's start,
+ *   as the splitter cuts the text; and Discord's own ``` blocks and inline
+ *   spans in the text as the first message sends it, after that construct's
+ *   reopener.
  * - A mention that ends in a backslash, as `@Name\` does: the backslash
  *   escapes the character after the mention, which replacing the mention would
  *   unescape. Left as plain text, a `<@Name\>` held by no one loses its `>`,
