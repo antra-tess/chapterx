@@ -22,8 +22,9 @@ const actual = await vi.importActual<typeof import('@animalabs/membrane')>('@ani
 
 /**
  * A stand-in for membrane 0.5.81 to 0.6.0's shouldRoll(), as far as ChapterX's
- * config and its reading of `shouldRoll` and `reason` reach (from membrane's
- * dist/context/process.js): 0.5.80's checks, with the threshold compared with
+ * config and its reading of `shouldRoll` and `reason` reach, written from
+ * shouldRoll() in those versions' dist/context/process.js, which the lockfile
+ * doesn't install: 0.5.80's checks, with the threshold compared with
  * messageCount rather than state.messagesSinceRoll.
  */
 const shouldRollFrom0581: typeof membrane.shouldRoll = (_state, messageCount, totalTokens, totalCharacters, config) => {
@@ -60,9 +61,10 @@ describe.each([
   // From membrane 0.5.81 the threshold never fired, since ChapterX handed it
   // messageCount 0, so with prompt caching on a window was never cut back to
   // recency_window_messages, while the suite, on 0.5.47, passed. A count of
-  // 49 is past recency_window_messages and still mustn't roll: rolling waits
-  // for the threshold.
-  it('cuts the window to recency_window_messages when the count since the last roll reaches rolling_threshold, and not before', () => {
+  // 49 is under the threshold and above recency_window_messages, so it would
+  // roll if membrane were handed maxMessages, which both rules compare with
+  // messageCount.
+  it('cuts a window past recency_window_messages to it when the count since the last roll reaches rolling_threshold, and not before', () => {
     const messages = Array.from({ length: 60 }, (_, i) => message(i))
     const config = botConfig({ recency_window_messages: 40, rolling_threshold: 50 })
 

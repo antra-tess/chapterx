@@ -54,8 +54,8 @@ export function toMembraneConfig(config: BotConfig): ContextConfig {
       maxCharacters: config.hard_max_characters || 500000,
       // No maxMessages: membrane checks it against the messageCount that
       // shouldRoll() below hands it, which is ChapterX's count of activations
-      // since the last roll, not a number of messages. applyLimits applies
-      // recency_window_messages itself.
+      // since the last roll, not a number of messages. ChapterX applies
+      // recency_window_messages in applyLimits instead.
     },
     cache: {
       enabled: config.prompt_caching !== false,
@@ -78,7 +78,7 @@ export interface ChapterXRollDecision {
 /**
  * Determine if context should roll using membrane's logic.
  * 
- * @param messagesSinceRoll - Messages since last roll (from ChannelState)
+ * @param messagesSinceRoll - Activations since the last roll (from ChannelState)
  * @param totalCharacters - Total characters in current context
  * @param config - Bot configuration
  * @returns Roll decision with reason
