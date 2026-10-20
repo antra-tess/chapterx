@@ -805,7 +805,7 @@ export function splitPreservingMarkdown(
     // always terminates.
     if (!isLast) {
       let guard = 0
-      while (cut > chunkStart + 1 && (seamMerges(cut, closeStack, isLast) || splitsEscape(text, cut)) && guard++ <= text.length) {
+      while (cut > chunkStart + 1 && (seamMerges(cut, closeStack, isLast) || splitsEscape(text, chunkStart, cut, closeStack)) && guard++ <= text.length) {
         let next = avoidDelimiterBisect(cut - 1, bridgeable, chunkStart)
         if (next <= chunkStart) next = cut - 1
         cut = next
@@ -839,17 +839,20 @@ function closeMarksForBody(body: string, stack: MarkdownCarry): string {
 }
 
 /**
- * Whether a cut at `pos` falls between a backslash and a character it would
- * escape: an odd run of backslashes ends at the cut, and the character after
- * it is one Discord's markdown escapes, anything but an ASCII letter, a digit
- * or whitespace. Inside code, where a backslash is literal, it answers the
- * same, and pulling the cut back there changes nothing.
+ * Whether a cut at `pos` leaves a backslash escaping what it shouldn't: an odd
+ * run of backslashes ends at the cut, and a character Discord's markdown
+ * escapes, anything but an ASCII letter, a digit or whitespace, follows it in
+ * either message. In the next message that's the character after the cut,
+ * which would lose its escape, and in this one the first closer the chunk
+ * appends, which the backslash would escape. Inside code, where a backslash is
+ * literal, it answers the same, and pulling the cut back there changes nothing.
  */
-function splitsEscape(text: string, pos: number): boolean {
-  if (pos >= text.length || /[0-9A-Za-z\s]/.test(text[pos]!)) return false
+function splitsEscape(text: string, chunkStart: number, pos: number, closeStack: MarkdownCarry): boolean {
   let run = 0
   while (run < pos && text[pos - 1 - run] === '\\') run++
-  return run % 2 === 1
+  if (run % 2 === 0) return false
+  const escaped = (ch: string | undefined): boolean => ch !== undefined && !/[0-9A-Za-z\s]/.test(ch)
+  return escaped(text[pos]) || escaped(closeMarksForBody(text.slice(chunkStart, pos), closeStack)[0])
 }
 
 /** Pull `pos` back so it never bisects a delimiter run; never below `floor`. */
