@@ -192,6 +192,12 @@ describe('mentionsToIds', () => {
     // Here the block read on its own reads them as code, where Discord reads prose.
     expect(mentionsToIds('Use `x ```y` <@&222222222222222222> <@!555555555555555555> <@777777777777777777> ```', people, byDisplayName))
       .toBe('Use `x ```y` <\\@&222222222222222222> <\\@!555555555555555555> <@777777777777777777> ```')
+    // Only what follows each <@ itself is read: a mention by id stays as written before a role's mention too.
+    expect(mentionsToIds('Use `x ```y` <@777777777777777777> <@&222222222222222222> ```', people, byDisplayName))
+      .toBe('Use `x ```y` <@777777777777777777> <\\@&222222222222222222> ```')
+    // A mention by id that starts the text, inside a span carried open, stays as written too.
+    const span = [{ kind: 'inlineCode' as const, opener: '`', closer: '`' }]
+    expect(mentionsToIds('<@777777777777777777> x` y', people, byDisplayName, span)).toBe('<@777777777777777777> x` y')
   })
 
   it("escapes a template's own <@ in code: past a mention's start, and at it where a user's mention by ! and an id follows", () => {
