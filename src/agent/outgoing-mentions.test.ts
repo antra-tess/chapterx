@@ -163,9 +163,13 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('<<@Jack>>', [jack], byDisplayName)).toBe('<<@111>>')
   })
 
-  it('keeps a <@ inside the code of a mention left as written because part of it is code', () => {
+  it('escapes each <@ in the name of a mention left as written because part of it is code, in the code too', () => {
     const coded: MentionAuthor = { id: 'w8', username: 'X `<@bob>`', displayName: 'X `<@bob>`', bot: false, webhook: true }
-    expect(mentionsToIds('<@X `<@bob>`>', [coded], byDisplayName)).toBe('<\\@X `<@bob>`>')
+    expect(mentionsToIds('<@X `<@bob>`>', [coded], byDisplayName)).toBe('<\\@X `<\\@bob>`>')
+    // Here the block read on its own pairs the ``` in the span with the last one, where Discord reads the name as prose.
+    const roleBot: MentionAuthor = { id: '902', username: 'rolebot', displayName: 'X <@&222222222222222222>', bot: true }
+    expect(mentionsToIds('Use `x ```y` @X <@&222222222222222222> ```', [roleBot], byDisplayName))
+      .toBe('Use `x ```y` @X <\\@&222222222222222222> ```')
   })
 
   it('reads a name ending in a backslash in a form that goes on past the name, where replacing it unescapes nothing', () => {

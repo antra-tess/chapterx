@@ -49,14 +49,16 @@
  *   `<@Name>` in one, as a `<@{name}>` template writes it, is read like any
  *   other `<@Name>`, as before.
  *
- * Outside code, a name a mention is written or left as has any `<@` in it
- * escaped as `<\@`, so it makes no mention for the connector's lookup or for
- * Discord, and so does a mention left as written because part of it is code.
- * Nor does a `<@` form across a mention's edges, whatever it is written as:
- * each is read with the characters around it as they're written, a mention
- * just before it included, and the backslash between goes in code too, where
- * Discord shows it. A `<@name>` the conversation doesn't hold keeps its own
- * `<@` for the connector's lookup, as before.
+ * A name a mention is written or left as has any `<@` in it escaped as `<\@`,
+ * so it makes no mention for the connector's lookup or for Discord, and so
+ * does a mention left as written because part of it is code, though a
+ * `<@Name>` form's own `<@` stays as written in code. Nor does a `<@` form
+ * across a mention's edges, whatever it is written as: each is read with the
+ * characters around it as they're written, a mention just before it
+ * included. These backslashes go in code too, where Discord shows them, since
+ * what's read as code here reaches past what Discord shows as code. A
+ * `<@name>` the conversation doesn't hold keeps its own `<@` for the
+ * connector's lookup, as before.
  *
  * Outside `<@Name>`, a mention starts at the start of the text, after
  * whitespace, or after an opening bracket, quote or markdown mark. An `@`
@@ -189,10 +191,14 @@ export function mentionsToIds(
   let lastWritten = ''
   const rewrite = (match: string, groups: Record<string, string | undefined>, offset: number): string => {
     // A mention any part of which is code is left as written, but for a `<@`
-    // in it outside the code, which is escaped.
+    // in its name, which is escaped, in code too, where Discord shows the
+    // backslash: what's read as code here reaches past what Discord shows as
+    // code, and where Discord reads prose, a `<@` in a name could ping. A
+    // `<@Name>` form's own `<@` is escaped only outside code, as the model wrote
+    // it there and it names no id.
     if (code.some(([start, end]) => offset < end && offset + match.length > start)) {
       return match.replace(/<@/g, (lt: string, at: number) =>
-        code.some(([start, end]) => offset + at >= start && offset + at < end) ? lt : '<\\@')
+        at > 0 || !code.some(([start, end]) => offset >= start && offset < end) ? '<\\@' : lt)
     }
     if (groups.bracketed !== undefined) {
       if (DISCORD_ID.test(groups.bracketed)) return match
