@@ -2091,15 +2091,27 @@ export class AgentLoop {
 
       const contextResult = await this.contextBuilder.buildContext(buildParams)
 
-      // Add tools if enabled
+      // The tool path, native or inline, from the config's mode or the model
+      // name. With streaming off, membrane runs no tool calls on the native path,
+      // so the request goes without tools rather than offer the model tools that
+      // can't run.
+      const toolMode = resolveToolModeForModel(config.continuation_model, config.mode)
+      const streamingOffBlocksTools = config.streaming === false && toolMode === 'native'
       if (config.tools_enabled) {
         const availableTools = this.toolSystem.getAvailableTools()
-        contextResult.request.tools = availableTools
-        logger.info({ 
-          toolCount: availableTools.length,
-          toolNames: availableTools.map(t => t.name),
-          serverNames: [...new Set(availableTools.map(t => t.serverName))]
-        }, 'Tools being sent to LLM')
+        if (!streamingOffBlocksTools) {
+          contextResult.request.tools = availableTools
+          logger.info({ 
+            toolCount: availableTools.length,
+            toolNames: availableTools.map(t => t.name),
+            serverNames: [...new Set(availableTools.map(t => t.serverName))]
+          }, 'Tools being sent to LLM')
+        } else if (availableTools.length > 0) {
+          logger.warn(
+            { channelId, model: config.continuation_model, toolCount: availableTools.length },
+            'Tools not sent: with streaming off, membrane runs no tool calls on the native tool path. Set tools_enabled: false to stop this warning.'
+          )
+        }
       }
       endProfile('contextBuild')
 
@@ -2129,9 +2141,8 @@ export class AgentLoop {
       // 6. Call LLM (with tool execution)
       startProfile('llmCall')
 
-      // Route to native or inline tool execution based on config mode (or model name fallback)
+      // Route to native or inline tool execution by the tool mode decided above
       const hasTools = config.tools_enabled && (contextResult.request.tools?.length ?? 0) > 0
-      const toolMode = resolveToolModeForModel(config.continuation_model, config.mode)
 
       let executionResult: {
         completion: any;
