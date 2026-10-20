@@ -50,9 +50,12 @@
  *   other `<@Name>`, as before.
  *
  * A name a mention is written or left as has any `<@` in it escaped as `<\@`,
- * so it makes no mention for the connector's lookup or for Discord, and so
- * does a mention left as written because part of it is code, though a
- * `<@Name>` form's own `<@` stays as written in code. Nor does a `<@` form
+ * so it makes no mention for the connector's lookup or for Discord. So does a
+ * mention left as written because part of it is code, each `<@` in it past its
+ * start, a template's own included, and the one it starts with where its start
+ * is outside code or what follows reads as Discord's mention of a role, or of
+ * a user by `!` and an id; otherwise that one stays as written in code, as a
+ * mention by id `<@id>` does outside code. Nor does a `<@` form
  * across a mention's edges, whatever it is written as: each is read with the
  * characters around it as they're written, a mention just before it
  * included. These backslashes go in code too, where Discord shows them, since
@@ -102,6 +105,8 @@ const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\
 
 /** A mention by id, which is left as written. */
 const DISCORD_ID = /^\d{17,20}$/
+/** Discord's mention of a role, or of a user by `!` and an id. */
+const DISCORD_MENTION = /<@[!&]\d+>/y
 /** Not inside the context's reply tag, `(replying to @Name)`. */
 const NOT_IN_REPLY_TAG = '(?<!\\(replying to)'
 /** What may come just before a mention. */
@@ -190,15 +195,19 @@ export function mentionsToIds(
   let lastEnd = -1
   let lastWritten = ''
   const rewrite = (match: string, groups: Record<string, string | undefined>, offset: number): string => {
-    // A mention any part of which is code is left as written, but for a `<@`
-    // in its name, which is escaped, in code too, where Discord shows the
-    // backslash: what's read as code here reaches past what Discord shows as
-    // code, and where Discord reads prose, a `<@` in a name could ping. A
-    // `<@Name>` form's own `<@` is escaped only outside code, as the model wrote
-    // it there and it names no id.
+    // A mention any part of which is code is left as written, but with each
+    // `<@` in it past its start escaped, in a name or a template's own, in code
+    // too, where Discord shows the backslash: what's read as code here reaches
+    // past what Discord shows as code, and where Discord reads prose, a `<@`
+    // could ping. The `<@` it starts with is escaped too where its start is
+    // outside code, or where what follows reads as Discord's mention of a role,
+    // or of a user by `!` and an id. Otherwise it stays in code as the model
+    // wrote it, a mention by id `<@id>` included, which pings as it would
+    // outside code.
     if (code.some(([start, end]) => offset < end && offset + match.length > start)) {
-      return match.replace(/<@/g, (lt: string, at: number) =>
-        at > 0 || !code.some(([start, end]) => offset >= start && offset < end) ? '<\\@' : lt)
+      DISCORD_MENTION.lastIndex = offset
+      const kept = code.some(([start, end]) => offset >= start && offset < end) && !DISCORD_MENTION.test(text)
+      return match.replace(/<@/g, (lt: string, at: number) => (at > 0 || !kept ? '<\\@' : lt))
     }
     if (groups.bracketed !== undefined) {
       if (DISCORD_ID.test(groups.bracketed)) return match

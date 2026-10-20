@@ -171,10 +171,24 @@ describe('mentionsToIds', () => {
   it('escapes each <@ in the name of a mention left as written because part of it is code, in the code too', () => {
     const coded: MentionAuthor = { id: 'w8', username: 'X `<@bob>`', displayName: 'X `<@bob>`', bot: false, webhook: true }
     expect(mentionsToIds('<@X `<@bob>`>', [coded], byDisplayName)).toBe('<\\@X `<\\@bob>`>')
-    // Here the block read on its own pairs the ``` in the span with the last one, where Discord reads the name as prose.
-    const roleBot: MentionAuthor = { id: '902', username: 'rolebot', displayName: 'X <@&222222222222222222>', bot: true }
-    expect(mentionsToIds('Use `x ```y` @X <@&222222222222222222> ```', [roleBot], byDisplayName))
+    // Here the block read on its own pairs the ``` in the span with the last one, where Discord reads the name as prose. Outside code, the person is pinged.
+    const rolePerson: MentionAuthor = { id: '902', username: 'role_h4ndle', displayName: 'X <@&222222222222222222>', bot: false }
+    expect(mentionsToIds('Use `x ```y` @X <@&222222222222222222> ```', [rolePerson], byDisplayName))
       .toBe('Use `x ```y` @X <\\@&222222222222222222> ```')
+    expect(mentionsToIds('Use @X <@&222222222222222222>', [rolePerson], byDisplayName)).toBe('Use <@902>')
+  })
+
+  it("escapes the <@ a mention left as written in code starts with where what follows reads as Discord's mention of a role, or of a user by ! and an id", () => {
+    const roleShaped: MentionAuthor = { id: '333333333333333333', username: 'amp_h4ndle', displayName: '&222222222222222222', bot: false }
+    const bangShaped: MentionAuthor = { id: '444444444444444444', username: 'bang_h4ndle', displayName: '!555555555555555555', bot: false }
+    const numbered: MentionAuthor = { id: '666666666666666666', username: 'num', displayName: '777777777777777777', bot: false }
+    const people = [roleShaped, bangShaped, numbered]
+    // Outside code, each name goes to the person shown by it, and a mention by id stays as written.
+    expect(mentionsToIds('<@&222222222222222222> <@!555555555555555555> <@777777777777777777>', people, byDisplayName))
+      .toBe('<@333333333333333333> <@444444444444444444> <@777777777777777777>')
+    // Here the block read on its own reads them as code, where Discord reads prose.
+    expect(mentionsToIds('Use `x ```y` <@&222222222222222222> <@!555555555555555555> <@777777777777777777> ```', people, byDisplayName))
+      .toBe('Use `x ```y` <\\@&222222222222222222> <\\@!555555555555555555> <@777777777777777777> ```')
   })
 
   it('reads a name ending in a backslash in a form that goes on past the name, where replacing it unescapes nothing', () => {
