@@ -5,13 +5,20 @@ import { join } from 'path'
 import { AgentLoop } from './loop.js'
 import { EventQueue } from './event-queue.js'
 import { logger } from '../utils/logger.js'
+import { scanMarkdown } from '../utils/discord-markdown.js'
+import { ToolSystem } from '../tools/system.js'
 
-function makeLoop(toolOutput: { value: unknown } = { value: 'tool result' }) {
+/**
+ * With `scanCarry`, each send ends in the markdown carry its text leaves open
+ * from the carry it starts in, as the connector's split gives it; otherwise in
+ * none.
+ */
+function makeLoop(toolOutput: { value: unknown } = { value: 'tool result' }, options: { scanCarry?: boolean } = {}) {
   const cacheDir = mkdtempSync(join(tmpdir(), 'agent-native-send-test-'))
   let nextMessageId = 1
-  const sendSegmentChunks = vi.fn(async (_channelId, _content) => ({
+  const sendSegmentChunks = vi.fn(async (_channelId: string, content: string, _replyTo?: string, carry?: any[]) => ({
     chunks: [{ id: `sent-${nextMessageId++}` }],
-    endCarry: [],
+    endCarry: options.scanCarry ? scanMarkdown(content, carry ?? []) : [],
   }))
   const connector = {
     sendSegmentChunks,
@@ -20,7 +27,7 @@ function makeLoop(toolOutput: { value: unknown } = { value: 'tool result' }) {
   const toolSystem = {
     executeTool: vi.fn(async () => ({ output: toolOutput.value })),
     persistToolUse: vi.fn(async () => {}),
-    stripToolXml: (text: string) => text,
+    stripToolXml: (text: string) => ToolSystem.prototype.stripToolXml.call(undefined, text),
   }
   const loop = new AgentLoop(
     'test-bot',
@@ -33,7 +40,7 @@ function makeLoop(toolOutput: { value: unknown } = { value: 'tool result' }) {
     cacheDir,
   )
 
-  const run = (stream: (request: unknown, callbacks: any) => Promise<any>, discordMessages?: any[]) => {
+  const run = (stream: (request: unknown, callbacks: any) => Promise<any>, discordMessages?: any[], config: Record<string, unknown> = {}) => {
     ;(loop as any).membraneProvider = { stream }
     return (loop as any).executeWithNativeTools(
       { stop_sequences: [] },
@@ -43,6 +50,7 @@ function makeLoop(toolOutput: { value: unknown } = { value: 'tool result' }) {
         max_tool_depth: 4,
         debug_thinking: false,
         preserve_thinking_blocks: false,
+        ...config,
       },
       'channel-1',
       'trigger-1',
@@ -218,6 +226,74 @@ describe('AgentLoop native-tool sending', () => {
     expect(harness.sent()).toEqual(['Let me look.'])
   })
 
+  it("pings a mention in a round's prose and in the reply, and caches the round's words as the model wrote them", async () => {
+    const harness = makeLoop()
+    cleanup = harness.cleanup
+    const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
+
+    // With people labelled by display name, the model names Alice as @Alice.
+    const result = await harness.run(async (_request, callbacks) => {
+      await callbacks.onPreToolContent('Asking @Alice. ')
+      await callbacks.onToolCalls(
+        [{ id: 'tool-1', name: 'lookup', input: {} }],
+        { depth: 0, preamble: 'Asking @Alice. ', accumulated: 'Asking @Alice. ' },
+      )
+      return {
+        content: [{ type: 'text', text: 'Asking @Alice. ' }, { type: 'text', text: 'Thanks, @Alice.' }],
+        stopReason: 'end_turn',
+        usage: { inputTokens: 10, outputTokens: 10 },
+        model: 'test-model',
+      }
+    }, discordMessages, { use_display_names_humans: true })
+
+    expect(harness.sent()).toEqual(['Asking <@111>.', 'Thanks, <@111>.'])
+    // The next context shows the cache as written, so it keeps the model's
+    // words, not the id that was sent.
+    expect(harness.persisted()).toEqual([{ text: 'Asking @Alice.', covers: ['sent-1'] }])
+    // The response the completion returns keeps the model's words too.
+    expect(result.completion.content).toEqual([{ type: 'text', text: 'Asking @Alice. Thanks, @Alice.' }])
+  })
+
+  it("reads the reply's mentions from the code block its round left open", async () => {
+    const harness = makeLoop(undefined, { scanCarry: true })
+    cleanup = harness.cleanup
+    const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
+    const round = 'Run this:\n```\nping <@alice>\n'
+
+    const result = await harness.run(async (_request, callbacks) => {
+      await callbacks.onPreToolContent(round)
+      await callbacks.onToolCalls(
+        [{ id: 'tool-1', name: 'lookup', input: {} }],
+        { depth: 0, preamble: round, accumulated: round },
+      )
+      return {
+        content: [{ type: 'text', text: round }, { type: 'text', text: 'more <@alice>\n```\nDone, <@alice>.' }],
+        stopReason: 'end_turn',
+        usage: { inputTokens: 10, outputTokens: 10 },
+        model: 'test-model',
+      }
+    }, discordMessages)
+
+    // The round's post leaves the code block open, so the reply starts in it.
+    expect(harness.sent()).toEqual(['Run this:\n```\nping <@alice>', 'more <@alice>\n```\nDone, <@111>.'])
+    expect(result.completion.content).toEqual([
+      { type: 'text', text: 'Run this:\n```\nping <@alice>\nmore <@alice>\n```\nDone, <@alice>.' },
+    ])
+  })
+
+  it("reads the reply's mentions as each segment is sent, with its leading indentation gone", async () => {
+    const harness = makeLoop(undefined, { scanCarry: true })
+    cleanup = harness.cleanup
+    const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
+
+    // The thinking block keeps the indentation past the trim that strips tool XML;
+    // the segment's own trim takes it off.
+    await harness.run(async () => done('<thinking>plan</thinking>\n    ```\ncode\n``` x\n@Alice'), discordMessages, { use_display_names_humans: true })
+
+    // Sent without its indentation, the block opens a line and nothing ends it, so @Alice is in it.
+    expect(harness.sent()).toEqual(['```\ncode\n``` x\n@Alice'])
+  })
+
   it('finds the posted prose behind a whitespace-only round that membrane never flushed', async () => {
     const harness = makeLoop()
     cleanup = harness.cleanup
@@ -325,5 +401,61 @@ describe('AgentLoop native-tool sending', () => {
 
     expect(filter({ preserve_thinking_context: false }).map((m: any) => m.id)).toEqual(['trigger', 'final'])
     expect(filter({ preserve_thinking_context: true }).map((m: any) => m.id)).toEqual(['trigger', 'preamble', 'final'])
+  })
+})
+
+describe('AgentLoop inline-tool sending', () => {
+  let cleanup: (() => void) | undefined
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    cleanup?.()
+  })
+
+  it("pings a mention in the text it sends, and returns the response in the model's words", async () => {
+    const harness = makeLoop()
+    cleanup = harness.cleanup
+    const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
+
+    const result = await (harness.loop as any).finalizeInlineExecution({
+      accumulatedOutput: 'Thanks, @Alice.',
+      pendingToolPersistence: [],
+      allToolCallIds: [],
+      allSentMessageIds: [],
+      messageContexts: {},
+      lastContextEndPos: 0,
+      channelId: 'channel-1',
+      triggeringMessageId: 'trigger-1',
+      config: { name: 'TestBot', use_display_names_humans: true },
+      llmRequest: { stop_sequences: [] },
+      discordMessages,
+      markdownCarry: [],
+    })
+
+    expect(harness.sent()).toEqual(['Thanks, <@111>.'])
+    expect(result.completion.content).toEqual([{ type: 'text', text: 'Thanks, @Alice.' }])
+  })
+
+  it('strips the reply tag before it reads mentions, so a mention the reply starts with is read as it is sent', async () => {
+    const harness = makeLoop()
+    cleanup = harness.cleanup
+    const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
+
+    await (harness.loop as any).finalizeInlineExecution({
+      accumulatedOutput: '<reply:@sam>@Alice thanks',
+      pendingToolPersistence: [],
+      allToolCallIds: [],
+      allSentMessageIds: [],
+      messageContexts: {},
+      lastContextEndPos: 0,
+      channelId: 'channel-1',
+      triggeringMessageId: 'trigger-1',
+      config: { name: 'TestBot', use_display_names_humans: true },
+      llmRequest: { stop_sequences: [] },
+      discordMessages,
+      markdownCarry: [],
+    })
+
+    expect(harness.sent()).toEqual(['<@111> thanks'])
   })
 })

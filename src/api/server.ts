@@ -5,6 +5,7 @@
 
 import express, { Request, Response, NextFunction } from 'express'
 import { DiscordConnector } from '../discord/connector.js'
+import { displayNameClasses } from '../discord/member-names.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder } from '../context/builder.js'
 import { logger } from '../utils/logger.js'
@@ -791,6 +792,7 @@ export class ApiServer {
       channelId,
       depth: fetchDepth,
       maxImages: config.include_images ? Math.max((config.max_images || 5) * 2, 10) : 0,
+      displayNames: displayNameClasses(config),  // Server nicknames for display-name labels, as an activation has
     })
 
     const discordFetched = discordContext.messages.length

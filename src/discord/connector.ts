@@ -3,7 +3,7 @@
  * Handles all Discord API interactions
  */
 
-import { Attachment, Client, Collection, GatewayIntentBits, Message, MessageFlags, Partials, PermissionFlagsBits, OAuth2Scopes, TextChannel } from 'discord.js'
+import { Attachment, Client, Collection, GatewayIntentBits, Message, MessageFlags, Partials, PermissionFlagsBits, OAuth2Scopes, TextChannel, type MessageMentionOptions } from 'discord.js'
 import { pinAddressesBot } from '../agent/pin-target.js'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
@@ -19,11 +19,12 @@ import {
 } from '../types.js'
 import { logger } from '../utils/logger.js'
 import { retryDiscord } from '../utils/retry.js'
-import { splitPreservingMarkdown, type MarkdownCarry } from '../utils/discord-markdown.js'
+import { codeRanges, splitPreservingMarkdown, type MarkdownCarry } from '../utils/discord-markdown.js'
 import {
   fetchChannelMessages,
   type FetchDeps,
 } from './context-fetch.js'
+import { AuthorMembers, type DisplayNameClasses } from './member-names.js'
 
 export interface ConnectorOptions {
   token: string
@@ -82,6 +83,9 @@ export interface FetchContextParams {
   pinnedConfigs?: string[]  // Optional: Pre-fetched pinned configs (skips fetchPinned call)
   maxImages?: number  // Optional: Cap image fetching to avoid RAM bloat (default: unlimited)
   ignoreHistory?: boolean  // Optional: Skip .history command processing (raw fetch)
+  // Optional: whose labels use display names. Their members missing from the
+  // cache are fetched first, so a label can carry the server nickname.
+  displayNames?: DisplayNameClasses
 }
 
 /** A sent Discord message plus the synthetic markdown bridge strings injected
@@ -90,6 +94,20 @@ export interface SentMessageChunk {
   id: string
   bridgeOpen?: string
   bridgeClose?: string
+}
+
+/** The author id convertMessage gives a message that has no author: a
+ *  placeholder, not anyone in the conversation. */
+export const SYSTEM_PLACEHOLDER_ID = 'system'
+
+/** A reply's allowed mentions: the reply doesn't ping the author it answers,
+ *  and the people its text mentions are pinged. Once a message carries
+ *  allowed_mentions, Discord pings only what that field allows (its default
+ *  of every mention type applies only when the field is left out), so
+ *  `repliedUser: false` alone would keep every mention in a reply silent.
+ *  Roles and @everyone stay unparsed in a reply, as they were. */
+function replyAllowedMentions(): MessageMentionOptions {
+  return { repliedUser: false, parse: ['users'] }
 }
 
 export class DiscordConnector {
@@ -101,6 +119,8 @@ export class DiscordConnector {
   // behind one. `closed` refuses any start once close() has begun.
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private closed = false
+  // Server nicknames for display-name labels (member-names.ts)
+  private authorMembers = new AuthorMembers()
   private imageCache = new Map<string, CachedImage>()
   private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
   private urlMapPath: string  // Path to URL map file
@@ -796,6 +816,12 @@ export class DiscordConnector {
 
       logger.debug({ finalMessageCount: messages.length }, 'Context fetch pipeline complete')
 
+      if (params.displayNames) {
+        startProfile('memberNames')
+        await this.authorMembers.cacheFor(messages, params.displayNames)
+        endProfile('memberNames')
+      }
+
       startProfile('messageConvert')
       // Convert to our format (with reply username lookup)
       const messageMap = new Map(messages.map(m => [m.id, m]))
@@ -1012,11 +1038,22 @@ export class DiscordConnector {
   /**
    * Resolve <@username> mentions to <@USER_ID> format for Discord
    * This reverses the conversion done in convertMessage
+   *
+   * A mention in code is left as written, since Discord shows it raw there.
+   * `startCarry` is a code block or span the text begins inside, carried open
+   * from an earlier message, as the markdown splitter sends it.
    */
-  private async resolveMentions(content: string, channelId: string): Promise<string> {
-    // Find all <@username> patterns (not already numeric IDs)
-    const mentionPattern = /<@([^>0-9][^>]*)>/g
-    const matches = [...content.matchAll(mentionPattern)]
+  private async resolveMentions(content: string, channelId: string, startCarry: MarkdownCarry = []): Promise<string> {
+    // Find all <@username> patterns (not already numeric IDs), outside code.
+    // A name holds no '<': so a '<@' left open in code doesn't run on to a
+    // mention after it and take it out with it, and '<@<@name>' reads the
+    // mention inside. It holds no line end either, since no member's name
+    // has one, which spares a lookup that could find no one.
+    const mentionPattern = /<@([^>0-9<\n][^><\n]*)>/g
+    const code = codeRanges(content, startCarry)
+    const matches = [...content.matchAll(mentionPattern)].filter(
+      (match) => !code.some(([start, end]) => match.index < end && match.index + match[0].length > start),
+    )
     
     if (matches.length === 0) {
       return content
@@ -1028,7 +1065,7 @@ export class DiscordConnector {
       return content
     }
 
-    let result = content
+    const resolved = new Map<number, string>()
     for (const match of matches) {
       const username = match[1]
       if (!username) continue
@@ -1058,7 +1095,7 @@ export class DiscordConnector {
           
           const member = sortedMatches[0]
           if (member) {
-            result = result.replace(match[0], `<@${member.user.id}>`)
+            resolved.set(match.index, `<@${member.user.id}>`)
             logger.debug({ 
               username, 
               userId: member.user.id, 
@@ -1072,7 +1109,17 @@ export class DiscordConnector {
       }
     }
 
-    return result
+    // Each mention is replaced where it was found, so the same text in code
+    // stays as written.
+    let result = ''
+    let from = 0
+    for (const match of matches) {
+      const to = resolved.get(match.index)
+      if (to === undefined) continue
+      result += content.slice(from, match.index) + to
+      from = match.index + match[0].length
+    }
+    return result + content.slice(from)
   }
 
   /**
@@ -1160,7 +1207,7 @@ export class DiscordConnector {
         throw new DiscordError(`Channel ${channelId} not found`)
       }
 
-      let resolvedContent = await this.resolveMentions(content, channelId)
+      let resolvedContent = await this.resolveMentions(content, channelId, startCarry)
       if (channel.guild) {
         resolvedContent = this.resolveEmojis(resolvedContent, channel.guild)
       }
@@ -1197,13 +1244,15 @@ export class DiscordConnector {
         const sent = await channel.send({
           content,
           reply: { messageReference: replyToMessageId },
-          allowedMentions: { repliedUser: false },
+          allowedMentions: replyAllowedMentions(),
         })
         return sent.id
       } catch (error: any) {
         if (error.code === 10008 || error.message?.includes('Unknown message')) {
           logger.warn({ replyToMessageId, channelId: channel.id }, 'Reply target deleted, sending without reply')
-          const sent = await channel.send({ content })
+          // It keeps the reply's allowedMentions, as the attachment senders'
+          // fallbacks do, so its text pings no role and no @everyone.
+          const sent = await channel.send({ content, allowedMentions: replyAllowedMentions() })
           return sent.id
         }
         throw error
@@ -1249,7 +1298,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
-          options.allowedMentions = { repliedUser: false }
+          options.allowedMentions = replyAllowedMentions()
           const sent = await channel.send(options)
           logger.debug({ channelId, attachmentName: attachment.name, replyTo: replyToMessageId }, 'Sent message with attachment')
           return [sent.id]
@@ -1312,7 +1361,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
-          options.allowedMentions = { repliedUser: false }
+          options.allowedMentions = replyAllowedMentions()
           const sent = await channel.send(options)
           logger.debug({ channelId, filename, replyTo: replyToMessageId }, 'Sent image attachment')
           return [sent.id]
@@ -1373,7 +1422,7 @@ export class DiscordConnector {
       if (replyToMessageId) {
         try {
           options.reply = { messageReference: replyToMessageId }
-          options.allowedMentions = { repliedUser: false }
+          options.allowedMentions = replyAllowedMentions()
           const sent = await channel.send(options)
           logger.debug({ channelId, filename, size: fileBuffer.length, replyTo: replyToMessageId }, 'Sent file attachment')
           return [sent.id]
@@ -2416,7 +2465,7 @@ export class DiscordConnector {
         id: msg.id,
         channelId: msg.channelId,
         guildId: msg.guildId || '',
-        author: { id: 'system', username: 'system', displayName: 'system', bot: true },
+        author: { id: SYSTEM_PLACEHOLDER_ID, username: 'system', displayName: 'system', bot: true },
         content: '',
         timestamp: msg.createdAt,
         attachments: [],
@@ -2532,6 +2581,7 @@ export class DiscordConnector {
       authorRoles: msg.member ? Array.from(msg.member.roles.cache.values()).map(r => r.name) : undefined,
       mentions: Array.from(msg.mentions.users.keys()),
       referencedMessage: msg.reference?.messageId,
+      webhookId: msg.webhookId ?? undefined,
     }
   }
 

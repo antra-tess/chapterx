@@ -20,6 +20,7 @@ import { describe, it, expect } from 'vitest'
 import {
   splitPreservingMarkdown,
   scanMarkdown,
+  codeRanges,
   exclusiveOnly,
   closeMarks,
   reopenMarks,
@@ -1399,5 +1400,113 @@ describe('splitPreservingMarkdown — defect 2: bridge/body delimiter-run merge 
     const r = splitPreservingMarkdown(text, 2000)
     expect(reconstruct(r.chunks)).toBe(text)
     assertNoSeamMerge(r.chunks)
+  })
+})
+
+describe('splitPreservingMarkdown and backslash escapes', () => {
+  it('keeps a backslash with the character it escapes, cutting before the backslash', () => {
+    const text = 'a'.repeat(1799) + '\\` x'
+    expect(splitPreservingMarkdown(text, 1800).chunks.map((c) => c.text)).toEqual(['a'.repeat(1799), '\\` x'])
+  })
+
+  it('cuts after an even run of backslashes, which escapes nothing', () => {
+    const text = 'a'.repeat(1798) + '\\\\` x`'
+    expect(splitPreservingMarkdown(text, 1800).chunks[0]!.text).toBe('a'.repeat(1798) + '\\\\')
+  })
+
+  it('cuts after a backslash before a letter, a digit or whitespace, which it escapes nothing in', () => {
+    for (const next of ['x', 'X', '7', ' ', '\n']) {
+      expect(splitPreservingMarkdown('a'.repeat(1799) + '\\' + next + 'y', 1800).chunks[0]!.text).toBe('a'.repeat(1799) + '\\')
+    }
+    expect(splitPreservingMarkdown('\n'.repeat(1799) + '\\x', 1800).chunks[0]!.text).toBe('\n'.repeat(1799) + '\\')
+  })
+
+  it("cuts before a backslash that would escape the closer the message appends", () => {
+    const text = '**' + 'a'.repeat(1795) + '\\ b**'
+    expect(splitPreservingMarkdown(text, 1800).chunks[0]!.text).toBe('**' + 'a'.repeat(1795) + '**')
+  })
+
+  it('cuts after a backslash inside a ``` block, where it escapes nothing, and before one in a ~~~ block, which is prose to Discord', () => {
+    const backtick = splitPreservingMarkdown('a'.repeat(1791) + '\\`b\n```', 1800, [{ kind: 'fence', opener: '```', closer: '```' }])
+    expect(backtick.chunks[0]!.text.endsWith('a\\\n```')).toBe(true)
+    const tilde = splitPreservingMarkdown('a'.repeat(1791) + '\\`b\n~~~', 1800, [{ kind: 'fence', opener: '~~~', closer: '~~~' }])
+    expect(tilde.chunks[0]!.text.endsWith('a\n~~~')).toBe(true)
+  })
+
+  it('cuts after a backslash inside a code span, where it escapes nothing, its closer included', () => {
+    const text = '`' + 'a'.repeat(1797) + '\\bc`'
+    expect(splitPreservingMarkdown(text, 1800).chunks[0]!.text).toBe('`' + 'a'.repeat(1797) + '\\`')
+  })
+
+  it('keeps a fence whose opener line ends in a backslash bridged across the cut after it', () => {
+    const text = '```' + 'a'.repeat(1792) + '\\\n@everyone\n```\n'
+    const { chunks } = splitPreservingMarkdown(text, 1800)
+    expect(chunks[1]!.text.startsWith('```')).toBe(true)
+  })
+})
+
+describe('codeRanges', () => {
+  const codeIn = (text: string, start: MarkdownCarry = []): string[] =>
+    codeRanges(text, start).map(([from, to]) => text.slice(from, to))
+
+  it('finds code blocks and inline spans, a span ending only at a run as long as its opener', () => {
+    expect(codeIn('a `x` b ``c ` @J`` d ```\nk\n``` e')).toEqual(['`x`', '``c ` @J``', '```\nk\n```'])
+  })
+
+  it("reads as code Discord's inline span that opens in a ~~~ block, which Discord has no blocks for, and ends after it", () => {
+    expect(codeIn('~~~\n`x\n~~~\n@J`')).toEqual(['~~~\n`x\n~~~\n@J`'])
+    // It ends only at a run as long as its opener, here after @J, and the text after the splitter's span is prose.
+    expect(codeIn('~~~\n``a ` x\n~~~\n@J `` b `` @K')).toEqual(['~~~\n``a ` x\n~~~\n@J `` b ``'])
+    // And at the first such run: here inside the ~~~ block, so @J after the block is prose.
+    expect(codeIn('~~~\n``a`` x\n~~~\n@J ``')).toEqual(['~~~\n``a`` x\n~~~', '``'])
+  })
+
+  it('runs a block or span nothing closes to the end of the text, where the splitter closes it', () => {
+    expect(codeIn('a ` b ```\nc')).toEqual(['` b ```\nc'])
+    expect(codeIn('a\n```\nc')).toEqual(['```\nc'])
+    // The splitter's last chunk closes the span it leaves open.
+    const { chunks } = splitPreservingMarkdown('a ` b', 1800)
+    expect(chunks.map((c) => c.text)).toEqual(['a ` b`'])
+  })
+
+  it('opens nothing at a backtick escaped with a backslash, and lets a run after it open a span, as the splitter reads it', () => {
+    expect(codeIn('a \\`b` c')).toEqual(['` c'])
+    expect(codeIn('a \\``` b')).toEqual(['`` b'])
+    // An escaped backslash leaves the backtick after it unescaped.
+    expect(codeIn('a \\\\`b` c')).toEqual(['`b`'])
+  })
+
+  it('reads text that begins inside a carried block or span as the splitter sends it, after its reopener', () => {
+    expect(codeIn('k\n```\nThanks', [{ kind: 'fence', opener: '```py', closer: '```' }])).toEqual(['k\n```'])
+    expect(codeIn('x` y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`'])
+    expect(codeIn('x` y `z` w', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`', '`z`'])
+    // The reopener fuses with a backtick the text starts with: the splitter sends ``x @J ``,
+    // and its own parse, with the span open, reads the "``" before "y" as an opener.
+    expect(codeIn('`x @J ``y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['`x @J ``y'])
+    const { chunks } = splitPreservingMarkdown('`x @J ``y', 1800, [{ kind: 'inlineCode', opener: '`', closer: '`' }])
+    expect(chunks[0]!.text.startsWith('``x @J ``')).toBe(true)
+  })
+
+  it('reads as code what the splitter reopens in a later message, the text read with the carried span open', () => {
+    const span: MarkdownCarry = [{ kind: 'inlineCode', opener: '`', closer: '`' }]
+    const text = '`x ``' + 'a'.repeat(1800) + ' @J'
+    expect(codeIn(text, span)).toEqual([text])
+    const { chunks } = splitPreservingMarkdown(text, 1800, span)
+    expect(chunks[1]!.text.startsWith('``a')).toBe(true)
+  })
+
+  it("reads as code a block the splitter's parse opens once the carried span closes, though the text as first sent reads it as a span", () => {
+    const span: MarkdownCarry = [{ kind: 'inlineCode', opener: '`', closer: '`' }]
+    const text = '`x\n```\nx ``` `` ' + 'a'.repeat(1800) + ' @J'
+    expect(codeIn(text, span).join('')).toContain('@J')
+  })
+
+  it('reads a ``` after an even run of backslashes as Discord does, opening a block', () => {
+    expect(codeIn('~~~\n\\\\```\n~~~\n@J')).toEqual(['~~~\n\\\\```\n~~~\n@J'])
+  })
+
+  it("reads as code both a block that opens a line, up to a line holding just its marker, and each ``` block as Discord pairs them", () => {
+    // The splitter ends the block at its closer line, and Discord at the ``` mid-line, then opens another at the next.
+    expect(codeIn('```\nk\n``` then j\n```\nm')).toEqual(['```\nk\n``` then j\n```\nm'])
   })
 })

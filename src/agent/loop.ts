@@ -6,7 +6,7 @@
 import { EventQueue } from './event-queue.js'
 import { DeferredQueue, isTransientError } from './deferred-queue.js'
 import { ChannelStateManager } from './state-manager.js'
-import { DiscordConnector, type PinnedSteer } from '../discord/connector.js'
+import { DiscordConnector, SYSTEM_PLACEHOLDER_ID, type PinnedSteer } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { collectCoveredToolMessageIds } from '../context/stages/tool-interleave.js'
@@ -14,8 +14,12 @@ import { ToolSystem } from '../tools/system.js'
 import { toolOutputText } from '../tools/output-text.js'
 import { Event, BotConfig, ContentBlock, DiscordMessage, ToolCall, ToolResult, VendorConfig } from '../types.js'
 import { logger, withActivationLogging } from '../utils/logger.js'
+import { displayNameClasses } from '../discord/member-names.js'
+import { mentionsToIds } from './outgoing-mentions.js'
 import { sleep } from '../utils/retry.js'
-import { exclusiveOnly, type MarkdownCarry } from '../utils/discord-markdown.js'
+import { exclusiveOnly, scanMarkdown, type MarkdownCarry } from '../utils/discord-markdown.js'
+import { filterDotMessages, mergeConsecutiveBotMessages } from '../context/stages/message-filtering.js'
+import { characterOverride } from '../context/stages/format-messages.js'
 import { 
   withTrace, 
   TraceCollector, 
@@ -1054,25 +1058,68 @@ export class AgentLoop {
     return null
   }
 
-  private async replaceMentions(text: string, messages: any[]): Promise<string> {
-    // Build username -> user ID mapping from recent messages
-    // Use actual username (not displayName) for chapter2 compatibility
-    const userMap = new Map<string, string>()
-    
-    for (const msg of messages) {
-      if (msg.author && !msg.author.bot) {
-        userMap.set(msg.author.username, msg.author.id)
-      }
+  private async replaceMentions(
+    text: string,
+    messages: any[],
+    config: BotConfig,
+    carry: MarkdownCarry = [],
+  ): Promise<string> {
+    // Mentions of the people in the conversation become <@USER_ID>, in the
+    // forms the context shows their names (outgoing-mentions.ts). Messages
+    // the context hides (dot commands and the like) are left out, with the
+    // same filter and settings the context builder uses, and so are the
+    // bot's own: the context labels them config.name, so their author's
+    // Discord names would otherwise make a person's name look shared.
+    // config.name itself is held by no one there. The connector's 'system'
+    // placeholder for a message without an author isn't anyone, so it's
+    // left out too. Authors of messages the context drops for having no
+    // content, or for its limits, still count: their names can appear in
+    // text the context shows, and a name they share pings no one. A
+    // character override's name (`~Name:`) is shown as a message's author
+    // too, and is no one to ping, so it's held as a webhook persona's name
+    // is, and a person shown by the same name shares it. `carry` is the code
+    // block or span the text begins inside, carried open from an earlier
+    // send.
+    const steerVisible = config.steer_visible === true
+    const ignoreDotted = config.ignore_dotted_messages !== false
+    const shown = filterDotMessages(messages, steerVisible, ignoreDotted)
+    const authors = shown
+      .filter((msg) => msg.author && msg.author.id !== this.botUserId && msg.author.id !== SYSTEM_PLACEHOLDER_ID)
+      .map((msg) => ({ ...msg.author, webhook: Boolean(msg.webhookId) }))
+    // Overrides are read from the messages as the context builder reads
+    // them, the bot's consecutive messages joined first. An override's name
+    // counts as an author's does, even where the context then drops its
+    // message for having no content or for its limits. The join runs on
+    // copies, since it adds the joined messages' attachments to the first one's.
+    const botName = this.connector.getBotUsername() || config.name
+    const merged = config.preserve_thinking_context
+      ? messages
+      : mergeConsecutiveBotMessages(
+          messages.filter((msg) => msg.author).map((msg) => ({ ...msg, attachments: [...(msg.attachments ?? [])] })),
+          botName,
+        )
+    for (const msg of filterDotMessages(merged, steerVisible, ignoreDotted)) {
+      const { name } = characterOverride(typeof msg.content === 'string' ? msg.content : '')
+      if (name) authors.push({ id: '', username: name, displayName: name, bot: false, webhook: true })
     }
-    
-    // Replace <@username> with <@USER_ID>
-    let result = text
-    for (const [name, userId] of userMap.entries()) {
-      const pattern = new RegExp(`<@${name}>`, 'gi')
-      result = result.replace(pattern, `<@${userId}>`)
+    return mentionsToIds(text, authors, config, carry)
+  }
+
+  /**
+   * Mentions become <@USER_ID> in each segment, each read from the markdown
+   * carry it starts in, as sendSegments sends them.
+   */
+  private async replaceMentionsInSegments(
+    segments: ContentSegment[],
+    messages: any[],
+    config: BotConfig,
+    carry: MarkdownCarry,
+  ): Promise<void> {
+    for (const segment of segments) {
+      if (!segment.visible) continue
+      segment.visible = await this.replaceMentions(segment.visible, messages, config, carry)
+      carry = exclusiveOnly(scanMarkdown(segment.visible, carry))
     }
-    
-    return result
   }
 
   /**
@@ -1641,6 +1688,7 @@ export class AgentLoop {
         authorized_roles: [],  // Will apply after loading config
         pinnedConfigs,  // Reuse pre-fetched pinned configs (avoids second API call)
         maxImages: maxImagesFetch,  // Prevents loading all images from image-heavy channels
+        displayNames: displayNameClasses(preConfig),  // Server nicknames for display-name labels
       })
       endProfile('fetchContext')
       // Once the model has answered this context, messages up to its newest
@@ -2764,6 +2812,18 @@ export class AgentLoop {
               }
             }
 
+            // The history joins consecutive bot messages with a space, so the
+            // cache joins the round's pieces with one too; a piece past the
+            // message limit goes out as several messages and stays whole here.
+            // The cache holds the model's words, read before mentions become
+            // <@USER_ID>: the next context shows it as written, and an id is
+            // nothing the model wrote.
+            const postedVisibleText = segments.map(s => s.visible).join(' ')
+            if (discordMessages) {
+              // Mentions become <@USER_ID>, as in the final reply
+              await this.replaceMentionsInSegments(segments, discordMessages, config, markdownCarry)
+            }
+
             const sendResult = await this.sendSegments(
               channelId,
               segments,
@@ -2778,9 +2838,6 @@ export class AgentLoop {
             }
             // Reset so we don't re-send
             flushedPreToolText += accumulatedPreToolText
-            // Each visible piece went out as its own message, and the history
-            // joins consecutive bot messages with a space, so the cache does too.
-            const postedVisibleText = segments.map(s => s.visible).join(' ')
             roundPostedText = roundPostedText ? `${roundPostedText} ${postedVisibleText}` : postedVisibleText
             accumulatedPreToolText = ''
           }
@@ -3005,16 +3062,17 @@ export class AgentLoop {
         }
       }
 
-      // Replace mentions
-      if (discordMessages) {
-        displayText = await this.replaceMentions(displayText, discordMessages)
-        remainingDisplayText = await this.replaceMentions(remainingDisplayText, discordMessages)
-      }
-
       // Send remaining text to Discord (text not already sent via onPreToolContent)
       if (remainingDisplayText.trim()) {
         const segments = this.parseIntoSegments(remainingDisplayText)
         if (segments.length > 0) {
+          // Mentions become <@USER_ID> in each segment as it is sent, read
+          // from the markdown carry it starts in. The response the completion
+          // returns keeps the model's words: the image branch stores it for
+          // later contexts, and an id is nothing the model wrote.
+          if (discordMessages) {
+            await this.replaceMentionsInSegments(segments, discordMessages, config, markdownCarry)
+          }
           const sendResult = await this.sendSegments(
             channelId,
             segments,
@@ -3413,6 +3471,11 @@ export class AgentLoop {
           segments = this.truncateSegmentsAtPosition(segments, truncResult.text.length)
         }
       }
+
+      // Mentions become <@USER_ID>, as in the final reply
+      if (discordMessages) {
+        await this.replaceMentionsInSegments(segments, discordMessages, config, markdownCarry)
+      }
       
       if (segments.length > 0) {
         // Send segments, preserving invisible content associations
@@ -3604,7 +3667,8 @@ export class AgentLoop {
   
   /**
    * Finalize inline tool execution - truncate, persist, send remaining text, and build result.
-   * This ensures trace always matches what was actually sent to Discord.
+   * The trace holds the response as it was sent, truncated where it was, in
+   * the model's words: its mentions and any reply tag as the model wrote them.
    */
   private async finalizeInlineExecution(params: {
     accumulatedOutput: string;
@@ -3670,14 +3734,7 @@ export class AgentLoop {
     const suffixText = suffix ? `\n${suffix}` : ''
     let segments = this.parseIntoSegments(truncatedRemaining + suffixText)
     
-    // 5. Replace <@username> with <@USER_ID> for Discord mentions in segments
-    if (discordMessages) {
-      for (const segment of segments) {
-        segment.visible = await this.replaceMentions(segment.visible, discordMessages)
-      }
-    }
-    
-    // 6. Strip <reply:@username> prefix from first segment if present
+    // 5. Strip <reply:@username> prefix from first segment if present
     const replyPattern = /^\s*<reply:@[^>]+>\s*/
     if (segments.length > 0 && replyPattern.test(segments[0]!.visible)) {
       segments[0]!.visible = segments[0]!.visible.replace(replyPattern, '').trim()
@@ -3689,6 +3746,12 @@ export class AgentLoop {
         }
         segments.shift()
       }
+    }
+
+    // 6. Replace <@username> with <@USER_ID> for Discord mentions in the
+    // segments as they are sent, the reply tag gone
+    if (discordMessages) {
+      await this.replaceMentionsInSegments(segments, discordMessages, config, markdownCarry)
     }
     
     // 7. Extract thinking content and post debug messages BEFORE the visible response
@@ -3747,11 +3810,10 @@ export class AgentLoop {
       }
     }
     
-    // 10. Calculate full display text for trace
-    let displayText = stripped
-    if (discordMessages) {
-      displayText = await this.replaceMentions(displayText, discordMessages)
-    }
+    // 10. Full display text for the trace, in the model's words: only the
+    // text sent to Discord takes <@USER_ID>, and the image branch stores this
+    // for later contexts.
+    const displayText = stripped
     
     // 11. Build final completion text for trace
     const fullCompletionText = accumulatedOutput + suffixText
@@ -4187,6 +4249,7 @@ export class AgentLoop {
       channelId,
       depth: fetchDepth,
       maxImages: config.include_images ? Math.max((config.max_images || 5) * 2, 10) : 0,
+      displayNames: displayNameClasses(config),
     })
 
     if (discordContext.messages.length === 0) {

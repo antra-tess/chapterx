@@ -532,6 +532,84 @@ export function scanMarkdown(text: string, start: MarkdownCarry = []): MarkdownC
   return parse(text, start).endStack
 }
 
+/** A code block as Discord reads one: each ``` opens a block that the next
+ *  ``` ends, anywhere in a line, or that runs to the end of the text if
+ *  nothing ends it. A backtick after an odd run of backslashes is escaped and
+ *  opens nothing, though the backticks after it can. */
+const DISCORD_BLOCK = /(?<=(?:^|[^\\])(?:\\\\)*)```[\s\S]*?(?:```|$)/g
+
+/** Code as Discord reads it, from left to right. Each ``` opens a block that
+ *  the next ``` ends, anywhere in a line, or that runs to the end of the text
+ *  if nothing ends it. Outside a block, backticks open a span by Discord's
+ *  inline code rule: an opening run, or when nothing ends the whole run, its
+ *  first backticks, ended by the next run of exactly as many after some other
+ *  character, across lines too. A backtick after an odd run of backslashes is
+ *  escaped and opens nothing, though the backticks after it can. Discord has
+ *  no `~~~` blocks, so a span can open inside one the splitter reads. */
+const DISCORD_CODE = /(?<=(?:^|[^\\])(?:\\\\)*)(?:```[\s\S]*?(?:```|$)|(`+)[\s\S]*?[^`]\1(?!`))/g
+
+/**
+ * Where `text` is code, where Discord shows a mention raw, as `[start, end)`
+ * ranges in order, each position of code in one range, for reading the
+ * mentions a message sends. It is code wherever any of these readings finds a
+ * code block or span:
+ * - the splitter's own parse of the text, with any block or span carried open
+ *   from an earlier message (`start`, as `scanMarkdown` reports it) open at its
+ *   start. The splitter cuts the text by this reading and reopens in each
+ *   later message what it reads as open there;
+ * - the same parse of the text as its first message sends it, after the
+ *   carried construct's reopener, which a backtick the text starts with can
+ *   fuse with;
+ * - Discord's own reading of the text as its first message sends it, its
+ *   ``` blocks and inline spans read from left to right, where a ``` later in
+ *   a line ends a block the splitter's line rules don't, and a span can open
+ *   inside a `~~~` block the splitter reads and end after it;
+ * - Discord's ``` blocks read on their own, so a ``` a span holds still opens
+ *   a block, as it does in a later message once a cut leaves the span's opener
+ *   behind.
+ * No mention is converted to an id where any of these readings finds code.
+ * Where they differ, as in a `~~~` block, which the splitter reads as code
+ * and Discord doesn't, or in a span the splitter leaves unclosed because its
+ * closer would fuse with a backtick run the text ends with, a mention pings
+ * no one unless it was written by id, as `<@id>` or a role's `<@&id>` that no
+ * one in the conversation is shown by, which Discord reads as written.
+ * Discord's other markdown rules, such as its links', aren't read here, and
+ * each reading reads the text whole, not each message a cut makes, so where
+ * Discord pairs backticks otherwise, a mention converted there can show its
+ * id inside code.
+ */
+export function codeRanges(text: string, start: MarkdownCarry = []): Array<[number, number]> {
+  const reopener = reopenMarks(exclusiveOnly(start))
+  const sent = reopener + text
+  const ranges: Array<[number, number]> = []
+  const add = (from: number, to: number): void => {
+    const range: [number, number] = [Math.max(from, 0), to]
+    if (range[1] > range[0]) ranges.push(range)
+  }
+  for (const construct of parse(text, exclusiveOnly(start)).constructs) {
+    if (construct.kind === 'fence' || construct.kind === 'inlineCode') add(construct.openStart, construct.closeEnd)
+  }
+  for (const construct of parse(sent).constructs) {
+    if (construct.kind === 'fence' || construct.kind === 'inlineCode') {
+      add(construct.openStart - reopener.length, construct.closeEnd - reopener.length)
+    }
+  }
+  for (const pattern of [DISCORD_CODE, DISCORD_BLOCK]) {
+    for (const code of sent.matchAll(pattern)) {
+      add(code.index - reopener.length, code.index + code[0].length - reopener.length)
+    }
+  }
+  // In order, and joined where they meet or overlap.
+  ranges.sort((a, b) => a[0] - b[0])
+  const joined: Array<[number, number]> = []
+  for (const range of ranges) {
+    const last = joined[joined.length - 1]
+    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1])
+    else joined.push([...range])
+  }
+  return joined
+}
+
 // ---------------------------------------------------------------------------
 // Splitting
 // ---------------------------------------------------------------------------
@@ -740,13 +818,16 @@ export function splitPreservingMarkdown(
     }
 
     // Avoid a seam that would fuse a bridge string with a same-char delimiter run
-    // in the adjacent body (which merges runs and changes parsing). Pull the cut
-    // left — off the offending delimiter and out of any construct it straddled —
-    // until the seam clears. A smaller body only shrinks the fit, so invariant A
-    // still holds. Monotonic (cut strictly decreases) so it always terminates.
+    // in the adjacent body (which merges runs and changes parsing), or that
+    // would leave a backslash at this chunk's end and the character it would
+    // escape unescaped at the next one's start (`splitsEscape`). Pull the cut
+    // left — off the offending delimiter or backslash and out of any construct
+    // it straddled — until the seam clears. A smaller body only shrinks the fit,
+    // so invariant A still holds. Monotonic (cut strictly decreases) so it
+    // always terminates.
     if (!isLast) {
       let guard = 0
-      while (cut > chunkStart + 1 && seamMerges(cut, closeStack, isLast) && guard++ <= text.length) {
+      while (cut > chunkStart + 1 && (seamMerges(cut, closeStack, isLast) || splitsEscape(text, chunkStart, cut, closeStack)) && guard++ <= text.length) {
         let next = avoidDelimiterBisect(cut - 1, bridgeable, chunkStart)
         if (next <= chunkStart) next = cut - 1
         cut = next
@@ -777,6 +858,26 @@ function closeMarksForBody(body: string, stack: MarkdownCarry): string {
     }
   }
   return out
+}
+
+/**
+ * Whether a cut at `pos` leaves a backslash escaping what it shouldn't: an odd
+ * run of backslashes ends at the cut, outside code, and either the character
+ * after the cut, which would lose its escape, or the first closer the chunk
+ * appends, which the backslash would escape, is one Discord's markdown escapes:
+ * anything but an ASCII letter, a digit or whitespace. Inside a ``` block or a
+ * code span, where a backslash is literal, it escapes nothing. A `~~~` block
+ * is prose to Discord, so a backslash there can escape.
+ */
+function splitsEscape(text: string, chunkStart: number, pos: number, closeStack: MarkdownCarry): boolean {
+  const code = (mark: OpenMark): boolean =>
+    mark.kind === 'inlineCode' || (mark.kind === 'fence' && mark.opener.startsWith('`'))
+  if (closeStack.some(code)) return false
+  let run = 0
+  while (run < pos && text[pos - 1 - run] === '\\') run++
+  if (run % 2 === 0) return false
+  const escaped = (ch: string | undefined): boolean => ch !== undefined && !/[0-9A-Za-z\s]/.test(ch)
+  return escaped(text[pos]) || escaped(closeMarksForBody(text.slice(chunkStart, pos), closeStack)[0])
 }
 
 /** Pull `pos` back so it never bisects a delimiter run; never below `floor`. */

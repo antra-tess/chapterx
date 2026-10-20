@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { Collection } from 'discord.js'
 import { DiscordConnector } from './connector.js'
 import { EventQueue } from '../agent/event-queue.js'
 
@@ -131,5 +132,53 @@ describe('DiscordConnector.sendSegmentChunks', () => {
     expect(channel.send).toHaveBeenCalledTimes(chunks.length + 1)
     expect(sent).toHaveLength(chunks.length)
     expect(sent[0]).not.toBe(sent[1])
+  })
+})
+
+describe('DiscordConnector.sendSegmentChunks with its mention lookup', () => {
+  let h: ReturnType<typeof makeConnector>
+  beforeEach(() => {
+    h = makeConnector()
+    // The connector's own lookup, on a server whose member search finds one Jack.
+    delete (h.connector as any).resolveMentions
+    const jack = { user: { id: '123', username: 'jack_h4ndle', bot: false }, displayName: 'Jack', joinedAt: new Date(0) }
+    ;(h.channel as any).guild = { id: 'guild-1', members: { fetch: async () => new Collection([['123', jack]]) } }
+  })
+  afterEach(() => h.cleanup())
+
+  it('leaves a <@username> in code as written, and resolves the same one outside it', async () => {
+    await h.connector.sendSegmentChunks(CH, 'try `<@jack_h4ndle>` or ask <@jack_h4ndle>', undefined, [])
+    expect(h.sent).toEqual(['try `<@jack_h4ndle>` or ask <@123>'])
+  })
+
+  it('reads a segment that begins inside a carried code block as code up to its closer', async () => {
+    const fence = [{ kind: 'fence' as const, opener: '```', closer: '```' }]
+    await h.connector.sendSegmentChunks(CH, '<@jack_h4ndle>\n```\nthen <@jack_h4ndle>', undefined, fence)
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0]).toMatch(/^```\n<@jack_h4ndle>\n```\nthen <@123>$/)
+  })
+
+  it("doesn't let a '<@' left open in code take the mention after it out with it", async () => {
+    await h.connector.sendSegmentChunks(CH, 'type `<@` then ask <@jack_h4ndle>', undefined, [])
+    expect(h.sent).toEqual(['type `<@` then ask <@123>'])
+  })
+
+  it("reads the mention inside a '<@' written just before it", async () => {
+    await h.connector.sendSegmentChunks(CH, 'ask <@<@jack_h4ndle>', undefined, [])
+    expect(h.sent).toEqual(['ask <@<@123>'])
+  })
+
+  it('leaves a mention any part of which is code as written', async () => {
+    const ticked = { user: { id: '124', username: 'tick_h4ndle', bot: false }, displayName: '`Jack`', joinedAt: new Date(0) }
+    ;(h.channel as any).guild = { id: 'guild-1', members: { fetch: async () => new Collection([['124', ticked]]) } }
+    await h.connector.sendSegmentChunks(CH, 'ask <@`Jack`>', undefined, [])
+    expect(h.sent).toEqual(['ask <@`Jack`>'])
+  })
+
+  it('reads a segment that begins inside a carried span as it is sent, its reopener fused with a backtick it starts with', async () => {
+    const span = [{ kind: 'inlineCode' as const, opener: '`', closer: '`' }]
+    await h.connector.sendSegmentChunks(CH, '`x <@jack_h4ndle> ``y', undefined, span)
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0]).toContain('``x <@jack_h4ndle> ``')
   })
 })

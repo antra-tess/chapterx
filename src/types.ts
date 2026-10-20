@@ -496,6 +496,7 @@ export interface DiscordMessage {
   authorRoles?: string[]  // Guild role names (populated from member.roles)
   mentions: string[]  // User IDs
   referencedMessage?: string  // Reply to message ID
+  webhookId?: string  // Set when sent through a webhook (such as Oblique): author.id is then the webhook's
 }
 
 export interface DiscordAttachment {
