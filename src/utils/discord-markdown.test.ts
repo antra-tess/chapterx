@@ -1403,6 +1403,18 @@ describe('splitPreservingMarkdown — defect 2: bridge/body delimiter-run merge 
   })
 })
 
+describe('splitPreservingMarkdown and backslash escapes', () => {
+  it('keeps a backslash with the character it escapes, cutting before the backslash', () => {
+    const text = 'a'.repeat(1799) + '\\` x'
+    expect(splitPreservingMarkdown(text, 1800).chunks.map((c) => c.text)).toEqual(['a'.repeat(1799), '\\` x'])
+  })
+
+  it('cuts after an even run of backslashes, which escapes nothing', () => {
+    const text = 'a'.repeat(1798) + '\\\\` x`'
+    expect(splitPreservingMarkdown(text, 1800).chunks[0]!.text).toBe('a'.repeat(1798) + '\\\\')
+  })
+})
+
 describe('codeRanges', () => {
   const codeIn = (text: string, start: MarkdownCarry = []): string[] =>
     codeRanges(text, start).map(([from, to]) => text.slice(from, to))

@@ -796,13 +796,15 @@ export function splitPreservingMarkdown(
     }
 
     // Avoid a seam that would fuse a bridge string with a same-char delimiter run
-    // in the adjacent body (which merges runs and changes parsing). Pull the cut
-    // left — off the offending delimiter and out of any construct it straddled —
-    // until the seam clears. A smaller body only shrinks the fit, so invariant A
-    // still holds. Monotonic (cut strictly decreases) so it always terminates.
+    // in the adjacent body (which merges runs and changes parsing), or that
+    // would leave a backslash at this chunk's end and the character it escapes
+    // unescaped at the next one's start. Pull the cut left — off the offending
+    // delimiter or backslash and out of any construct it straddled — until the
+    // seam clears. A smaller body only shrinks the fit, so invariant A still
+    // holds. Monotonic (cut strictly decreases) so it always terminates.
     if (!isLast) {
       let guard = 0
-      while (cut > chunkStart + 1 && seamMerges(cut, closeStack, isLast) && guard++ <= text.length) {
+      while (cut > chunkStart + 1 && (seamMerges(cut, closeStack, isLast) || splitsEscape(text, cut)) && guard++ <= text.length) {
         let next = avoidDelimiterBisect(cut - 1, bridgeable, chunkStart)
         if (next <= chunkStart) next = cut - 1
         cut = next
@@ -833,6 +835,13 @@ function closeMarksForBody(body: string, stack: MarkdownCarry): string {
     }
   }
   return out
+}
+
+/** Whether a cut at `pos` falls between a backslash and the character it escapes. */
+function splitsEscape(text: string, pos: number): boolean {
+  let run = 0
+  while (run < pos && text[pos - 1 - run] === '\\') run++
+  return run % 2 === 1
 }
 
 /** Pull `pos` back so it never bisects a delimiter run; never below `floor`. */
