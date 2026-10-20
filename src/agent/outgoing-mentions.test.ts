@@ -142,6 +142,13 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('<<@Sam>>', [sam1, sam2], byDisplayName)).toBe('<\\@Sam>')
     const lt: MentionAuthor = { id: 'w4', username: 'X<', displayName: 'X<', bot: false, webhook: true }
     expect(mentionsToIds('<@X<>@&111111111111111111>', [lt], byDisplayName)).toBe('@X<\\@&111111111111111111>')
+    // Right after another mention written as plain text, it reads that mention's text as its edge.
+    expect(mentionsToIds('<@X<><@Sam>>', [lt, sam1, sam2], byDisplayName)).toBe('@X<\\@Sam>')
+  })
+
+  it('keeps a <@ inside the code of a mention left as written because part of it is code', () => {
+    const coded: MentionAuthor = { id: 'w8', username: 'X `<@bob>`', displayName: 'X `<@bob>`', bot: false, webhook: true }
+    expect(mentionsToIds('<@X `<@bob>`>', [coded], byDisplayName)).toBe('<\\@X `<@bob>`>')
   })
 
   it('reads a name ending in a backslash in a form that goes on past the name, where replacing it unescapes nothing', () => {

@@ -51,8 +51,9 @@
  * Outside code, a name a mention is written or left as has any `<@` in it
  * escaped as `<\@`, so it makes no mention for the connector's lookup or for
  * Discord, and so does a mention left as written because part of it is code.
- * A `<@Name>` written as plain text is read with the characters around it, so
- * no `<@` forms across its edges.
+ * A `<@Name>` written as plain text is read with the characters around it, as
+ * written, a mention just before it included, so no `<@` forms across its
+ * edges.
  *
  * Outside `<@Name>`, a mention starts at the start of the text, after
  * whitespace, or after an opening bracket, quote or markdown mark. An `@`
@@ -179,9 +180,11 @@ export function mentionsToIds(
   }
 
   const code = codeRanges(text, carry)
-  return text.replace(new RegExp(forms.join('|'), 'giu'), (match: string, ...rest: unknown[]) => {
-    const groups = rest[rest.length - 1] as Record<string, string | undefined>
-    const offset = rest[rest.length - 3] as number
+  // Where the last mention read ended in the text, and what it was written as:
+  // a mention right after it takes its edge from that, not from the text.
+  let lastEnd = -1
+  let lastWritten = ''
+  const rewrite = (match: string, groups: Record<string, string | undefined>, offset: number): string => {
     // A mention any part of which is code is left as written, but for a `<@`
     // in it outside the code, which is escaped.
     if (code.some(([start, end]) => offset < end && offset + match.length > start)) {
@@ -201,7 +204,7 @@ export function mentionsToIds(
       // the characters around the match, so no `<@` forms across its edges
       // either, as `<<@Name>>` would.
       const run = /\\*$/.exec(groups.bracketed)![0].length
-      const before = text.slice(Math.max(offset - 1, 0), offset)
+      const before = offset === lastEnd ? lastWritten.slice(-1) : text.slice(Math.max(offset - 1, 0), offset)
       const after = text.slice(offset + match.length, offset + match.length + 1)
       const written = inert(`${before}@${groups.bracketed}${run % 2 ? '\\' : ''}${after}`)
       return written.slice(before.length, written.length - after.length)
@@ -211,5 +214,11 @@ export function mentionsToIds(
     if (match.endsWith('\\')) return inert(match)
     const holder = otherNames.get((groups.shown ?? '').toLowerCase())
     return holder && !holder.bot ? `${groups.lead ?? ''}<@${holder.id}>` : inert(match)
+  }
+  return text.replace(new RegExp(forms.join('|'), 'giu'), (match: string, ...rest: unknown[]) => {
+    const offset = rest[rest.length - 3] as number
+    lastWritten = rewrite(match, rest[rest.length - 1] as Record<string, string | undefined>, offset)
+    lastEnd = offset + match.length
+    return lastWritten
   })
 }
