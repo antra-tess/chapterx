@@ -97,6 +97,12 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds(text, [jack], byDisplayName, span)).toBe(text)
   })
 
+  it("reads as code a block the splitter's parse opens once the carried span closes, though the text as first sent reads it as a span", () => {
+    const span = [{ kind: 'inlineCode' as const, opener: '`', closer: '`' }]
+    const text = '`x\n```\nx ``` `` ' + 'a'.repeat(1800) + ' @Jack'
+    expect(mentionsToIds(text, [jack], byDisplayName, span)).toBe(text)
+  })
+
   it('leaves a <@Name\\> held by no one as plain text whose backslashes escape nothing after it, and closes no <@ in the name', () => {
     const slash: MentionAuthor = { id: 'w1', username: 'Slash\\', displayName: 'Slash\\', bot: false, webhook: true }
     expect(mentionsToIds('<@Slash\\>`<@jack_h4ndle>`', [slash, jack], byDisplayName)).toBe('@Slash\\\\`<@jack_h4ndle>`')

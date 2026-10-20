@@ -1445,6 +1445,12 @@ describe('codeRanges', () => {
     expect(chunks[1]!.text.startsWith('``a')).toBe(true)
   })
 
+  it("reads as code a block the splitter's parse opens once the carried span closes, though the text as first sent reads it as a span", () => {
+    const span: MarkdownCarry = [{ kind: 'inlineCode', opener: '`', closer: '`' }]
+    const text = '`x\n```\nx ``` `` ' + 'a'.repeat(1800) + ' @J'
+    expect(codeIn(text, span).join('')).toContain('@J')
+  })
+
   it('reads a ``` after an even run of backslashes as Discord does, opening a block', () => {
     expect(codeIn('~~~\n\\\\```\n~~~\n@J')).toEqual(['~~~\n\\\\```\n~~~\n@J'])
   })
