@@ -18,7 +18,7 @@ Recommended production layout (compatible with chapter2):
 │   │   ├── BotName1/           # Per-bot trace directories
 │   │   └── BotName2/
 │   │   └── index.jsonl         # Shared trace index
-│   ├── llm-requests/           # Full LLM request bodies
+│   ├── llm-requests/           # LLM request bodies, image, audio and document data replaced by its length
 │   └── llm-responses/          # Full LLM response bodies
 ├── cache/                       # Persistent cache
 │   └── plugins/                # Plugin state
