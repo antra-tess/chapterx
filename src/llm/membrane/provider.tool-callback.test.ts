@@ -58,8 +58,8 @@ const onToolCalls = async () => []
 describe('MembraneProvider.stream', () => {
   // A bot with streaming off, as a provider's streaming bugs call for, failed
   // every request on membrane 0.5.81 to 0.6.0, since the native tool path
-  // passes onToolCalls whether or not the request has tools. A bot with tools
-  // enabled and none loaded sends tools: [].
+  // passes onToolCalls whether or not the request has tools. A request with
+  // tools: [] has none either.
   it('hands membrane no tool callback for a request with streaming off and no tools, so it gets its answer', async () => {
     for (const tools of [undefined, []]) {
       const { handed, provider } = membraneFrom0581()

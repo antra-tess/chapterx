@@ -54,7 +54,11 @@ describe('AgentLoop active-channel event buffering', () => {
   // A loop whose activation decisions run for real. Its Soma check records what
   // each batch decided and answers with `somaAnswers` in turn, then "blocked",
   // which ends the batch before any activation starts.
-  function makeLoop(somaAnswers: Array<'allowed' | 'blocked'> = []) {
+  function makeLoop(
+    somaAnswers: Array<'allowed' | 'blocked'> = [],
+    configOverrides: Record<string, unknown> = {},
+    availableTools: unknown[] = [],
+  ) {
     const queue = new EventQueue()
     const cacheDirectory = mkdtempSync(join(tmpdir(), 'chapterx-agent-loop-'))
     temporaryDirectories.push(cacheDirectory)
@@ -82,10 +86,12 @@ describe('AgentLoop active-channel event buffering', () => {
         reply_on_random: 0,
         supports_continuation: true,
         prompt_caching: false,
+        ...configOverrides,
       }),
     }
     const removedForDeletes: string[] = []
     const toolSystem = {
+      getAvailableTools: () => availableTools,
       loadCacheWithResults: async () => [],
       setPluginContext: () => {},
       getPluginContext: () => ({}),
@@ -98,7 +104,7 @@ describe('AgentLoop active-channel event buffering', () => {
     const stateManager = { getOrInitialize: async () => ({}), pruneToolCache: () => {} }
     // The model call: an activation that reaches it gets this answer, then
     // stops at the next stand-in it lacks.
-    const contextBuilder = { buildContext: async () => ({ request: { messages: [], tools: [] } }) }
+    const contextBuilder = { buildContext: async () => ({ request: { messages: [] } }) }
     const loop = new AgentLoop(
       'bot',
       queue,
@@ -120,12 +126,15 @@ describe('AgentLoop active-channel event buffering', () => {
     internals.collectPinnedConfigsWithInheritance = async () => []
     internals.collectPinnedSteersWithInheritance = async () => []
     const answered = { count: 0 }
-    const modelAnswer = async () => {
+    // Each request the model is asked, with the tool path it took.
+    const requests: Array<{ path: 'native' | 'inline'; request: any }> = []
+    const modelAnswer = (path: 'native' | 'inline') => async (request: any) => {
+      requests.push({ path, request })
       answered.count++
       return { completion: { content: [{ type: 'text', text: 'Hi.' }], stopReason: 'end_turn' }, toolCallIds: [], preambleMessageIds: [], sentMessageIds: ['reply'], messageContexts: {} }
     }
-    internals.executeWithNativeTools = modelAnswer
-    internals.executeWithInlineTools = modelAnswer
+    internals.executeWithNativeTools = modelAnswer('native')
+    internals.executeWithInlineTools = modelAnswer('inline')
     const soma: SomaCall[] = []
     const somaEvents: string[][] = []
     internals.checkSomaCredits = async (
@@ -148,6 +157,7 @@ describe('AgentLoop active-channel event buffering', () => {
       somaEvents,
       sleepObservations,
       answered,
+      requests,
       setFetchContext: (fetch: (params: any) => Promise<any>) => { fetchContext = fetch },
     }
   }
@@ -443,5 +453,40 @@ describe('AgentLoop active-channel event buffering', () => {
     }
 
     expect(soma).toEqual([{ channelId: 'channel-b', reason: 'mention', triggeringMessageId: '402' }])
+  })
+
+  // With streaming off, membrane runs no tool calls on the native tool path:
+  // 0.5.47 returns the model's calls unexecuted, so the bot announced a call and
+  // stopped, and 0.5.81 to 0.6.0 refuse the request.
+  it('sends a bot with streaming off on the native tool path no tools, and warns while it has tools to withhold', async () => {
+    const tool = { name: 'lookup', description: 'Look something up', inputSchema: { type: 'object', properties: {} } }
+    const message = 'Tools not sent: with streaming off, membrane runs no tool calls on the native tool path. Set tools_enabled: false to stop this warning.'
+    // The harness's context builder, like the real one, leaves tools unset.
+    const cases = [
+      { config: { streaming: false }, available: [tool], path: 'native', tools: undefined, warned: true },
+      { config: { streaming: false, continuation_model: 'claude-sonnet-4-5', mode: 'chat' }, available: [tool], path: 'native', tools: undefined, warned: true },
+      { config: { streaming: false }, available: [], path: 'native', tools: undefined, warned: false },
+      { config: { streaming: false, tools_enabled: false }, available: [tool], path: 'native', tools: undefined, warned: false },
+      { config: {}, available: [tool], path: 'native', tools: [tool], warned: false },
+      { config: { streaming: true }, available: [tool], path: 'native', tools: [tool], warned: false },
+      // The inline tool path runs tools itself, streaming or not.
+      { config: { streaming: false, continuation_model: 'claude-sonnet-4-5' }, available: [tool], path: 'inline', tools: [tool], warned: false },
+    ]
+    for (const { config, available, path, tools, warned } of cases) {
+      const warn = vi.spyOn(logger, 'warn')
+      const harness = makeLoop(['allowed'], { tools_enabled: true, ...config }, available)
+      harness.setFetchContext(async () => ({ messages: [{ id: '100' }], images: [] }))
+
+      await harness.loop.processBatch([timer('channel', 'timer')])
+      await vi.waitFor(() => expect(harness.answered.count).toBe(1))
+
+      expect(harness.requests.map((r) => r.path)).toEqual([path])
+      expect(harness.requests[0].request.tools).toEqual(tools)
+      const toolWarnings = warn.mock.calls.filter((call) => String(call[1]).startsWith('Tools not sent'))
+      expect(toolWarnings).toEqual(warned
+        ? [[{ channelId: 'channel', model: (config as { continuation_model?: string }).continuation_model ?? 'test-model', toolCount: 1 }, message]]
+        : [])
+      warn.mockRestore()
+    }
   })
 })
