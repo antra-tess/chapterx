@@ -212,7 +212,7 @@ Start the local web viewer to browse and search traces:
 
 Features:
 - **Search by Discord URL**: Paste any Discord message URL to find related traces
-- **Full LLM request/response viewer**: See exactly what was sent to the API
+- **Full LLM request/response viewer**: See what was sent to the API, with each image, audio or document block's data replaced by its length
 - **Context transformation details**: Understand how Discord messages became LLM context
 - **Console log filtering**: Filter logs by level (debug, info, warn, error)
 - **Token usage & cost info**: Track API usage per activation
