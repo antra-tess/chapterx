@@ -247,7 +247,15 @@ export class MembraneProvider {
           metricsCollector.recordBlock(event);
           options.onBlock?.(event);
         },
-        onToolCalls: options.onToolCalls,
+        // With streaming off, membrane's stream() goes to complete(), which has
+        // no tool loop, and in 0.5.81 to 0.6.0 it refuses onToolCalls instead.
+        // A request without tools has nothing for the callback to run, so it
+        // goes without and gets its answer. A request with tools keeps it, so
+        // that 0.5.81 to 0.6.0 refuse tools that can't run rather than return
+        // the model's calls unexecuted, as 0.5.47 does.
+        onToolCalls: normalizedRequest.streaming === false && !normalizedRequest.tools?.length
+          ? undefined
+          : options.onToolCalls,
         onPreToolContent: options.onPreToolContent,
         onUsage: options.onUsage,
         maxToolDepth: options.maxToolDepth ?? 10,

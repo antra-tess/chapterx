@@ -403,7 +403,9 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     contextPrefix: request.context_prefix,
     // Custom prefill user message (replaces '[Start]' synthetic user message)
     prefillUserMessage: request.prefill_user_message,
-    // Streaming control - when false, membrane.stream() falls back to complete()
+    // Streaming control - when false, membrane.stream() falls back to complete(),
+    // which runs no tools; in 0.5.81 to 0.6.0 it refuses an onToolCalls option
+    // instead (MembraneProvider.stream says when it passes one)
     streaming: request.config.streaming,
   };
 
