@@ -51,9 +51,9 @@
  * Outside code, a name a mention is written or left as has any `<@` in it
  * escaped as `<\@`, so it makes no mention for the connector's lookup or for
  * Discord, and so does a mention left as written because part of it is code.
- * A `<@Name>` written as plain text is read with the characters around it, as
- * written, a mention just before it included, so no `<@` forms across its
- * edges.
+ * No `<@` forms across a mention's edges either, whatever it is written as:
+ * each is read with the characters around it as they're written, a mention
+ * just before it included.
  *
  * Outside `<@Name>`, a mention starts at the start of the text, after
  * whitespace, or after an opening bracket, quote or markdown mark. An `@`
@@ -200,14 +200,9 @@ export function mentionsToIds(
       if (holder) return `<@${holder.id}>`
       // Held by no one, it's left as plain text, without its `>`. A name ending
       // in an odd run of backslashes gets one more, so the run escapes nothing
-      // after it, as the `>` kept it from doing. The text is made inert with
-      // the characters around the match, so no `<@` forms across its edges
-      // either, as `<<@Name>>` would.
+      // after it, as the `>` kept it from doing.
       const run = /\\*$/.exec(groups.bracketed)![0].length
-      const before = offset === lastEnd ? lastWritten.slice(-1) : text.slice(Math.max(offset - 1, 0), offset)
-      const after = text.slice(offset + match.length, offset + match.length + 1)
-      const written = inert(`${before}@${groups.bracketed}${run % 2 ? '\\' : ''}${after}`)
-      return written.slice(before.length, written.length - after.length)
+      return inert(`@${groups.bracketed}${run % 2 ? '\\' : ''}`)
     }
     // A mention that ends in a backslash, as `@Name\` does, escapes the
     // character after it, which replacing the mention would unescape.
@@ -217,8 +212,16 @@ export function mentionsToIds(
   }
   return text.replace(new RegExp(forms.join('|'), 'giu'), (match: string, ...rest: unknown[]) => {
     const offset = rest[rest.length - 3] as number
-    lastWritten = rewrite(match, rest[rest.length - 1] as Record<string, string | undefined>, offset)
+    let written = rewrite(match, rest[rest.length - 1] as Record<string, string | undefined>, offset)
+    // No `<@` forms across a mention's edges, whatever it was written as: with
+    // the character before it, as written, a mention just before it included,
+    // as `<<@Name>>` would, or with the one after it, as a name ending in `<`
+    // would before an `@`.
+    const before = offset === lastEnd ? lastWritten.slice(-1) : text.slice(Math.max(offset - 1, 0), offset)
+    if (before === '<' && written.startsWith('@')) written = `\\${written}`
+    if (written.endsWith('<') && text[offset + match.length] === '@') written = `${written}\\`
+    lastWritten = written
     lastEnd = offset + match.length
-    return lastWritten
+    return written
   })
 }

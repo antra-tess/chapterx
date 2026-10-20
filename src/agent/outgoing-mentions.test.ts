@@ -144,6 +144,11 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('<@X<>@&111111111111111111>', [lt], byDisplayName)).toBe('@X<\\@&111111111111111111>')
     // Right after another mention written as plain text, it reads that mention's text as its edge.
     expect(mentionsToIds('<@X<><@Sam>>', [lt, sam1, sam2], byDisplayName)).toBe('@X<\\@Sam>')
+    // With text between, it reads the text.
+    expect(mentionsToIds('<@X<> <@Sam>', [lt, sam1, sam2], byDisplayName)).toBe('@X< @Sam')
+    // A name left as written that ends in < before an @.
+    const botLt: MentionAuthor = { id: '901', username: 'xbot', displayName: 'X<', bot: true }
+    expect(mentionsToIds('@X<@Sam>', [botLt, sam1, sam2], byDisplayName)).toBe('@X<\\@Sam>')
   })
 
   it('keeps a <@ inside the code of a mention left as written because part of it is code', () => {
