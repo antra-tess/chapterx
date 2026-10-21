@@ -108,7 +108,15 @@ export const SYSTEM_PLACEHOLDER_ID = 'system'
  *  send or an edit of the bot's own message takes when its options give none,
  *  a webhook's send included. A send added later that gives no allowedMentions
  *  of its own takes it too; one that gives its own replaces it whole, as
- *  replyAllowedMentions does, so it should start from this. */
+ *  replyAllowedMentions does, so it should start from this.
+ *
+ *  A webhook's message parsed only users already, by Discord's default for
+ *  webhooks; a plain message parsed every type. By our reading of Discord's
+ *  documentation, a role, @everyone or @here that isn't parsed isn't recorded
+ *  on the message either, so a bot's doesn't activate another bot or address
+ *  it with an `m` command (loop.ts, `message.mentions.has`), nor make a
+ *  `.sleep` pin match a bot by role (pinAddressesBot); a mention of a bot's
+ *  user still does (README, "Mentions in what a bot sends"). */
 const ALLOWED_MENTIONS: MessageMentionOptions = { parse: ['users'] }
 
 /** A reply's allowed mentions: the client's, and the reply doesn't ping the

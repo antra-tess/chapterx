@@ -197,6 +197,8 @@ max_tokens: 2000
 **M Commands**:
 - `m continue` - Activate bot without mention
 
+**Mentions in what a bot sends**: a bot's messages, and its edits of them, parse only the user mentions in their text (the Discord client's `allowedMentions` default, in `src/discord/connector.ts`), so they ping no role, `@everyone` or `@here`. A tool's webhook message would parse only user mentions without it, by Discord's default for webhooks. By our reading of Discord's documentation, a mention that isn't parsed isn't recorded on the message either, so a bot's `@everyone`, `@here` or role mention doesn't activate another bot, address it with an `m` command, or make a `.sleep` pin it wrote match a bot by role. A mention of a bot by name, which becomes a mention of its user, still does.
+
 ## Debugging & Tracing
 
 The bot includes a comprehensive tracing system that captures every activation, including Discord context, LLM requests/responses, tool executions, and console logs.
