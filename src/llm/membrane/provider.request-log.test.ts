@@ -1,5 +1,6 @@
 /**
- * The request logs (logs/llm-requests and logs/membrane-requests) replace each
+ * The request logs (logs/llm-requests and logs/membrane-requests), and the
+ * request a streamed response carries in logs/membrane-responses, replace each
  * media block's payload with its length, in each shape a provider's request
  * gives it, and keep everything else as it was, JSON text included.
  */
@@ -155,6 +156,27 @@ describe('request logs', () => {
       { role: 'tool', tool_call_id: 'c1', content: asText },
     ] }
     expect(logged(request)).toEqual(request)
+  })
+
+  it("replace the media of the provider request a streamed response carries, in membrane's response log", () => {
+    const request = { contents: [{ role: 'user', parts: [{ text: 'listen' }, { inlineData: { mimeType: 'audio/ogg', data: AUDIO } }] }] }
+    const response = { content: [{ type: 'text', text: 'heard' }], raw: { request, response: { ok: true } } }
+    const name = provider.logResponseToFile(response)
+    expect(name).toBeTypeOf('string')
+    const out = JSON.parse(readFileSync(join(dir, 'logs', 'membrane-responses', name), 'utf-8'))
+    expect(out.raw.request.contents[0].parts).toEqual([{ text: 'listen' }, { inlineData: { mimeType: 'audio/ogg', data: marker(AUDIO) } }])
+    expect(out.content).toEqual(response.content)
+    expect(out.raw.response).toEqual({ ok: true })
+    expect(response.raw.request.contents[0].parts[1]).toEqual({ inlineData: { mimeType: 'audio/ogg', data: AUDIO } })
+  })
+
+  it('log a response with no provider request, none in its raw, or no raw, as it is', () => {
+    for (const raw of [{ request: null }, { response: { ok: true } }, undefined]) {
+      const response = raw ? { content: [{ type: 'text', text: 'heard' }], raw } : { aborted: true, partialContent: [] }
+      const name = provider.logResponseToFile(response)
+      expect(name).toBeTypeOf('string')
+      expect(JSON.parse(readFileSync(join(dir, 'logs', 'membrane-responses', name), 'utf-8'))).toEqual(response)
+    }
   })
 
   it('leave the request it was handed as it was', () => {

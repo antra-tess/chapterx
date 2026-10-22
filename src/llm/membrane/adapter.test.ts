@@ -127,6 +127,20 @@ describe('Content Block Conversion', () => {
     });
   });
   
+  describe('audio blocks', () => {
+    it('passes a voice message\'s audio block to membrane as it is, in membrane\'s own shape', () => {
+      const input: ContentBlock = {
+        type: 'audio',
+        source: { type: 'base64', data: 'T2dnUw==', mediaType: 'audio/ogg' },
+      };
+
+      expect(toMembraneContentBlock(input)).toEqual({
+        type: 'audio',
+        source: { type: 'base64', data: 'T2dnUw==', mediaType: 'audio/ogg' },
+      });
+    });
+  });
+
   describe('image blocks', () => {
     it('should convert base64 image with media_type → mediaType', () => {
       const input: ContentBlock = {

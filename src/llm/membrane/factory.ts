@@ -269,6 +269,8 @@ interface AdapterRouting {
 // Module-level storage for routing patterns
 // These are set during factory initialization and used by getAdapterForModel
 let patternRoutes: AdapterRouting[] = [];
+// The adapters the last createMembrane built, for adapterForModel
+let routedAdapters: Map<string, ProviderAdapter> | undefined;
 
 /**
  * Track model pattern to formatter mapping
@@ -281,6 +283,19 @@ interface FormatterRouting {
 
 // Module-level storage for formatter routing
 let formatterRoutes: FormatterRouting[] = [];
+
+/**
+ * The formatter a request for this model and mode goes through: config mode,
+ * then the per-model formatter routes, then by model name (anthropic-xml for
+ * Claude, native otherwise).
+ */
+export function resolveFormatterForModel(modelName: string, mode?: string): FormatterType {
+  if (mode === 'chat') return 'native';
+  if (mode === 'prefill') return 'anthropic-xml';
+  if (mode === 'base-model') return 'completions';
+  return getFormatterForModel(modelName)
+    ?? (modelName.startsWith('claude-') || modelName.includes('anthropic.claude') ? 'anthropic-xml' : 'native');
+}
 
 /**
  * Get the formatter type for a given model name
@@ -296,6 +311,11 @@ export function getFormatterForModel(modelName: string): FormatterType | undefin
     }
   }
   return undefined;
+}
+
+/** The adapter the last createMembrane routes this model to, if any. */
+export function adapterForModel(modelName: string): ProviderAdapter | undefined {
+  return routedAdapters ? getAdapterForModel(modelName, routedAdapters) : undefined;
 }
 
 /**
@@ -846,6 +866,7 @@ export function createMembrane(config: MembraneFactoryConfig): Membrane {
   
   // Create routing adapter
   const routingAdapter = new RoutingAdapter(adapters);
+  routedAdapters = adapters;
   
   // Create formatter based on config
   const formatter = createFormatter(config);

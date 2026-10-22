@@ -32,6 +32,7 @@ import {
   mergeConsecutiveParticipantMessages,
 } from './stages/message-filtering.js'
 import { formatMessages } from './stages/format-messages.js'
+import { fetchNewestVoiceMessage, hearsVoiceMessages } from './voice-messages.js'
 import {
   formatToolUseWithResults,
   interleaveToolMessages,
@@ -118,6 +119,9 @@ export class ContextBuilder {
       }, 'Pre-calculated cache marker for image selection (first activation)')
     }
 
+    // 2.6. The newest voice message, for a bot that hears them
+    const voiceMessage = hearsVoiceMessages(config) ? await fetchNewestVoiceMessage(messages) : undefined
+
     // 3. Convert to participant messages
     let participantMessages = await formatMessages(
       messages,
@@ -125,7 +129,8 @@ export class ContextBuilder {
       discordContext.documents,
       config,
       botDiscordUsername,
-      imageSelectionMarker
+      imageSelectionMarker,
+      voiceMessage
     )
 
     logger.debug({

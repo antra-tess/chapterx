@@ -53,6 +53,7 @@ export interface ParticipantMessage {
 export type ContentBlock =
   | TextContent
   | ImageContent
+  | AudioContent
   | ToolUseContent
   | ToolResultContent
   | ThinkingContent
@@ -86,6 +87,17 @@ export interface ImageContent {
     type: 'base64' | 'url'
     data: string  // base64 data or URL
     media_type: string  // 'image/jpeg', 'image/png', etc. (snake_case for Anthropic API)
+  }
+}
+
+/** Audio in membrane's own block shape (camelCase `mediaType`), which the
+ *  membrane adapter passes through unchanged. */
+export interface AudioContent {
+  type: 'audio'
+  source: {
+    type: 'base64'
+    data: string
+    mediaType: string
   }
 }
 
@@ -209,6 +221,9 @@ export interface BotConfig {
   max_ephemeral_images?: number  // Max images in rolling window after cache marker (default: max_images)
   cache_images?: boolean  // If true, include images in cached prefix (requires deterministic handling). Default: false (images only in rolling window)
   generate_images?: boolean  // If true, set responseModalities for image generation models (overrides auto-detect from model name)
+
+  // Voice message config
+  include_voice_messages?: boolean  // If true, the newest voice message in the window is sent as audio beside its line (default: false)
 
   // Text attachment config
   include_text_attachments: boolean
@@ -545,6 +560,13 @@ export interface CachedImage {
   width?: number
   height?: number
   tokenEstimate?: number  // Anthropic formula: (width * height) / 750
+}
+
+/** A voice message's audio, downloaded for a bot with include_voice_messages. */
+export interface CachedVoiceMessage {
+  url: string
+  data: Buffer
+  mediaType: string
 }
 
 export interface CachedDocument {

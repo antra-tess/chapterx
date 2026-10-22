@@ -258,6 +258,7 @@ Pinned configs can target specific bots with `target: botname` field (case-insen
 | `rolling_threshold` | 50 |
 | `recent_participant_count` | 10 |
 | `max_images` | 5 |
+| `include_voice_messages` | false |
 | `max_text_attachment_kb` | 100 |
 | `max_tool_depth` | 100 |
 | `max_mcp_images` | 3 |
@@ -312,6 +313,9 @@ Pinned configs can target specific bots with `target: botname` field (case-insen
 - Adds image content (selected based on cache marker position)
 - Adds document attachments (wrapped in `<attachment>` XML tags)
 - Adds a line for each attachment it doesn't carry, after the rest of the message and after mention rewriting, so a name reads as Discord gave it: `[voice message, 0:34, not included]` for a voice message, `[attachment "song.mp3", audio, 3:12, 4.2 MB, not included]` for anything else: an image that isn't selected, isn't cached or can't be brought under the size limit, every image when `include_images` is off, and audio, video and other files. An image that the `max_images` limit takes out after selection gets its line in the image's place. A message whose only content was such an attachment stays in the context as its line.
+- With `include_voice_messages` on, sends the newest voice message among the messages Step 2 leaves as audio, beside its line without "not included": `[voice message, 0:34]`. The builder downloads it (`fetchNewestVoiceMessage`, `voice-messages.ts`) when its type is one Gemini's audio docs list, less the headerless l16, alaw and mulaw (`VOICE_MESSAGE_TYPES`, `audio/ogg` among them) and its size, as Discord reports it, is at most 2 MB. When the newest voice message isn't sent, for its type, its size or a failed download, no older one is tried, and every voice message keeps its `not included` line. A newer voice message takes the audio from the one before it, so the request changes from that message on.
+- Voice messages go only to Gemini models on membrane's own Gemini adapter, the path this was heard work on: a `gemini-*` or `gemini_*` model, through membrane's native formatter (chat mode, or no mode set), in membrane's audio block (`hearsVoiceMessages`, `voice-messages.ts`). For any other model and mode the builder downloads nothing, every voice message keeps its `not included` line, and the first build for that model and mode logs `Voice messages not sent: …` with the reason. Membrane's XML formatter (prefill mode, which a `claude-` model takes unless its config names another mode or formatter) refuses an audio block, failing the reply; its Anthropic adapter passes the block to Anthropic's API, which has no audio block; its completions formatter and its OpenAI adapters drop it. Its OpenRouter adapter can send audio, but nobody here has heard it work there, so OpenRouter models, `google/gemini*` included, keep the line.
+- A downloaded body that's empty, or starts with markup (`<` after any whitespace or byte-order mark) as an expired CDN URL's error page can, isn't sent.
 - Normalizes bot mentions: `<@DiscordUsername>` → `<@ConfigName>`
 - Optionally strips `<reply:@username>` tags (`include_reply_tags` config)
 
@@ -459,7 +463,7 @@ Images are selected in two tiers relative to the cache marker:
 
 **Where**: Passed as `LLMRequest.system_prompt` → formatter places in API `system` field.
 
-**Caching**: System content gets `cache_control` marker if `prompt_caching` enabled (always cached).
+**Caching**: System content gets `cache_control` marker if `prompt_caching` enabled. In chat mode, membrane's native formatter (0.5.87) adds it only when the request carries no other cache marker.
 
 ### 9.2. Context Prefix (Simulacrum Seeding)
 
@@ -645,6 +649,7 @@ messages: [{ role: 'assistant', content: 'entire serialized conversation as one 
 | Stop sequences | Auto from participants | Manual only | Auto from participants + EOT |
 | Cache markers | cacheBreakpoint + hasCacheMarker | cacheBreakpoint + hasCacheMarker | None |
 | Images | Supported | Supported | Stripped |
+| Audio | Refused (the request throws) | Passed to the provider | Dropped |
 | Tools | XML or native | Native only | None |
 | Role alternation | Synthetic user msg first | mergeConsecutiveRoles() | Single message |
 
@@ -767,6 +772,7 @@ Participant names collected from message authors AND mentions (`<@username>` for
 ```typescript
 TextContent:       { type: 'text', text: string }
 ImageContent:      { type: 'image', source: { type: 'base64'|'url', data, media_type } }
+AudioContent:      { type: 'audio', source: { type: 'base64', data, mediaType } }
 ToolUseContent:    { type: 'tool_use', id, name, input }
 ToolResultContent: { type: 'tool_result', toolUseId, content, isError? }
 ```
@@ -793,6 +799,7 @@ ToolResultContent: { type: 'tool_result', toolUseId, content, isError? }
 | Model | `continuation_model`, `temperature`, `max_tokens`, `top_p?`, `presence_penalty?`, `frequency_penalty?`, `prefill_thinking?`, `debug_thinking?`, `preserve_thinking_context?` |
 | Context | `recency_window_messages?`, `recency_window_characters?`, `hard_max_characters?`, `rolling_threshold`, `recent_participant_count`, `authorized_roles[]`, `prompt_caching?`, `cache_ttl?` |
 | Images | `include_images`, `max_images`, `max_ephemeral_images?`, `cache_images?`, `generate_images?` |
+| Voice | `include_voice_messages?` |
 | Text | `include_text_attachments`, `max_text_attachment_kb`, `include_reply_tags?` |
 | Tools | `tools_enabled`, `tool_output_visible`, `max_tool_depth`, `max_mcp_images`, `mcp_servers?`, `tool_plugins?`, `plugin_config?` |
 | Stop | `stop_sequences[]`, `message_delimiter?`, `turn_end_token?`, `participant_stop_sequences?` |
