@@ -100,14 +100,30 @@ export interface SentMessageChunk {
  *  placeholder, not anyone in the conversation. */
 export const SYSTEM_PLACEHOLDER_ID = 'system'
 
-/** A reply's allowed mentions: the reply doesn't ping the author it answers,
- *  and the people its text mentions are pinged. Once a message carries
- *  allowed_mentions, Discord pings only what that field allows (its default
- *  of every mention type applies only when the field is left out), so
- *  `repliedUser: false` alone would keep every mention in a reply silent.
- *  Roles and @everyone stay unparsed in a reply, as they were. */
+/** What every message the bot sends, and every edit of its own messages, may
+ *  ping: the people its text mentions, and never a role, @everyone or @here.
+ *  Once a message carries allowed_mentions, Discord pings only what that field
+ *  allows; its default, when the field is left out, parses every mention type.
+ *  The client gives this as discord.js's `allowedMentions` default, which a
+ *  send or an edit of the bot's own message takes when its options give none,
+ *  a webhook's send included. A send added later that gives no allowedMentions
+ *  of its own takes it too; one that gives its own replaces it whole, as
+ *  replyAllowedMentions does, so it should start from this.
+ *
+ *  A webhook's message parsed only users already, by Discord's default for
+ *  webhooks; a plain message parsed every type. By our reading of Discord's
+ *  documentation, a role, @everyone or @here that isn't parsed isn't recorded
+ *  on the message either, so a bot's doesn't activate another bot or address
+ *  it with an `m` command (loop.ts, `message.mentions.has`), nor make a
+ *  `.sleep` pin match a bot by role (pinAddressesBot); a mention of a bot's
+ *  user still does (README, "Mentions in what a bot sends"). */
+const ALLOWED_MENTIONS: MessageMentionOptions = { parse: ['users'] }
+
+/** A reply's allowed mentions: the client's, and the reply doesn't ping the
+ *  author it answers. A message's own allowedMentions replaces the client's
+ *  rather than adding to it, so a reply gives both. */
 function replyAllowedMentions(): MessageMentionOptions {
-  return { repliedUser: false, parse: ['users'] }
+  return { ...ALLOWED_MENTIONS, repliedUser: false }
 }
 
 export class DiscordConnector {
@@ -154,6 +170,7 @@ export class DiscordConnector {
         GatewayIntentBits.GuildMessageReactions,
       ],
       partials: [Partials.Message, Partials.Reaction],
+      allowedMentions: ALLOWED_MENTIONS,
     })
 
     this.setupEventHandlers()
@@ -1251,7 +1268,7 @@ export class DiscordConnector {
         if (error.code === 10008 || error.message?.includes('Unknown message')) {
           logger.warn({ replyToMessageId, channelId: channel.id }, 'Reply target deleted, sending without reply')
           // It keeps the reply's allowedMentions, as the attachment senders'
-          // fallbacks do, so its text pings no role and no @everyone.
+          // fallbacks do.
           const sent = await channel.send({ content, allowedMentions: replyAllowedMentions() })
           return sent.id
         }

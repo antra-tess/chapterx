@@ -62,14 +62,6 @@ describe("DiscordConnector's replies", () => {
     expect(allowedMentionsSent(options)).toEqual({ parse: ['users'], replied_user: false })
   })
 
-  it('leave a message after the reply to Discord\'s default, as before', async () => {
-    const long = `${'word '.repeat(400)}\n\nthen <@${JACK}>`
-    await h.connector.sendSegmentChunks(CH, long, TRIGGER, [])
-    expect(h.channel.send.mock.calls.length).toBe(2)
-    expect(h.channel.send.mock.calls[0]![0].allowedMentions).toEqual(REPLY_MENTIONS)
-    expect(allowedMentionsSent(h.channel.send.mock.calls[1]![0])).toBeUndefined()
-  })
-
   it('do the same when the message goes as sendMessage', async () => {
     await h.connector.sendMessage(CH, `thanks <@${JACK}>`, TRIGGER)
     expect(h.channel.send.mock.calls[0]![0].allowedMentions).toEqual(REPLY_MENTIONS)
