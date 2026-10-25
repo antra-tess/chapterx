@@ -15,7 +15,6 @@ const GUILD_ID = '800000000000000001'
 type Outcome = 'found' | 'not-member' | 'unknown-user' | 'error' | 'hang' | 'late' | 'late-error'
 
 /**
- * A guild whose member fetch records each call and answers from `outcomes`.
  * As in discord.js 14, a fetched member is added to the guild's member cache,
  * and a message's `member` resolves its author there.
  */

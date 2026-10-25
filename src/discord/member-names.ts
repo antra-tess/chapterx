@@ -1,20 +1,8 @@
 /**
- * Server nicknames for the authors of a fetched context.
- *
- * A participant label that uses display names reads the author's server
- * nickname from discord.js's member cache (`msg.member?.nickname` in
- * `convertMessage`; `Message#member` resolves the author in the guild's
- * member cache). Discord sends a message author's member data with live
- * message events only, not with history fetched over REST, and this bot
- * doesn't request the members intent. So `AuthorMembers` fetches the member
- * of each author whose label needs it and isn't cached, before the messages
- * are converted, and discord.js caches what it fetches.
- *
- * A fetched member stays cached as one seen in a message event does. Without
- * the members intent, a later nickname change reaches the cache when its
- * author next speaks. Other readers of `msg.member` see the fetched member
- * too, such as the raw exports, which then show the nickname of an author an
- * activation has fetched.
+ * Discord sends a message author's member data with live message events only,
+ * not with history fetched over REST, and this bot doesn't request the members
+ * intent. Without it, a later nickname change reaches the cache when an event
+ * carrying their membership arrives: a message, an edit or a reaction of theirs.
  */
 
 import type { Guild, Message } from 'discord.js'
@@ -89,16 +77,8 @@ export class AuthorMembers {
   }
 
   /**
-   * Fetch the member of each author whose label uses display names and whose
-   * member isn't cached, each by id (one REST call, which needs no privileged
-   * intent), in parallel. discord.js caches what it finds, which is where the
-   * label reads it. Each author's fetch is waited for until it settles or
-   * `waitMs` from when it started have passed, whichever is first, so a
-   * context that joins a fetch already running waits only for what is left
-   * of that, and a fetch past its time never holds a context for another's
-   * later one. An author whose fetch failed is left alone
-   * for a while (`notMemberRetryMs` or `failureRetryMs`), and their label goes
-   * without the nickname.
+   * Fetching a member by id is one REST call, which needs no privileged intent,
+   * and discord.js caches what it finds, which is where the label reads it.
    */
   async cacheFor(messages: Message[], classes: DisplayNameClasses): Promise<void> {
     const now = this.timing.now()
@@ -108,7 +88,7 @@ export class AuthorMembers {
 
     const fetches = new Map<string, PendingFetch>()
     for (const msg of messages) {
-      // A webhook's message has no member, and a DM has no guild.
+      // An incoming webhook's author is the webhook, not a guild member, and a DM has no guild.
       if (!msg.guild || msg.webhookId || !msg.author) continue
       if (!(msg.author.bot ? classes.bots : classes.humans)) continue
       if (msg.member) continue
@@ -118,8 +98,7 @@ export class AuthorMembers {
     }
     if (fetches.size === 0) return
 
-    // Each fetch is waited for until it settles or its own time is up. One
-    // past its time is waited for only the millisecond Node gives its
+    // One past its time is waited for only the millisecond Node gives its
     // shortest timer.
     const timers: ReturnType<typeof setTimeout>[] = []
     await Promise.all([...fetches.values()].map((f) => Promise.race([

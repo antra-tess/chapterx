@@ -15,6 +15,8 @@ import {
 import type { BotConfig, ParticipantMessage } from '../types.js';
 import { logger } from '../utils/logger.js';
 
+export const CACHE_MARKER_BUFFER = 20;
+
 // ============================================================================
 // State Conversion
 // ============================================================================
@@ -47,15 +49,14 @@ export function toMembraneConfig(config: BotConfig): ContextConfig {
   return {
     rolling: {
       threshold: config.rolling_threshold,
-      buffer: 20, // ChapterX uses fixed buffer of 20
+      buffer: CACHE_MARKER_BUFFER, // ChapterX uses fixed buffer of 20
       unit: 'messages',
     },
     limits: {
       maxCharacters: config.hard_max_characters || 500000,
       // No maxMessages: membrane checks it against the messageCount that
-      // shouldRoll() below hands it, which is ChapterX's count of activations
-      // since the last roll, not a number of messages. ChapterX applies
-      // recency_window_messages in applyLimits instead.
+      // shouldRoll() below hands it, which counts activations since the last roll,
+      // not messages.
     },
     cache: {
       enabled: config.prompt_caching !== false,
@@ -106,10 +107,10 @@ export function shouldRoll(
     };
   }
   
-  // Use membrane's shouldRoll for threshold check. Membrane 0.5.80 and earlier
-  // compare the threshold with state.messagesSinceRoll, and 0.5.81 and later
-  // with messageCount. ^0.5.47 installs either, so the count goes in both
-  // places, which gives the same decision on each.
+  // Membrane 0.5.80 and earlier compare the threshold with
+  // state.messagesSinceRoll, and 0.5.81 and later with messageCount. ^0.5.47
+  // installs either, so the count goes in both places, which gives the same
+  // decision on each.
   const decision = membranesShouldRoll(
     membraneState,
     messagesSinceRoll, // messageCount
@@ -246,7 +247,7 @@ export function determineCacheMarker(
   messageIds: string[],
   lastMarker: string | null,
   didRoll: boolean,
-  buffer: number = 20,
+  buffer: number = CACHE_MARKER_BUFFER,
   botMessageIds?: Set<string>
 ): string | null {
   if (messageIds.length === 0) {
@@ -329,10 +330,11 @@ export function determineCacheMarker(
 export function findFallbackCacheMarker(
   messages: ParticipantMessage[],
   botName: string,
-  buffer: number = 20
+  buffer: number = CACHE_MARKER_BUFFER
 ): string | null {
+  const fallbackLookback = 20;
   const searchStart = Math.max(0, messages.length - 1 - buffer);
-  const searchEnd = Math.max(0, searchStart - 20); // Look back 20 more
+  const searchEnd = Math.max(0, searchStart - fallbackLookback); // Look back 20 more
   
   let fallbackId: string | null = null;
   
@@ -390,9 +392,9 @@ export function applyChapterXCacheMarker(
     tokenEstimate: 0, // Not used for application, just tracking
   }];
   
-  // Use membrane's function to apply markers
-  // Note: membrane sets metadata.cacheControl, but the formatter checks cacheBreakpoint
-  // So we apply membrane's logic then convert to what the formatter expects
+  // Membrane sets metadata.cacheControl, but its formatter checks
+  // cacheBreakpoint, so membrane's markers are converted to what the formatter
+  // expects.
   const messagesWithMetadata = membraneApplyCacheMarkers(messages as any, cacheMarkers);
   
   // Convert metadata.cacheControl to cacheBreakpoint (what the formatter checks)

@@ -1,15 +1,4 @@
-/**
- * Tests for DiscordConnector.sendSegmentChunks — the markdown-aware segment
- * sender used by AgentLoop. The key property: mention/emoji resolution happens
- * BEFORE the (single) markdown split, so resolution can never push a chunk past
- * the limit and trigger an unrecorded second split. Bridge metadata is returned
- * per sent message so the caller can strip it during context reconstruction.
- *
- * We instantiate a real DiscordConnector (its Client is an EventEmitter, no
- * network until .login()) and stub channel.fetch / resolve* via `as any`.
- *
- * Run with: npm test -- connector.send-segments
- */
+/** A real DiscordConnector: its Client makes no network call until .login(). */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'fs'

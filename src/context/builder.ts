@@ -16,6 +16,7 @@ import { Activation } from '../activation/index.js'
 import { logger } from '../utils/logger.js'
 import { attachThinkingBlocks, sanitizeThinkingRuns, type ThinkingGroup } from '../agent/thinking-cache.js'
 import {
+  CACHE_MARKER_BUFFER,
   determineCacheMarker,
   applyChapterXCacheMarker,
 } from './rolling.js'
@@ -103,7 +104,7 @@ export class ContextBuilder {
     // 2.5. Pre-determine cache marker for image selection
     let imageSelectionMarker = lastCacheMarker
     if (!imageSelectionMarker && messages.length > 0) {
-      const buffer = 20
+      const buffer = CACHE_MARKER_BUFFER
       const messageIds = messages.map(m => m.id)
       const botIds = new Set<string>()
       for (const m of messages) {
@@ -168,8 +169,6 @@ export class ContextBuilder {
       insertPluginInjections(participantMessages, pluginInjections, messages)
     }
 
-    // 6b. Re-attach persisted native thinking blocks (with signatures) to the
-    // bot's past messages — before merging, so anchors resolve by messageId.
     // Restores reasoning continuity for models whose thinking lives in the
     // encrypted signature (e.g., Fable 5 with display:'omitted').
     if (thinkingByMessageId && thinkingByMessageId.size > 0) {
@@ -193,9 +192,8 @@ export class ContextBuilder {
       participantMessages.push(...finalMessages)
     }
 
-    // 8b. The API rejects any turn where thinking blocks from different
-    // responses sit next to each other (pre-fix tool-loop cache entries).
-    // Drop such runs; everything else is sent as persisted.
+    // The API rejects any turn where thinking blocks from different
+    // responses sit next to each other.
     if (thinkingByMessageId && thinkingByMessageId.size > 0) {
       const dropped = sanitizeThinkingRuns(participantMessages, thinkingByMessageId.values())
       if (dropped > 0) {

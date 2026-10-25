@@ -1,12 +1,9 @@
 /**
- * Post-generation probe readout via proxy readout endpoint + /v1/encode.
- *
- * Flow:
- *   1. Proxy captures response_token_ids from the final SSE chunk during streaming
- *   2. After generation, ChapterX calls GET /v1/readout/{completion_id} to retrieve them
- *   3. Then POSTs /v1/encode with those token_ids to get full probe projections
- *
- * The proxy stores readout data for ~5 minutes keyed by completion ID.
+ * The proxy captures response_token_ids from the final SSE chunk during
+ * streaming and stores readout data for ~5 minutes keyed by completion ID.
+ * After generation, ChapterX calls GET /v1/readout/{completion_id} to retrieve
+ * them, then POSTs /v1/encode with those token_ids to get full probe
+ * projections.
  */
 
 import { logger } from '../utils/logger.js'

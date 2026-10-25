@@ -1,25 +1,6 @@
 /**
- * Tests for the typing indicator's lifecycle.
- *
- * WHAT THESE PROTECT: a bot sitting in Discord's "typing" state with no request
- * in flight. Discord's indicator expires after ~10s, so a stuck one is never a
- * stale UI state -- an interval is actively re-sending it, orphaned from the
- * connector's map and unreachable by stopTyping.
- *
- * These races were live before this change, when startTyping awaited the
- * channel fetch and the first send before it registered its interval. Callers are
- * fire-and-forget (agent/loop.ts calls `startTyping(...).catch(() => {})`
- * without awaiting it), so an activation could reach stopTyping while
- * startTyping was still waiting, and a start still pending from one activation
- * could register after the next one's start. (Activations on one channel don't
- * overlap: processBatch skips a channel already in activeChannels.) Now
- * startTyping registers before any await, and what can still be pending is a
- * tick's fetch and send.
- *
- * The invariant under test: a typing timer exists if and only if it is in
- * `typingIntervals`, and both start and stop mutate that map synchronously.
- *
- * Run with: npm test -- connector.typing
+ * Discord's typing indicator expires after ~10s, so a stuck one means an
+ * interval is still re-sending it.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -178,11 +159,9 @@ describe('typing indicator lifecycle', () => {
   })
 
   it('does not send typing after a stop that landed mid-fetch', async () => {
-    // Pins the post-await identity re-check against a stop, by watching for a
-    // single stray SEND. Note its limit: sending is
-    // asynchronous and cannot be un-sent, so a stop can always land mid-send.
-    // The check narrows that window rather than closing it, leaving at most the
-    // indicators already in flight, each of which Discord expires in ~10s.
+    // Sending is asynchronous and cannot be un-sent, so a stop can always land
+    // mid-send, leaving at most the indicators already in flight, each of which
+    // Discord expires in ~10s.
     h = makeHarness({ fetchGate: true })
 
     await h.connector.startTyping(CH)   // registers synchronously; tick blocks in fetch

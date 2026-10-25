@@ -1,13 +1,4 @@
 /**
- * Character RAG Plugin
- *
- * Injects relevant character context from pre-indexed .chr files
- * into the LLM context using embedding-based retrieval.
- *
- * Requires:
- * - Pre-computed index files (index_vectors.npy + index_chunks.json)
- * - Running embed server (FastAPI on Mac Studio or similar)
- *
  * Config (via plugin_config.character in bot YAML):
  *   index_path: /path/to/chr_data
  *   embed_url: http://host:6009
@@ -41,10 +32,7 @@ function loadIndex(indexPath: string): { vectors: Float32Array | Float64Array, c
   return entry
 }
 
-/**
- * Minimal .npy parser for float32/float64 2D arrays.
- * Handles numpy format 1.0 with fortran_order=False.
- */
+/** Handles only 2-D float32 and float64 arrays in numpy .npy format 1.0 with fortran_order=False. */
 function parseNpy(buffer: Buffer): { data: Float32Array | Float64Array, shape: number[] } {
   // Magic: \x93NUMPY
   const headerLen = buffer.readUInt16LE(8)
@@ -94,9 +82,7 @@ async function embedQuery(url: string, model: string, text: string): Promise<Flo
   return data
 }
 
-/**
- * Cosine similarity search. Vectors are assumed L2-normalized.
- */
+/** Cosine similarity search. Vectors are assumed L2-normalized. */
 function searchTopK(
   queryVec: Float32Array | Float64Array,
   indexVecs: Float32Array | Float64Array,

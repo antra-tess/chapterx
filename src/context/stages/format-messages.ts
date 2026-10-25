@@ -200,15 +200,9 @@ export async function formatMessages(
     // doesn't gets a line, after everything else in the message.
     const carried = new Set<string>()
 
-    // Character override prefix: `~Name: rest` makes the message appear as if
-    // sent by `Name`, hiding the real author from the LLM. Lets users seed
-    // additional characters into the transcript without their own message.
-    //
     // The connector prepends a reply tag for replies (`<reply:@user> `), and
     // Discord messages can start with mentions (`<@user> `), so the prefix may
-    // not be the literal first character. Skip any such lead-in before looking
-    // for `~Name:`; the lead-in is preserved and only the `~Name:` token is
-    // removed (matching how filterDotMessages handles dotted commands).
+    // not be the literal first character.
     const { name: overrideParticipant, text: messageText } = characterOverride(msg.content)
 
     // Add text content

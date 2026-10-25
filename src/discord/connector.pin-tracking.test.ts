@@ -1,13 +1,4 @@
-/**
- * Tests for event-driven pin tracking in DiscordConnector.
- *
- * These test the live pin map that replaced the old fetchPinned-based caches.
- * We instantiate a real DiscordConnector (its Client is just an EventEmitter
- * internally, no network calls until .login()) and drive gateway events via
- * `client.emit(...)`. Private state and helpers are accessed via `as any`.
- *
- * Run with: npm test -- connector.pin-tracking
- */
+/** A real DiscordConnector: its Client makes no network call until .login(). */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'fs'

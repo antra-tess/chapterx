@@ -170,8 +170,7 @@ describe('resampleImage', () => {
 
 describe('integration: prepareImage + resampleImage pipeline', () => {
   it('handles the trace fa76c759 scenario: large dimensions, small file size', async () => {
-    // The actual bug: an image > 8000px on one dimension but under 5MB base64.
-    // Before the fix, this would pass through to Anthropic and get rejected.
+    // Over 8000px on one side but under 5MB base64: Anthropic rejects it anyway.
     const { buffer, mediaType } = await makeImage(9000, 5000)
 
     // Step 1: prepareImage caps dimensions

@@ -103,8 +103,7 @@ export const channelSteeringSchema = z.object({
 // Provider params shape (what gets spread into the vLLM request body)
 // ---------------------------------------------------------------------------
 
-/** Build provider_params for vLLM from resolved steering config.
- *
+/**
  * vLLM API expects:
  *   - `intervention`: single InterventionConfig or array (field name is singular)
  *   - `probes`: null (all), [] (none), or ["setname", "setname:label", ...]

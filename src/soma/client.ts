@@ -29,16 +29,10 @@ export interface SomaCheckParams {
   userRoles: string[]      // User's role IDs for cost multipliers
 }
 
-/** 
- * @deprecated Soma bot now handles these reactions
- * Kept for backwards compatibility but no longer used by ChapterX
- */
+/** @deprecated Soma's bot handles these reactions; ChapterX no longer uses it. */
 export const INSUFFICIENT_FUNDS_EMOJI = '💸'
 
-/** 
- * @deprecated Soma bot now handles these reactions
- * Kept for backwards compatibility but no longer used by ChapterX
- */
+/** @deprecated Soma's bot handles these reactions; ChapterX no longer uses it. */
 export const DM_FAILED_EMOJI = '📭'
 
 /**
@@ -60,10 +54,7 @@ export class SomaClient {
     }
   }
 
-  /**
-   * Check if user has sufficient credits and deduct if so
-   * This is an atomic operation - check and deduction happen together
-   */
+  /** Soma checks and deducts in one atomic operation. */
   async checkAndDeduct(params: SomaCheckParams): Promise<SomaCheckResult> {
     const url = `${this.baseUrl}/check-and-deduct`
     
@@ -246,12 +237,7 @@ export class SomaClient {
     }
   }
 
-  /**
-   * Format an insufficient funds message for the user
-   * 
-   * @deprecated The Soma Discord bot now handles insufficient funds notifications via DM.
-   * ChapterX should just add the 💸 reaction to the trigger message instead.
-   */
+  /** @deprecated The Soma Discord bot now handles insufficient funds notifications via DM. */
   formatInsufficientFundsMessage(
     result: SomaCheckResult,
     botName: string

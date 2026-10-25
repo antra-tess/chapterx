@@ -1,11 +1,6 @@
 /**
- * A reply's allowed mentions. Each of the connector's reply paths keeps the
- * reply from pinging the author it answers, and lets the people its text
- * mentions be pinged: once a message carries allowed_mentions, Discord pings
- * only what that field allows, so `repliedUser: false` alone silenced every
- * mention in a reply.
- *
- * Run with: npm test -- connector.reply-mentions
+ * Once a message carries allowed_mentions, Discord pings only what that field
+ * allows, so `repliedUser: false` alone silenced every mention in a reply.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'

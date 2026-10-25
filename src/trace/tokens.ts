@@ -7,6 +7,8 @@
 
 import { ContentBlock, ParticipantMessage } from '../types.js'
 
+const ESTIMATED_IMAGE_TOKENS = 1000
+
 /**
  * Estimate tokens for a string.
  * Rule of thumb: ~4 characters per token for English text.
@@ -30,7 +32,7 @@ export function estimateBlockTokens(block: ContentBlock): number {
       // Images are roughly 1000-2000 tokens depending on size
       // Anthropic charges based on image dimensions
       // Rough estimate: 765 tokens for a typical image
-      return 1000
+      return ESTIMATED_IMAGE_TOKENS
     
     case 'tool_use':
       const toolBlock = block as any

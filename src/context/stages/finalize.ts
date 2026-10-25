@@ -93,10 +93,9 @@ export function buildStopSequences(
     sequences.push(config.message_delimiter)
   }
 
-  // Add participant names with newline prefix (in priority order - most recent first)
-  // Skip numeric-only participants (unresolved Discord user ID mentions like <@123456>)
-  // When prefill_thinking is enabled, exclude the bot's own name — the model may
-  // legitimately emit "\nBotName:" after </thinking> to start the visible response.
+  // An unresolved Discord user-ID mention like <@123456> leaves an all-digit participant name.
+  // With prefill_thinking the model may legitimately emit "\nBotName:" after
+  // </thinking> to start the visible response.
   for (const participant of recentParticipants) {
     if (config.prefill_thinking && participant === config.name) {
       continue

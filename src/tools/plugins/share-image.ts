@@ -111,8 +111,8 @@ const listVisibleImagesTool: PluginTool = {
         ? `Discord (${img.sourceDetail})`
         : `MCP tool: ${img.sourceDetail}`
       const desc = img.description ? ` - ${img.description}` : ''
-      const size = Math.round(img.data.length * 0.75 / 1024) // Approximate decoded size in KB
-      return `${idx}. [${img.mimeType}] ${source}${desc} (~${size}KB)`
+      const approxDecodedKB = Math.round(img.data.length * 0.75 / 1024) // Approximate decoded size in KB
+      return `${idx}. [${img.mimeType}] ${source}${desc} (~${approxDecodedKB}KB)`
     })
 
     return `Visible images (${visibleImages.length} total, newest first):\n${lines.join('\n')}\n\nUse share_image with an index to share any of these to Discord.`

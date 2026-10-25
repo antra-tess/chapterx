@@ -113,11 +113,10 @@ const NOT_IN_REPLY_TAG = '(?<!\\(replying to)'
 const LEAD = `(?<lead>^|[\\s([{"'“‘*_~|])`
 /** A mention's name ends where no letter, mark, digit or underscore follows. */
 const END = '(?![\\p{L}\\p{M}\\p{N}_])'
-/** After a template ending in `]`: not a markdown link's target. */
+/** After a template ending in `]`, a `(` would make a markdown link `[Name](url)`. */
 const NOT_LINK = '(?!\\()'
-/** Plain text in which a `<@` reads as no mention: Discord shows `<\@` as
- *  `<@`, and neither it nor the connector's lookup reads a mention there. A
- *  name a mention is written or left as can hold one. */
+/** Discord shows `<\@` as `<@`, and neither it nor the connector's lookup
+ *  reads a mention there. */
 const inert = (text: string): string => text.replaceAll('<@', '<\\@')
 /** Never read as a name, since Discord gives them to everyone in a channel. */
 const CHANNEL_WIDE = new Set(['everyone', 'here'])
@@ -195,15 +194,9 @@ export function mentionsToIds(
   let lastEnd = -1
   let lastWritten = ''
   const rewrite = (match: string, groups: Record<string, string | undefined>, offset: number): string => {
-    // A mention any part of which is code is left as written, but with each
-    // `<@` in it past its start escaped, in a name or a template's own, in code
-    // too, where Discord shows the backslash: what's read as code here reaches
-    // past what Discord shows as code, and where Discord reads prose, a `<@`
-    // could ping. The `<@` it starts with is escaped too where its start is
-    // outside code, or where what follows reads as Discord's mention of a role,
-    // or of a user by `!` and an id. Otherwise it stays as the model wrote it,
-    // a mention by id `<@id>` included, which pings its id where Discord reads
-    // prose, as it does outside code.
+    // Escaped in code too, where Discord shows the backslash: what's read as code
+    // here reaches past what Discord shows as code, and where Discord reads prose,
+    // a `<@` could ping.
     if (code.some(([start, end]) => offset < end && offset + match.length > start)) {
       DISCORD_MENTION.lastIndex = offset
       const kept = code.some(([start, end]) => offset >= start && offset < end) && !DISCORD_MENTION.test(text)
@@ -216,14 +209,13 @@ export function mentionsToIds(
       if (!names) return match
       const holder = names.get(key)
       if (holder) return `<@${holder.id}>`
-      // Held by no one, it's left as plain text, without its `>`. A name ending
-      // in an odd run of backslashes gets one more, so the run escapes nothing
-      // after it, as the `>` kept it from doing.
+      // A name ending in an odd run of backslashes gets one more, so the run
+      // escapes nothing after it.
       const run = /\\*$/.exec(groups.bracketed)![0].length
       return inert(`@${groups.bracketed}${run % 2 ? '\\' : ''}`)
     }
-    // A mention that ends in a backslash, as `@Name\` does, escapes the
-    // character after it, which replacing the mention would unescape.
+    // A trailing odd run of backslashes escapes the character after the mention,
+    // which replacing the mention would unescape.
     if (match.endsWith('\\')) return inert(match)
     const holder = otherNames.get((groups.shown ?? '').toLowerCase())
     return holder && !holder.bot ? `${groups.lead ?? ''}<@${holder.id}>` : inert(match)

@@ -63,7 +63,7 @@ export function toMembraneMessage(msg: ParticipantMessage): NormalizedMessage {
     metadata: buildMessageMetadata(msg),
   };
   
-  // Pass through cacheBreakpoint directly - formatter checks this property
+  // Membrane's formatter reads cacheBreakpoint to place cache_control.
   if (msg.cacheBreakpoint) {
     result.cacheBreakpoint = true;
   }
@@ -84,12 +84,7 @@ export function fromMembraneMessage(msg: NormalizedMessage): ParticipantMessage 
   };
 }
 
-/**
- * Convert array of chapterx messages to membrane format
- *
- * Filters out empty assistant messages at the end - these are added by chapterx
- * context builder for its own prefill mechanism, but membrane handles prefill internally.
- */
+/** Drops trailing empty messages: membrane handles prefill internally. */
 export function toMembraneMessages(messages: ParticipantMessage[]): NormalizedMessage[] {
   // Filter out trailing empty assistant messages (chapterx prefill placeholder)
   // These are messages with empty text content used to start bot completion
@@ -295,17 +290,10 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
 // ============================================================================
 
 /**
- * Determine the appropriate tool mode based on model name
- * 
- * This is necessary because when using RoutingAdapter, Membrane's auto tool mode
- * selection (based on adapter.name) doesn't work correctly. We need to explicitly
- * set the tool mode based on which provider will handle the model.
- * 
- * Rules:
- * - Models with provider prefix (e.g., "anthropic/claude-3-opus") → native (OpenRouter)
- * - Direct claude-* models → xml (Anthropic prefill mode)
- * - Bedrock claude models (anthropic.*) → xml (Anthropic prefill mode)
- * - Other models → native (likely going through OpenRouter)
+ * Membrane's auto tool mode picks native tools for a native formatter or an
+ * adapter named 'openrouter'. Behind RoutingAdapter the adapter is named
+ * 'routing', so the tool mode is set here from the provider that will handle
+ * the model.
  */
 export function resolveToolModeForModel(
   modelName: string,
@@ -356,16 +344,8 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     repetitionPenalty: request.config.repetition_penalty,
   };
   
-  // Enable extended thinking when any thinking-related config is set:
-  // - prefill_thinking (legacy)
-  // - debug_thinking (display thinking in Discord)
-  // - thinking_type (explicitly configured thinking mode — reasoning can be
-  //   enabled without display; preservation/round-trip works either way)
-  //
   // Chat mode only (except prefill_thinking): prefill-mode requests end with
   // an assistant prefill, which the API rejects when extended thinking is on.
-  // Prefill bots get debug_thinking display from the literal <thinking> text
-  // the model writes (the original behavior).
   const enableApiThinking = request.config.prefill_thinking ||
     (request.config.mode === 'chat' &&
       (request.config.debug_thinking || !!request.config.thinking_type))
@@ -391,9 +371,7 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     // Explicitly set tool mode based on model to work around RoutingAdapter issue
     // Membrane's auto-detection checks adapter.name which is 'routing' for RoutingAdapter
     toolMode: resolveToolModeForModel(request.config.model, request.config.mode),
-    // Control participant-based stop sequences:
-    // - If participant_stop_sequences is false (default), disable them (set to 0)
-    // - If participant_stop_sequences is true, use membrane default (don't set)
+    // Membrane: 0 disables participant stop sequences; undefined takes its default.
     maxParticipantsForStop: request.config.participant_stop_sequences ? undefined : 0,
     // Prompt caching control - when false, cache_control markers are not added to requests
     promptCaching: request.config.prompt_caching,
@@ -425,7 +403,6 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     normalizedRequest.providerParams = { ...request.config.provider_params };
   }
 
-  // Handle explicit image generation config override
   // Flows through providerParams → extra → Gemini generationConfig
   if (request.config.generate_images !== undefined) {
     normalizedRequest.providerParams = {

@@ -4,6 +4,7 @@
 
 import type { DiscordMessage, ParticipantMessage, BotConfig } from '../../types.js'
 import {
+  CACHE_MARKER_BUFFER,
   shouldRoll,
   calculateCharacters,
   truncateToCharacterLimit,
@@ -136,7 +137,7 @@ export function determineCacheMarkerFromMessages(
     }
   }
 
-  return determineCacheMarker(messageIds, lastMarker, didRoll, 20, botMessageIds)
+  return determineCacheMarker(messageIds, lastMarker, didRoll, CACHE_MARKER_BUFFER, botMessageIds)
 }
 
 /**
@@ -174,7 +175,7 @@ export function recoverOrphanedCacheMarker(
 
   // Last resort: pick ANY message near the tail as cache boundary.
   // A slightly unstable prefix is far better than 0 caching (full cost every activation).
-  const lastResortIdx = Math.max(0, participantMessages.length - 20)
+  const lastResortIdx = Math.max(0, participantMessages.length - CACHE_MARKER_BUFFER)
   const lastResortMarker = participantMessages[lastResortIdx]?.messageId ?? null
   if (lastResortMarker) {
     logger.warn({

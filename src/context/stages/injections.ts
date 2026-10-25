@@ -90,9 +90,8 @@ export function injectActivationCompletions(
     completionMapKeys: Array.from(completionMap.keys()),
   }, 'Built context maps')
 
-  // Build phantom insertions: messageId -> completions to insert after
-  // Skip thinking-only phantoms — injecting them into context creates a feedback loop
-  // where the model sees "I was activated and only thought, never responded" and repeats.
+  // Thinking-only phantoms stay out: shown in context, the model sees "I was
+  // activated and only thought, never responded" and repeats it.
   const phantomInsertions = new Map<string, Completion[]>()
   for (const activation of activations) {
     let currentAnchor = activation.trigger.anchorMessageId

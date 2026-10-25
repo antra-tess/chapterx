@@ -4,7 +4,7 @@
  */
 
 import express, { Request, Response, NextFunction } from 'express'
-import { DiscordConnector } from '../discord/connector.js'
+import { DiscordConnector, HISTORY_AND_FILTER_BUFFER } from '../discord/connector.js'
 import { displayNameClasses } from '../discord/member-names.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder } from '../context/builder.js'
@@ -413,7 +413,7 @@ export class ApiServer {
 
     // Determine recency window (default: 50 messages)
     const recencyWindow = request.recencyWindow || { messages: 50 }
-    const maxFetch = recencyWindow.messages ? recencyWindow.messages + 100 : 1000
+    const maxFetch = recencyWindow.messages ? recencyWindow.messages + HISTORY_AND_FILTER_BUFFER : 1000
 
     // Use connector.fetchContext() which automatically:
     // - Recursively handles .history commands during traversal (unless ignoreHistory)
@@ -785,7 +785,7 @@ export class ApiServer {
 
     // Override limits: use provided message count, disable character limits
     const fetchMessages = messageCount || config.recency_window_messages || 200
-    const fetchDepth = fetchMessages + 100  // Buffer for .history and filtering
+    const fetchDepth = fetchMessages + HISTORY_AND_FILTER_BUFFER  // Buffer for .history and filtering
 
     // Fetch context from Discord
     const discordContext = await this.connector.fetchContext({

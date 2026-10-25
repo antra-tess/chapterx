@@ -323,7 +323,6 @@ function getAdapterForModel(
     }
   }
 
-  // 2. Smart routing based on model name format
   // OpenRouter models have a provider prefix (e.g., "anthropic/claude-3-opus", "openai/o3")
   if (modelName.includes('/')) {
     const openrouterAdapter = adapters.get('openrouter');
@@ -908,17 +907,17 @@ function createFormatter(config: MembraneFactoryConfig): PrefillFormatter {
 export { RoutingAdapter };
 
 /**
- * Create membrane from vendor configs (for integration with main.ts)
- *
- * Adapter type is determined by vendor name prefix:
- * - 'anthropic-*' → Anthropic adapter
- * - 'openrouter-*' → OpenRouter adapter
- * - 'openairesponses-*' → OpenAI Responses adapter (/v1/responses, for gpt-image-1)
- * - 'openaicompletion-*' → OpenAI Completions adapter (base models, /v1/completions)
- * - 'openai-*' → OpenAI Compatible adapter (chat, /v1/chat/completions)
- *
- * Each vendor gets exactly one adapter. The vendor's `provides` patterns
- * determine which models it serves.
+ * A vendor's adapter is chosen by how its name starts, checked in this order:
+ * - 'anthropic' → Anthropic
+ * - 'bedrock' → Bedrock
+ * - 'gemini' → Gemini
+ * - 'openrouter' → OpenRouter
+ * - 'openairesponses' → OpenAI Responses
+ * - 'openaicompletion' → OpenAI Completions (base models)
+ * - 'openai' → OpenAI, or OpenAI Compatible when it sets a base URL that
+ *   doesn't contain api.openai.com
+ * A vendor with any other name is OpenAI Compatible if it sets
+ * openai_compatible_base_url, and is skipped otherwise.
  */
 export interface VendorConfigInput {
   config: Record<string, string>;

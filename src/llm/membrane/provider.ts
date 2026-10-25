@@ -293,7 +293,6 @@ export class MembraneProvider {
       // Log membrane response to file
       const membraneResponseRef = this.logResponseToFile(response);
 
-      // Handle aborted responses (timeout, user cancel, etc.)
       // AbortedResponse has partialContent, not content — fromMembraneResponse would crash
       if ('aborted' in response && (response as any).aborted === true) {
         const aborted = response as any;
@@ -576,19 +575,10 @@ export class MembraneProvider {
   }
 
   /**
-   * A copy of a request for the request logs, with each media block's payload
-   * (an image, audio or a document) replaced by `[BASE64_DATA_<length>_BYTES]`,
-   * the payload's base64 length, wherever in the request's structure it sits:
-   * - the `data` of a `source` of type 'base64' (Anthropic's and membrane's),
-   *   of Gemini's `inlineData`, and of an `input_audio`;
-   * - the payload of a `data:...;base64,` URL under a `url` key, where the
-   *   OpenAI-style adapters put an image, or in an `image` array, where the
-   *   Images API adapter puts an edit's input images. The URL keeps its media
-   *   type.
-   * These shapes are replaced wherever they sit, a tool's structured arguments
-   * included. Everything else is kept as written: text, a data URL inside it
-   * included, and anything an adapter sends as JSON text, such as a tool
-   * result or a tool call's arguments.
+   * Media payloads sit in a `source` of type 'base64' (Anthropic's and
+   * membrane's), Gemini's `inlineData`, an `input_audio`, a `data:...;base64,`
+   * URL under a `url` key (the OpenAI-style adapters), or an `image` array (the
+   * Images API adapter's edit inputs).
    */
   private stripBase64FromRequest(request: any): any {
     return JSON.parse(JSON.stringify(request), (key, value) => {
@@ -609,10 +599,7 @@ export class MembraneProvider {
 // Types
 // ============================================================================
 
-/**
- * Metadata for each streamed chunk
- * Matches membrane's ChunkMeta interface
- */
+/** A subset of membrane's ChunkMeta. */
 export interface ChunkMeta {
   /** Which membrane block this chunk belongs to */
   blockIndex: number;
@@ -644,19 +631,12 @@ export interface MembraneBlock {
   isError?: boolean;
 }
 
-/**
- * Block lifecycle events
- * Matches membrane's BlockEvent type from types/streaming.ts
- */
+/** Mirrors membrane's BlockEvent (types/streaming.ts). */
 export type BlockEvent =
   | { event: 'block_start'; index: number; block: { type: MembraneBlockType } }
   | { event: 'block_complete'; index: number; block: MembraneBlock };
 
 export interface StreamOptions {
-  /**
-   * Called for each text chunk received with enriched metadata.
-   * Note: XML tags from prefill mode are NOT included - only actual content.
-   */
   onChunk?: (text: string, meta: ChunkMeta) => void;
 
   /**
@@ -688,10 +668,6 @@ export interface StreamOptions {
   /** Abort signal */
   signal?: AbortSignal;
 
-  /**
-   * Override the default formatter for this request.
-   * Use 'native' to disable prefill mode (required for claude-opus-4-* models).
-   * Use 'anthropic-xml' for prefill mode with XML tools.
-   */
+  /** 'native', which turns prefill mode off, is required for claude-opus-4-* models. */
   formatterOverride?: 'native' | 'anthropic-xml' | 'completions';
 }

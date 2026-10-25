@@ -1,14 +1,7 @@
 /**
- * Discord-markdown fence/emphasis balancer.
- *
  * Discord parses each message independently, so a markdown construct that
  * straddles a message boundary breaks (a half-open code fence corrupts
- * everything after it). This splits text so any construct open at a chunk
- * boundary is closed at the chunk end and reopened at the next, and reports the
- * open-construct stack so continuity can be threaded across separate sends.
- *
- * Scope: code fences (``` / ~~~), inline code, emphasis (*, **, ***, _, __, ~~,
- * ||). Pure and dependency-free.
+ * everything after it).
  */
 
 export interface OpenMark {
@@ -490,16 +483,7 @@ export function closeMarks(stack: MarkdownCarry): string {
   return out
 }
 
-/**
- * A fence's reopener body: the marker run plus at most the first
- * whitespace-delimited word of the info string (the language tag), optionally
- * truncated to `infoBudget` chars. Replaying the entire verbatim opening line
- * is unnecessary — Discord only consumes the first token for syntax
- * highlighting — and a long info string would otherwise blow past maxLength
- * when the fence straddles a cut. Truncating the tag only affects the synthetic
- * reopener (a bridge that is stripped on reconstruction), never the body, so
- * losslessness is preserved.
- */
+/** Discord only consumes the first token of a fence's info string, for syntax highlighting. */
 function fenceReopener(opener: string, infoBudget = Infinity): string {
   const { char, runLen } = parseFenceMarker(opener)
   const marker = char.repeat(runLen)
@@ -686,7 +670,10 @@ export function splitPreservingMarkdown(
       if (mark.kind === 'fence') {
         const { runLen } = parseFenceMarker(mark.opener)
         // marker + info + '\n' (reopener) and marker + '\n' (closer) and 1 body.
-        const infoBudget = maxLength - runLen - 1 - (runLen + 1) - 1
+        const reopenerNewline = 1
+        const closerLength = runLen + 1
+        const oneBodyChar = 1
+        const infoBudget = maxLength - runLen - reopenerNewline - closerLength - oneBodyChar
         out += fenceReopener(mark.opener, infoBudget) + '\n'
       } else {
         out += mark.opener
@@ -861,13 +848,9 @@ function closeMarksForBody(body: string, stack: MarkdownCarry): string {
 }
 
 /**
- * Whether a cut at `pos` leaves a backslash escaping what it shouldn't: an odd
- * run of backslashes ends at the cut, outside code, and either the character
- * after the cut, which would lose its escape, or the first closer the chunk
- * appends, which the backslash would escape, is one Discord's markdown escapes:
- * anything but an ASCII letter, a digit or whitespace. Inside a ``` block or a
- * code span, where a backslash is literal, it escapes nothing. A `~~~` block
- * is prose to Discord, so a backslash there can escape.
+ * Discord's markdown escapes anything but an ASCII letter, a digit or
+ * whitespace. Inside a ``` block or a code span a backslash is literal; a
+ * `~~~` block is prose to Discord, so a backslash there can escape.
  */
 function splitsEscape(text: string, chunkStart: number, pos: number, closeStack: MarkdownCarry): boolean {
   const code = (mark: OpenMark): boolean =>

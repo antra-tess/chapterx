@@ -1,28 +1,15 @@
 /**
- * Thinking block cache — persists native extended-thinking blocks (with their
- * cryptographic signatures) per bot/channel so they can be re-attached to the
- * bot's past turns during context rebuild.
+ * On models like Claude Fable 5 (thinking display:'omitted'), the signature
+ * carries the encrypted full reasoning — the API decrypts it server-side when
+ * the block is passed back. Blocks must round-trip verbatim, including
+ * signature-only blocks whose thinking field is an empty string.
  *
- * Mirrors the tool cache pattern (src/tools/system.ts): hourly JSONL files
- * under <cacheDir>/thinking/<botId>/<channelId>/, entries keyed by the bot's
- * sent Discord message IDs, filtered against live messages on load.
- *
- * Why: on models like Claude Fable 5 (thinking display:'omitted'), the
- * signature carries the encrypted full reasoning — the API decrypts it
- * server-side when the block is passed back, restoring reasoning continuity.
- * Blocks must round-trip verbatim, including signature-only blocks whose
- * thinking field is an empty string.
- *
- * Adjacent blocks must share a response: the API rejects any turn in which
- * thinking blocks from different responses sit next to each other ("thinking
- * or redacted_thinking blocks in the latest assistant message cannot be
- * modified" — reported for whichever turn has them, latest or not). Blocks
- * from different responses separated by other content (e.g. merged
- * consecutive bot messages: thinking, text, thinking, text) are accepted.
- * A tool-loop activation makes several responses but is rebuilt from Discord
- * as one turn, so only the final response's blocks are persisted
- * (finalStepThinkingBlocks), and sanitizeThinkingRuns drops runs that still
- * mix responses (entries written before this rule).
+ * The API rejects any turn in which thinking blocks from different responses
+ * sit next to each other ("thinking or redacted_thinking blocks in the latest
+ * assistant message cannot be modified" — reported for whichever turn has
+ * them, latest or not). Blocks from different responses separated by other
+ * content (e.g. merged consecutive bot messages: thinking, text, thinking,
+ * text) are accepted.
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'fs'
@@ -64,10 +51,9 @@ function isThinkingBlock(block: { type: string }): block is ThinkingBlock {
 }
 
 /**
- * The thinking blocks of the FINAL response of an activation's tool loop.
  * Membrane returns every step's blocks in order — [thinking, tool_use,
  * tool_result, thinking, text] — so the final response starts after the last
- * tool_use/tool_result block. Returns [] when the loop ended on a tool call.
+ * tool_use/tool_result block.
  */
 export function finalStepThinkingBlocks(content: ReadonlyArray<{ type: string }>): ThinkingBlock[] {
   let start = 0

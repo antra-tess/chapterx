@@ -67,6 +67,8 @@ function extractMentionedRoleIds(
 }
 
 const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
+const DISCORD_MESSAGE_LIMIT = 2000
+export const HISTORY_AND_FILTER_BUFFER = 100
 
 /** Extract a Unix timestamp (ms) from a Discord snowflake ID */
 function snowflakeToTimestamp(id: string): number {
@@ -100,12 +102,10 @@ export interface SentMessageChunk {
  *  placeholder, not anyone in the conversation. */
 export const SYSTEM_PLACEHOLDER_ID = 'system'
 
-/** A reply's allowed mentions: the reply doesn't ping the author it answers,
- *  and the people its text mentions are pinged. Once a message carries
- *  allowed_mentions, Discord pings only what that field allows (its default
- *  of every mention type applies only when the field is left out), so
- *  `repliedUser: false` alone would keep every mention in a reply silent.
- *  Roles and @everyone stay unparsed in a reply, as they were. */
+/** Once a message carries allowed_mentions, Discord pings only what that
+ *  field allows (its default of every mention type applies only when the
+ *  field is left out), so `repliedUser: false` alone would keep every
+ *  mention in a reply silent. */
 function replyAllowedMentions(): MessageMentionOptions {
   return { repliedUser: false, parse: ['users'] }
 }
@@ -644,7 +644,7 @@ export class DiscordConnector {
         startProfile('threadParentFetch')
         const thread = channel as any  // Discord.js ThreadChannel
         threadParentChannel = thread.parent as TextChannel
-        threadStartMessageId = thread.id  // Thread ID === message ID that started it
+        threadStartMessageId = thread.id  // A thread started from a message shares that message's id
 
         if (threadParentChannel && threadParentChannel.isTextBased()) {
           logger.debug({
@@ -1035,14 +1035,7 @@ export class DiscordConnector {
     return match ? match[1]! : null
   }
 
-  /**
-   * Resolve <@username> mentions to <@USER_ID> format for Discord
-   * This reverses the conversion done in convertMessage
-   *
-   * A mention in code is left as written, since Discord shows it raw there.
-   * `startCarry` is a code block or span the text begins inside, carried open
-   * from an earlier message, as the markdown splitter sends it.
-   */
+  /** A mention in code is left as written, since Discord shows it raw there. */
   private async resolveMentions(content: string, channelId: string, startCarry: MarkdownCarry = []): Promise<string> {
     // Find all <@username> patterns (not already numeric IDs), outside code.
     // A name holds no '<': so a '<@' left open in code doesn't run on to a
@@ -1135,10 +1128,7 @@ export class DiscordConnector {
     })
   }
 
-  /**
-   * Fetch a guild member's role names by user ID and guild ID.
-   * Used when msg.member is null (historical message fetches don't populate member data).
-   */
+  /** For when msg.member is null: historical message fetches don't populate member data. */
   async fetchMemberRoles(userId: string, guildId: string): Promise<string[] | null> {
     try {
       const guild = this.client.guilds.cache.get(guildId)
@@ -1236,7 +1226,7 @@ export class DiscordConnector {
     // Splitting targets 1800 chars; a chunk over Discord's 2000 hard limit means
     // the markdown splitter hit its pathological escape (closers alone exceed the
     // budget). Surface it rather than let the send 400 silently.
-    if (content.length > 2000) {
+    if (content.length > DISCORD_MESSAGE_LIMIT) {
       logger.warn({ channelId: channel.id, length: content.length }, 'Chunk exceeds Discord message limit')
     }
     if (replyToMessageId) {
@@ -1510,30 +1500,8 @@ export class DiscordConnector {
   }
 
   /**
-   * Start typing indicator (refreshes every 8 seconds)
-   *
-   * Discord's typing state expires after ~10s, so the indicator persists only
-   * because of the refresh interval below. An orphaned interval is therefore
-   * indistinguishable, to a user, from a request that never finishes: the bot
-   * types forever with nothing in flight.
-   *
-   * TWO RULES HOLD THIS TOGETHER. Callers are fire-and-forget (agent/loop.ts
-   * does `startTyping(...).catch(() => {})` without awaiting it), so if
-   * startTyping awaited anything before registering, an activation could
-   * reach stopTyping in between and find nothing to clear.
-   *
-   *   1. NEVER AWAIT BEFORE THE MAP WRITE. Registration must stay atomic with
-   *      respect to stopTyping; an await above it reopens a window in which a
-   *      stop clears an empty map and this interval registers behind it. The
-   *      method stays `async` only so `.catch()` callers keep working -- an
-   *      async function runs synchronously until its first await, and there
-   *      must be none before the registration.
-   *   2. COMPARE THE HANDLE, NOT A COUNTER. The Timeout is the identity token:
-   *      the runtime mints it and it cannot be re-derived, so "is this still
-   *      the channel's timer?" has no false positives. A counter that can be
-   *      reset could re-mint a value a pending start still holds.
-   *
-   * Invariant: a typing timer exists if and only if it is in typingIntervals.
+   * Discord's typing state expires after ~10s, so the indicator lasts only
+   * through the refresh interval below.
    */
   async startTyping(channelId: string): Promise<void> {
     // close() runs during shutdown, before the remaining shutdown steps and
@@ -1554,12 +1522,9 @@ export class DiscordConnector {
         if (!channel || !channel.isTextBased()) {
           return
         }
-        // Identity check, not a value check, after the await: a stop or a
-        // replacing start can land inside a network round-trip. This narrows
-        // that window rather than closing it -- sending is asynchronous and
-        // cannot be un-sent, and setInterval doesn't wait for a slow tick --
-        // so the residual is a stray indicator from each refresh already in
-        // flight, which Discord expires by itself in ~10s.
+        // Sending can't be un-sent and setInterval doesn't wait for a slow tick, so a
+        // refresh already in flight can leave a stray indicator, which Discord expires
+        // by itself in ~10s.
         if (this.typingIntervals.get(channelId) !== interval) {
           return
         }
@@ -2290,7 +2255,7 @@ export class DiscordConnector {
       // Update message cache
       this.pushMessageToCache(message.channelId, message)
 
-      // Pre-pinned messages (rare: webhook-delivered or boosts) — track on create.
+      // Discord can deliver a message already pinned (rare: webhook-delivered or boosts).
       if (message.pinned === true && message.channelId) {
         this.trackPin(message.channelId, message)
         logger.info({ channelId: message.channelId, messageId: message.id }, 'Tracked pin from messageCreate')
@@ -2348,8 +2313,7 @@ export class DiscordConnector {
         this.removeMessageFromCache(message.channelId, message.id)
       }
 
-      // Pin tracking: MESSAGE_DELETE doesn't say if the message was pinned;
-      // unconditional delete is a no-op if it wasn't tracked.
+      // MESSAGE_DELETE doesn't say whether the message was pinned.
       if (message.id && message.channelId) {
         const channelPins = this.pinnedByChannel.get(message.channelId)
         if (channelPins?.delete(message.id)) {
@@ -2438,11 +2402,7 @@ export class DiscordConnector {
     })
   }
 
-  /**
-   * Extract username from oblique bridge webhook format.
-   * Oblique sends messages via webhooks with nickname format: `displayname[oblique:various text]`
-   * Returns the extracted displayname, or null if not an oblique message.
-   */
+  /** Oblique sends messages through webhooks named `displayname[oblique:various text]`. */
   private extractObliqueUsername(username: string): string | null {
     // Match pattern: displayname[oblique:...]
     const obliquePattern = /^(.+?)\[oblique:[^\]]*\]$/
@@ -2474,13 +2434,8 @@ export class DiscordConnector {
       }
     }
 
-    // Replace user ID mentions with username mentions for bot consumption.
-    // Cascade: msg.mentions.users → client user cache → guild member cache.
-    // Use actual username (not displayName/nick) to match chapter2 behavior.
-    // Falls back to @unknown-user only when every cache misses, so raw snowflake
-    // IDs never leak to the LLM. Historical messages, oblique/webhook content,
-    // and cross-guild references commonly miss msg.mentions.users but are
-    // present in the client-wide user cache.
+    // Historical messages, oblique/webhook content and cross-guild references
+    // commonly miss msg.mentions.users but are present in the client-wide user cache.
     let content = (msg.content ?? '').replace(/<@!?(\d+)>/g, (_match, userId) => {
       const user = msg.mentions.users.get(userId)
         ?? msg.client.users.cache.get(userId)
@@ -2499,10 +2454,8 @@ export class DiscordConnector {
       return channel && 'name' in channel ? `#${channel.name}` : `#unknown-channel`
     })
 
-    // Convert role mentions to a readable @role-name (raw <@&id> is noise to the
-    // LLM). <@&123456789> → @RoleName, or @unknown-role if uncached. Strip the
-    // portal relay's internal `portal-` pool prefix so a portal persona addressed
-    // by its role reads as @glm52, not @portal-glm52 (matches the portal path).
+    // The portal relay prefixes its pool roles with `portal-`; stripping it reads a
+    // portal persona addressed by its role as @glm52, not @portal-glm52.
     content = content.replace(/<@&(\d+)>/g, (_match, roleId) => {
       const role = msg.mentions.roles.get(roleId) ?? msg.guild?.roles.cache.get(roleId)
       if (!role?.name) return '@unknown-role'
@@ -2586,12 +2539,8 @@ export class DiscordConnector {
   }
 
   /**
-   * Fetch pinned messages with a timeout to prevent hanging the event loop.
-   * Bypasses discord.js REST manager entirely (it hangs on pins endpoints due to
-   * Cloudflare Error 1015 rate limiting on servers with many bots sharing one IP).
-   * Uses native fetch() to the Discord API directly with AbortController timeout.
-   * Returns { messages, failed } so caller can distinguish "no pins" from "fetch failed".
-   * Does NOT wait on rate limits — falls through immediately to disk cache instead.
+   * Bypasses discord.js's REST manager, which hangs on the pins endpoints under
+   * Cloudflare Error 1015 rate limiting on servers with many bots sharing one IP.
    */
   private async fetchPinnedWithTimeout(channel: TextChannel, timeoutMs: number = 10000): Promise<{ messages: Collection<string, Message>, failed: boolean }> {
     const empty = new Collection<string, Message>()
@@ -2623,7 +2572,6 @@ export class DiscordConnector {
           if (response.status === 429) {
             const retryAfter = parseFloat(response.headers.get('retry-after') || '0')
             // Don't wait — Cloudflare 1015 bans can be hours long.
-            // Fall through immediately so caller can use disk cache.
             logger.warn({
               channelId: channel.id,
               retryAfterSec: retryAfter,
@@ -2798,7 +2746,7 @@ export class DiscordConnector {
             logger.warn({ url, filename: cachedFilename }, 'Could not read image dimensions from disk cache')
           }
 
-          // Token estimate: Anthropic internally resizes to max 1568x1568
+          // An estimate. Anthropic downscales an image whose long edge is over 1568 px or whose cost would be over 1568 visual tokens (2576 px and 4784 tokens on Claude 4.7 and later models), and charges ceil(width / 28) * ceil(height / 28) tokens.
           const estW = Math.min(width || 1024, 1568)
           const estH = Math.min(height || 1024, 1568)
           const tokenEstimate = Math.ceil((estW * estH) / 750)
@@ -2870,7 +2818,7 @@ export class DiscordConnector {
         logger.warn({ url }, 'Could not get image dimensions for downloaded image')
       }
 
-      // Token estimate: Anthropic internally resizes to max 1568x1568
+      // An estimate. Anthropic downscales an image whose long edge is over 1568 px or whose cost would be over 1568 visual tokens (2576 px and 4784 tokens on Claude 4.7 and later models), and charges ceil(width / 28) * ceil(height / 28) tokens.
       const estW = Math.min(width || 1024, 1568)
       const estH = Math.min(height || 1024, 1568)
       const tokenEstimate = Math.ceil((estW * estH) / 750)

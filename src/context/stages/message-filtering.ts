@@ -72,8 +72,7 @@ export function mergeConsecutiveBotMessages(
 export function filterDotMessages(messages: DiscordMessage[], steerVisible: boolean = true, ignoreDotted: boolean = true): DiscordMessage[] {
   if (!ignoreDotted) return messages
   return messages.filter((msg) => {
-    // 👁️‍🗨️ reaction overrides all hiding — always keep the message
-    // Discord returns emoji name without variation selectors (U+FE0F),
+    // Discord returns the emoji name without variation selectors (U+FE0F),
     // so match both forms: 👁‍🗨 (bare) and 👁️‍🗨️ (with VS16)
     if (msg.reactions?.some(r => r.emoji === '👁‍🗨' || r.emoji === '👁️‍🗨️' || r.emoji === 'eye_in_speech_bubble')) {
       return true

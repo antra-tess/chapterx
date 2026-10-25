@@ -17,9 +17,7 @@ import {
   type FetchDeps,
 } from './context-fetch.js'
 
-// ────────────────────────────────────────────────────────────────────────────
-// Constants — all IDs must be numeric (Discord snowflake format)
-// ────────────────────────────────────────────────────────────────────────────
+// All IDs must be numeric (Discord snowflake format)
 
 const BOT_ID = '900000000000000001'
 const OTHER_BOT_ID = '900000000000000002'

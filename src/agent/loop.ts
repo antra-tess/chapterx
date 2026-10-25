@@ -6,7 +6,7 @@
 import { EventQueue } from './event-queue.js'
 import { DeferredQueue, isTransientError } from './deferred-queue.js'
 import { ChannelStateManager } from './state-manager.js'
-import { DiscordConnector, SYSTEM_PLACEHOLDER_ID, type PinnedSteer } from '../discord/connector.js'
+import { DiscordConnector, HISTORY_AND_FILTER_BUFFER, SYSTEM_PLACEHOLDER_ID, type PinnedSteer } from '../discord/connector.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder, BuildContextParams } from '../context/builder.js'
 import { collectCoveredToolMessageIds } from '../context/stages/tool-interleave.js'
@@ -55,10 +55,7 @@ interface ContentSegment {
   suffix?: string   // trailing invisible (only for last segment)
 }
 
-/**
- * Reaction emoji per refusal category (from the API's stop_details).
- * Unknown/uncategorized refusals fall back to 🛑.
- */
+/** Keyed by the refusal category in the API's stop_details. */
 const REFUSAL_CATEGORY_EMOJI: Record<string, string> = {
   bio: '☣️',
   chem: '🧪',
@@ -92,10 +89,8 @@ function endOfPostedPrefix(completion: string, posted: string): number | undefin
 }
 
 /**
- * Whether Discord message id `id` is at or before `newest`. Snowflakes are
- * decimal strings that grow with time, so a shorter one is older and ids of
- * one length compare as strings. Anything that isn't a snowflake is never
- * at or before, and nothing is at or before no id.
+ * Snowflakes are decimal strings that grow with time, so a shorter one is
+ * older and ids of one length compare as strings.
  */
 function snowflakeAtOrBefore(id: unknown, newest: string | undefined): boolean {
   if (typeof id !== 'string' || newest === undefined || !/^\d+$/.test(id) || !/^\d+$/.test(newest)) return false
@@ -1004,8 +999,7 @@ export class AgentLoop {
       return { status: 'allowed', transactionId: result.transactionId }
     }
 
-    // Bot not configured in Soma - ChapterX adds ⚙️ reaction
-    // (Soma can't handle this since the bot isn't registered)
+    // Soma can't react for a bot it hasn't registered, so ChapterX adds this reaction itself.
     if (result.reason === 'bot_not_configured') {
       logger.warn({
         botId: this.botUserId,
@@ -1025,8 +1019,7 @@ export class AgentLoop {
       return { status: 'blocked' }
     }
 
-    // Insufficient funds - Soma bot handles 💸 reaction and DM notification
-    // ChapterX just silently blocks activation
+    // Soma's bot posts the 💸 reaction and the DM for insufficient funds.
     logger.info({
       userId: triggeringUser.id,
       cost: result.cost,
@@ -1098,9 +1091,10 @@ export class AgentLoop {
           messages.filter((msg) => msg.author).map((msg) => ({ ...msg, attachments: [...(msg.attachments ?? [])] })),
           botName,
         )
+    const heldByNoOne = { id: '', bot: false, webhook: true }
     for (const msg of filterDotMessages(merged, steerVisible, ignoreDotted)) {
       const { name } = characterOverride(typeof msg.content === 'string' ? msg.content : '')
-      if (name) authors.push({ id: '', username: name, displayName: name, bot: false, webhook: true })
+      if (name) authors.push({ ...heldByNoOne, username: name, displayName: name })
     }
     return mentionsToIds(text, authors, config, carry)
   }
@@ -1141,10 +1135,6 @@ export class AgentLoop {
   }
 
   private isSystemDiscordMessage(message: any): boolean {
-    // NOTE: Keep this conservative for now. We previously tried to infer
-    // system-ness from Discord's type codes, but that misclassified
-    // legitimate replies. If we see regressions, revisit the more
-    // elaborate version that inspects message.type for non-0/19 values.
     return Boolean(message?.system)
   }
 
@@ -1354,8 +1344,6 @@ export class AgentLoop {
     // regardless of what triggered the activation — a user who pinned
     // `.sleep` does not want the bot to speak because a timer went off.
 
-    // Use cached pin configs if available (populated by previous handleActivation calls),
-    // otherwise fall back to base config (shared + guild + bot YAML, no channel overrides).
     // NEVER hit the pins API here — this is the hot path (every message batch).
     // Hitting the API triggers Cloudflare 1015 rate limiting on servers with many bots.
     let config: any = null
@@ -1481,7 +1469,7 @@ export class AgentLoop {
 
       // Sleep gate, checked BEFORE observe so `messages: N` blocks N events
       // and the (N+1)th passes (natural reading of "sleep for N messages").
-      const sleepingNow = sleepPinIds.length > 0
+      const sleepingBeforeThisMessage = sleepPinIds.length > 0
         && this.sleepState.isSleeping(channelId, Date.now())
 
       // Count non-dot messages (any author, including this bot and other bots)
@@ -1492,7 +1480,7 @@ export class AgentLoop {
         }
       }
 
-      if (sleepingNow) {
+      if (sleepingBeforeThisMessage) {
         logger.debug({ channelId, botId: this.botId, messageId: message.id }, 'Skipping activation — bot is sleeping')
         continue
       }
@@ -1561,10 +1549,7 @@ export class AgentLoop {
         return event
       }
 
-      // 3. Replies do NOT auto-activate (hard rule).
-      // A reply with "ping on reply" enabled includes the bot in message.mentions and is
-      // already handled by the mention check above. A reply with the ping toggled off must
-      // not wake the bot — fall through to the remaining triggers (random / name / etc.).
+      // A reply with ping on puts the bot in message.mentions, so the mention check above covers it.
 
       // 4. Random chance activation
       if (!loadConfig()) return undefined
@@ -1662,7 +1647,8 @@ export class AgentLoop {
       // Use config values: recency_window_messages + rolling_threshold + buffer for .history commands
       const recencyWindow = preConfig.recency_window_messages || 200
       const rollingBuffer = preConfig.rolling_threshold || 50
-      let fetchDepth = recencyWindow + rollingBuffer + 50  // +50 for .history boundary tolerance
+      const historyBoundaryTolerance = 50
+      let fetchDepth = recencyWindow + rollingBuffer + historyBoundaryTolerance  // +50 for .history boundary tolerance
       
       logger.debug({ 
         recencyWindow, 
@@ -1681,9 +1667,9 @@ export class AgentLoop {
       const discordContext = await this.connector.fetchContext({
         channelId,
         depth: fetchDepth,
-        // Anchor the start of the fetched window for prompt cache stability (if enabled).
-        // This prevents the oldest message from sliding forward as new messages arrive,
-        // which would otherwise invalidate the cached prompt prefix on every activation.
+        // With prompt caching on, anchored so the oldest message doesn't slide forward
+        // as new messages arrive, which would invalidate the cached prompt prefix on
+        // every activation.
         firstMessageId: promptCachingEnabled ? (state.cacheOldestMessageId || undefined) : undefined,
         authorized_roles: [],  // Will apply after loading config
         pinnedConfigs,  // Reuse pre-fetched pinned configs (avoids second API call)
@@ -2091,10 +2077,8 @@ export class AgentLoop {
 
       const contextResult = await this.contextBuilder.buildContext(buildParams)
 
-      // The tool path, native or inline, from the config's mode or the model
-      // name. With streaming off, membrane runs no tool calls on the native path,
-      // so the request goes without tools rather than offer the model tools that
-      // can't run.
+      // With streaming off, membrane runs no tool calls on the native path, so the
+      // request goes without tools rather than offer the model tools that can't run.
       const toolMode = resolveToolModeForModel(config.continuation_model, config.mode)
       const streamingOffBlocksTools = config.streaming === false && toolMode === 'native'
       if (config.tools_enabled) {
@@ -2308,7 +2292,7 @@ export class AgentLoop {
         // This branch returns before normal response finalization below, so it
         // must also attach liveness and reconstruction metadata to tool entries.
         // Native tool calls carry their round's coverage from persistence.
-        const coveredMessageIds = toolMode === 'native'
+        const fallbackCoverage = toolMode === 'native'
           ? []
           : [...new Set(textMessageIds)]
         if (toolCallIds.length > 0 && allMessageIds.length > 0) {
@@ -2317,7 +2301,7 @@ export class AgentLoop {
             channelId,
             toolCallIds,
             allMessageIds,
-            coveredMessageIds
+            fallbackCoverage
           )
         }
 
@@ -2414,7 +2398,7 @@ export class AgentLoop {
       // their own: a native tool call carries its round's from persistence, and
       // an inline call's completion is the whole output, covering every message.
       const allBotMessageIds = [...new Set(sentMessageIds)]
-      const coveredMessageIds = toolMode === 'native'
+      const fallbackCoverage = toolMode === 'native'
         ? []
         : allBotMessageIds
       if (toolCallIds.length > 0 && allBotMessageIds.length > 0) {
@@ -2423,7 +2407,7 @@ export class AgentLoop {
           channelId,
           toolCallIds,
           allBotMessageIds,
-          coveredMessageIds
+          fallbackCoverage
         )
       }
 
@@ -2691,13 +2675,7 @@ export class AgentLoop {
     }
   }
 
-  /**
-   * Execute with native tool calls (OpenAI / non-Anthropic models)
-   *
-   * Uses membrane's stream() with onToolCalls callback to handle the tool loop
-   * natively. No XML parsing, no prefill continuation, no stop sequences.
-   * Membrane manages the multi-turn tool loop internally.
-   */
+  /** Membrane runs the multi-turn tool loop itself, through onToolCalls. */
   private async executeWithNativeTools(
     llmRequest: any,
     config: BotConfig,
@@ -2717,17 +2695,11 @@ export class AgentLoop {
     const messageContexts: Record<string, MessageContext> = {}
     const pendingToolPersistence: Array<{ call: ToolCall; result: ToolResult }> = []
     let accumulatedPreToolText = ''
-    // The visible prose onPreToolContent posted in the current round, and the
-    // messages that carried it. Each of the round's tool calls caches exactly
-    // this text and covers exactly these messages, so the next context shows
-    // what Discord showed: not the round's thinking, which membrane's preamble
-    // includes, nor <thinking> or tool markup the model wrote in its text, nor
-    // anything from a round withheld at a participant name.
+    // Not membrane's preamble, which includes the round's thinking.
     let roundPostedText = ''
     let roundPostedMessageIds: string[] = []
     // Membrane's final native response includes all text from every tool round,
-    // including prose already delivered through onPreToolContent. Keep the raw
-    // flushed prefix so the final Discord send can advance past it exactly once.
+    // including prose already delivered through onPreToolContent.
     let flushedPreToolText = ''
     // Open markdown construct carried across this activation's messages
     // (pre-tool flushes + final send).
@@ -2966,12 +2938,8 @@ export class AgentLoop {
         .map((c: any) => c.text)
         .join('')
 
-      // onPreToolContent is a preview callback, not a destructive read: the
-      // text it posted is at the front of the final aggregate response too.
-      // Membrane doesn't pass it a round whose text is blank but keeps that
-      // text in the response, so the match skips whitespace. Only what follows
-      // the posted text is sent. If the response doesn't start with it, all of
-      // it is sent, with a warning; an empty response has nothing to send.
+      // Membrane doesn't pass onPreToolContent a round whose text is blank but keeps
+      // that text in the response, so the match skips whitespace.
       let remainingCompletionText = completionText
       if (flushedPreToolText) {
         const postedEnd = endOfPostedPrefix(completionText, flushedPreToolText)
@@ -2989,9 +2957,8 @@ export class AgentLoop {
       const generatedImageBlocks: ContentBlock[] = (result?.content || [])
         .filter((c: any) => c.type === 'image')
 
-      // Capture native thinking blocks (with signatures) for persistence +
-      // display. Includes signature-only blocks (display:'omitted') — those
-      // carry the encrypted reasoning and must round-trip verbatim.
+      // Signature-only blocks (display:'omitted') carry the encrypted reasoning and
+      // must round-trip verbatim.
       const nativeThinkingBlocks: ThinkingBlock[] = (result?.content || [])
         .filter((c: any): c is ThinkingBlock => c.type === 'thinking' || c.type === 'redacted_thinking')
 
@@ -3104,9 +3071,6 @@ export class AgentLoop {
         nativeContentBlocks.push(...generatedImageBlocks)
       }
 
-      // Persist native thinking blocks anchored to the sent messages so they
-      // can be re-attached to this turn in future context builds.
-      // Default-on (opt out via preserve_thinking_blocks: false).
       // Only the FINAL response's blocks: the turn is rebuilt from Discord as
       // one assistant message, and the API rejects a latest turn carrying
       // thinking from several tool-loop responses.
@@ -3270,8 +3234,8 @@ export class AgentLoop {
       // Handle stop sequence continuation for XML tools format
       // Only applies when using anthropic-xml formatter (detected by presence of XML tags)
       if (completion.stopReason === 'stop_sequence') {
-        // Use rawAssistantText to preserve XML tags that membrane parses into
-        // structured blocks (thinking, tool_use) — needed for function_calls counting
+        // rawAssistantText keeps the XML tags membrane parses into structured blocks
+        // (thinking, tool_use), which function_calls counting needs.
         const completionText = completion.rawAssistantText
           ?? completion.content
             .filter((c: any) => c.type === 'text')
@@ -3327,10 +3291,8 @@ export class AgentLoop {
       // Note: When prefill_thinking is enabled, membrane's extended thinking API
       // handles thinking blocks, so no manual tag prepending is needed
 
-      // Get new completion text — prefer rawAssistantText which preserves XML tags
-      // that membrane may have parsed into structured blocks (thinking, tool_use).
-      // This is critical for inline tool execution: parseAnthropicToolCalls needs
-      // the raw <function_calls> XML that membrane strips into tool_use blocks.
+      // parseAnthropicToolCalls needs the raw <function_calls> XML, which membrane
+      // strips into tool_use blocks.
       const newText = completion.rawAssistantText
         ?? completion.content
           .filter((c: any) => c.type === 'text')
@@ -3346,8 +3308,8 @@ export class AgentLoop {
         }
       }
 
-      // If we stopped on </function_calls>, append it back (stop sequence consumes the matched text)
-      // rawAssistantText may already include the stop sequence — check before appending
+      // The stop sequence consumes the matched text, though rawAssistantText may
+      // already include it.
       if (completion.stopReason === 'stop_sequence' &&
           completion.raw?.stop_sequence === AgentLoop.FUNC_CALLS_CLOSE &&
           !accumulatedOutput.endsWith(AgentLoop.FUNC_CALLS_CLOSE)) {
@@ -3853,11 +3815,7 @@ export class AgentLoop {
     }
   }
   
-  /**
-   * Build a continuation request with accumulated output as prefill
-   * Also handles MCP tool result images - these need to be added as user turns
-   * since Anthropic only allows images in user messages.
-   */
+  /** Anthropic allows images only in user messages, so MCP tool result images go in as user turns. */
   private buildInlineContinuationRequest(
     baseRequest: any,
     accumulatedOutput: string,
@@ -3942,15 +3900,7 @@ export class AgentLoop {
     return request
   }
 
-  /**
-   * Check if thinking was actually prefilled in the request.
-   * This must mirror the middleware's logic for determining continuation mode.
-   * 
-   * The middleware considers it a continuation if:
-   *   lastNonEmptyParticipant === botName || (prevIsBotMessage && !prevHasToolResult)
-   * 
-   * If it's a continuation, thinking is NOT prefilled.
-   */
+  /** Must mirror membrane's logic for whether the request prefilled thinking. */
   private wasThinkingPrefilled(request: any, config: BotConfig): boolean {
     // If prefill_thinking is disabled, thinking was never prefilled
     if (!config.prefill_thinking) {
@@ -4242,7 +4192,7 @@ export class AgentLoop {
 
     // Use requested message count or bot's configured limit
     const messageCount = requestedMessages || config.recency_window_messages || 200
-    const fetchDepth = messageCount + 100
+    const fetchDepth = messageCount + HISTORY_AND_FILTER_BUFFER
 
     // Fetch context
     const discordContext = await this.connector.fetchContext({

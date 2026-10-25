@@ -18,7 +18,7 @@ const logger = pino({ name: 'context-fetch' })
 
 /** Dependency injection interface — mocked in tests, backed by push cache in production. */
 export interface FetchDeps {
-  /** Fetch a batch of messages before a cursor (newest-first, matching Discord API order). */
+  /** Newest-first, as Discord's API returns them. */
   fetchBatch(channel: TextChannel, options: { before?: string; limit: number }): Promise<Message[]>
   /** Fetch a single message by ID. */
   fetchSingle(channel: TextChannel, messageId: string): Promise<Message | null>
@@ -199,8 +199,6 @@ export async function fetchChannelMessages(
         continue
       }
 
-      // Skip all system messages (channel rename, pin, boost, thread created, etc.)
-      // Only keep Default (0) and Reply (19)
       if (msg.type !== MessageType.Default && msg.type !== MessageType.Reply) continue
 
       // Log null-author messages for diagnosis — these shouldn't exist

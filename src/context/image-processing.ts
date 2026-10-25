@@ -5,7 +5,7 @@
 
 import sharp from 'sharp'
 
-// Anthropic's per-image base64 limit is 5MB
+// Anthropic's per-image base64 limit on Amazon Bedrock (the Claude API's own is 10 MB)
 export const MAX_IMAGE_BASE64_BYTES = 5 * 1024 * 1024
 // Anthropic's max image dimension — API rejects anything larger
 export const MAX_IMAGE_DIMENSION = 8000

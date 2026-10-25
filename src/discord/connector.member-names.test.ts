@@ -1,14 +1,4 @@
-/**
- * Tests that fetchContext fetches the members of its authors before it
- * converts their messages, so labels that use display names carry server
- * nicknames, and that the connector remembers a failed fetch across contexts.
- *
- * As in connector.pin-tracking.test.ts, this instantiates a real
- * DiscordConnector (no network calls until .login()) and replaces the parts
- * of its client and fetch pipeline that would reach Discord.
- *
- * Run with: npx vitest run connector.member-names
- */
+/** A real DiscordConnector: its Client makes no network call until .login(). */
 
 import { describe, it, expect, afterEach } from 'vitest'
 import { mkdtempSync, rmSync } from 'fs'
@@ -85,7 +75,7 @@ function harness(authors: string[], notMembers: string[] = [], webhooks: Record<
   const client = (connector as any).client
   client.channels.fetch = async () => channel
   ;(connector as any).buildFetchDeps = () => ({
-    // Newest first, as Discord answers; one batch holds the whole channel.
+    // Newest first, as Discord answers.
     fetchBatch: async (_ch: unknown, opts: { before?: string }) => (opts.before ? [] : [...messages].reverse()),
     fetchSingle: async () => null,
     resolveChannel: async () => null,

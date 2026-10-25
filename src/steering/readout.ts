@@ -1,6 +1,4 @@
 /**
- * Format vLLM steering readout data into a markdown file embed.
- *
  * vLLM probe server response format (final SSE chunk or non-streaming):
  *   token_probes: { [setName]: number[][] }  — (n_tokens, n_probes) per set
  *   probe_names:  { [setName]: string[] }    — label names per set
@@ -13,8 +11,6 @@
  * NOTE: Auto-reprobe during generation is currently disabled on the server
  * (causes CUDA graph instability). token_probes may be empty {}.
  * For full readouts, clients should POST /v1/encode with token_ids after generation.
- *
- * Follows the thinking block file embed pattern from agent/loop.ts:2359.
  */
 
 import type { ChannelSteering } from './types.js'
