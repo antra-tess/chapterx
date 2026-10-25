@@ -1,13 +1,3 @@
-/**
- * Upload Plugin
- * 
- * Provides tools for uploading files (images, videos, etc.) to Discord.
- * Useful for sharing outputs from MCP tools like video generation.
- * 
- * Tools:
- * - upload_file_to_discord: Upload a file from URL or local path to current channel
- */
-
 import { ToolPlugin, PluginTool, PluginContext } from './types.js'
 import { createLogger } from '../../utils/logger.js'
 import { readFile } from 'fs/promises'
@@ -16,12 +6,11 @@ import { basename } from 'path'
 
 const logger = createLogger({ plugin: 'upload' })
 
-// Discord file size limits
 const DISCORD_FILE_LIMIT_BYTES = 25 * 1024 * 1024  // 25MB (conservative, actual varies by server boost)
 
 interface UploadFileInput {
   url?: string
-  path?: string  // Local file path
+  path?: string
   filename?: string
   caption?: string
 }
@@ -66,26 +55,22 @@ const uploadFileTool: PluginTool = {
       let finalFilename = filename
       
       if (path) {
-        // Load from local file
         if (!existsSync(path)) {
           return `Error: File not found: ${path}`
         }
         
         buffer = await readFile(path)
         
-        // Infer filename from path
         if (!finalFilename) {
           finalFilename = basename(path)
         }
         
-        // Infer content type from extension
         const ext = finalFilename.split('.').pop()?.toLowerCase()
         if (ext) {
           contentType = getMimeFromExtension(ext)
         }
         
       } else if (url) {
-        // Download from URL
         const response = await fetch(url)
         if (!response.ok) {
           throw new Error(`Failed to download: HTTP ${response.status} ${response.statusText}`)
@@ -94,7 +79,6 @@ const uploadFileTool: PluginTool = {
         contentType = response.headers.get('content-type') || 'application/octet-stream'
         const contentLength = response.headers.get('content-length')
         
-        // Check file size before downloading fully
         if (contentLength && parseInt(contentLength) > DISCORD_FILE_LIMIT_BYTES) {
           const sizeMB = (parseInt(contentLength) / 1024 / 1024).toFixed(1)
           return `Error: File too large (${sizeMB}MB). Discord limit is ~25MB.`
@@ -103,12 +87,10 @@ const uploadFileTool: PluginTool = {
         const arrayBuffer = await response.arrayBuffer()
         buffer = Buffer.from(arrayBuffer)
         
-        // Infer filename from URL
         if (!finalFilename) {
           const urlPath = new URL(url).pathname
           finalFilename = urlPath.split('/').pop() || 'file'
           
-          // Add extension based on content type if missing
           if (!finalFilename.includes('.')) {
             const ext = getExtensionFromMime(contentType)
             if (ext) finalFilename += ext
@@ -118,13 +100,11 @@ const uploadFileTool: PluginTool = {
         return 'Error: Must provide either url or path parameter.'
       }
       
-      // Check actual size
       if (buffer.length > DISCORD_FILE_LIMIT_BYTES) {
         const sizeMB = (buffer.length / 1024 / 1024).toFixed(1)
         return `Error: File too large (${sizeMB}MB). Discord limit is ~25MB.`
       }
       
-      // Upload file to Discord
       if (context.uploadFile) {
         const messageIds = await context.uploadFile(
           buffer,
@@ -144,7 +124,6 @@ const uploadFileTool: PluginTool = {
         return `Successfully uploaded ${finalFilename} (${sizeMB}MB) to Discord.`
       }
       
-      // Fallback: return info about the file (upload not available)
       const sizeMB = (buffer.length / 1024 / 1024).toFixed(2)
       return `File ready (${finalFilename}, ${sizeMB}MB) but upload not available in this context.`
       

@@ -1,48 +1,20 @@
-/**
- * Probe catalog loader and directive resolver.
- *
- * Catalogs are static JSON files at config/probes/{model}.json.
- * Each maps probe set names to { description, labels: { label → index } }.
- *
- * The resolver turns `setname_label: strength` pairs into resolved
- * SteeringIntervention objects ready for vLLM.
- */
-
 import { readFileSync, existsSync, readdirSync } from 'fs'
 import { join, basename } from 'path'
 import { logger } from '../utils/logger.js'
 import type { ProbeCatalog, SteeringDirective, SteeringIntervention, InterventionType } from './types.js'
 
-// ---------------------------------------------------------------------------
-// Catalog loading
-// ---------------------------------------------------------------------------
-
 const catalogCache = new Map<string, ProbeCatalog>()
 
-/** Directory containing probe catalog JSON files */
 let catalogDir = ''
 
-/**
- * Initialize the catalog loader with the probe catalog directory path.
- * Call once on startup.
- */
 export function initCatalogDir(dir: string): void {
   catalogDir = dir
   catalogCache.clear()
 }
 
-/**
- * Load a probe catalog for a model. Caches in memory after first load.
- * Returns null if no catalog exists for the model.
- */
 export function loadCatalog(modelName: string): ProbeCatalog | null {
-  // Normalize model name to catalog filename:
-  //   "steered:/models/Trinity-Large-TrueBase"
-  //   → strip namespace prefix ("steered:") → "/models/Trinity-Large-TrueBase"
-  //   → extract basename → "Trinity-Large-TrueBase"
-  //   → lowercase → "trinity-large-truebase"
-  const stripped = modelName.replace(/^[^:]+:/, '')  // strip "steered:" etc.
-  const baseName = stripped.split('/').filter(Boolean).pop() || stripped  // extract basename
+  const stripped = modelName.replace(/^[^:]+:/, '')
+  const baseName = stripped.split('/').filter(Boolean).pop() || stripped
   const key = baseName.toLowerCase()
 
   const cached = catalogCache.get(key)
@@ -71,9 +43,6 @@ export function loadCatalog(modelName: string): ProbeCatalog | null {
   }
 }
 
-/**
- * List all available catalog model names (derived from filenames in the catalog dir).
- */
 export function listCatalogModels(): string[] {
   if (!catalogDir || !existsSync(catalogDir)) return []
   try {
@@ -85,26 +54,12 @@ export function listCatalogModels(): string[] {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Directive resolution
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve a setname_label key against a catalog.
- *
- * Format: `setname_label` where setname is the probe set and label is the probe label.
- * Since both set names and labels can contain underscores, we try longest-prefix matching:
- *   "deflection_afraid_hiding_as_calm" → set="deflection", label="afraid_hiding_as_calm"
- *
- * Returns { probe, probe_index } or null if not found.
- */
 export function resolveLabel(
   catalog: ProbeCatalog,
   key: string
 ): { probe: string; probe_index: number; label: string } | null {
   const parts = key.split('_')
 
-  // 1. Try progressively longer set name prefixes (e.g., "sae_hubs_broadcast_f12454")
   for (let i = 1; i < parts.length; i++) {
     const setName = parts.slice(0, i).join('_')
     const labelName = parts.slice(i).join('_')
@@ -121,8 +76,6 @@ export function resolveLabel(
     }
   }
 
-  // 2. Short label fallback — search all sets for a unique match on the raw key
-  //    e.g., "broadcast_f12454" found in sae_hubs without the prefix
   const matches: Array<{ probe: string; probe_index: number }> = []
   for (const [setName, entry] of Object.entries(catalog)) {
     if (key in entry.labels) {
@@ -138,16 +91,9 @@ export function resolveLabel(
     }
   }
 
-  // Ambiguous or not found
   return null
 }
 
-/**
- * Resolve a full SteeringDirective (multiple setname_label: strength pairs)
- * into an array of SteeringInterventions.
- *
- * Returns { interventions, errors } where errors lists any keys that couldn't be resolved.
- */
 export function resolveDirective(
   catalog: ProbeCatalog,
   directive: SteeringDirective,
@@ -174,10 +120,6 @@ export function resolveDirective(
   return { interventions, errors }
 }
 
-/**
- * List all available `setname_label` keys for a catalog.
- * Useful for autocomplete or error messages showing valid options.
- */
 export function listAvailableLabels(catalog: ProbeCatalog): string[] {
   const labels: string[] = []
   for (const [setName, entry] of Object.entries(catalog)) {
@@ -188,9 +130,6 @@ export function listAvailableLabels(catalog: ProbeCatalog): string[] {
   return labels.sort()
 }
 
-/**
- * List probe set names for a catalog (e.g., ["emotion", "deflection", "dynamics_ica"]).
- */
 export function listProbeSets(catalog: ProbeCatalog): string[] {
   return Object.keys(catalog).sort()
 }

@@ -1,21 +1,10 @@
-/**
- * Timer Plugin
- *
- * Allows the bot to schedule wake-up timers for self-activation.
- * The bot can set a timer to be reminded about something later.
- *
- * Uses the core TimerScheduler for persistence and event firing.
- */
-
 import { ToolPlugin, PluginContext, PluginStateContext, ContextInjection } from './types.js'
 import { getTimerScheduler } from '../../timer/scheduler.js'
 import type { ScheduledTimer } from '../../timer/scheduler.js'
 import { logger } from '../../utils/logger.js'
 
-// Max delay in minutes (default: 24 hours)
 const MAX_DELAY_MINUTES = 24 * 60
 
-// Max timers per channel
 const MAX_TIMERS_PER_CHANNEL = 5
 
 function formatDuration(ms: number): string {
@@ -86,7 +75,6 @@ const plugin: ToolPlugin = {
           return 'Error: Timer scheduler not initialized'
         }
 
-        // Validate delay (minimum ~3 seconds = 0.05 minutes)
         if (input.delay_minutes < 0.05) {
           return 'Error: Delay must be at least 0.05 minutes (3 seconds)'
         }
@@ -94,13 +82,11 @@ const plugin: ToolPlugin = {
           return `Error: Delay cannot exceed ${MAX_DELAY_MINUTES} minutes (24 hours)`
         }
 
-        // Check timer limit for this channel
         const existingTimers = scheduler.getTimers(context.botId, context.channelId)
         if (existingTimers.length >= MAX_TIMERS_PER_CHANNEL) {
           return `Error: Maximum ${MAX_TIMERS_PER_CHANNEL} timers per channel. Cancel one first with cancel_wake.`
         }
 
-        // Validate context note
         if (!input.context_note || input.context_note.trim().length < 5) {
           return 'Error: Please provide a meaningful context note (at least 5 characters)'
         }
@@ -165,7 +151,6 @@ const plugin: ToolPlugin = {
           return 'Error: Timer scheduler not initialized'
         }
 
-        // Verify timer belongs to this bot/channel
         const timers = scheduler.getTimers(context.botId, context.channelId)
         const timer = timers.find(t => t.id === input.timer_id)
 
@@ -183,9 +168,6 @@ const plugin: ToolPlugin = {
     },
   ],
 
-  /**
-   * Show pending timers in context
-   */
   getContextInjections: async (context: PluginStateContext): Promise<ContextInjection[]> => {
     const scheduler = getTimerScheduler()
     if (!scheduler) {
@@ -215,7 +197,7 @@ const plugin: ToolPlugin = {
     return [{
       id: 'timer-display',
       content,
-      targetDepth: 8,  // Show near other status info
+      targetDepth: 8,
       priority: 90,
     }]
   },

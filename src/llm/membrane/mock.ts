@@ -1,10 +1,3 @@
-/**
- * Mock Membrane Adapter
- *
- * Returns instant responses for profiling pipeline latency
- * without real LLM calls. Enable with MOCK_LLM=1 env var.
- */
-
 export class MockMembrane {
   async complete(request: any, options?: any): Promise<any> {
     const start = Date.now();

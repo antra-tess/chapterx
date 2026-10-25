@@ -4,8 +4,6 @@
  * state.messagesSinceRoll, and 0.5.81 and later with the messageCount
  * argument. package-lock.json installs 0.5.47, while an install without it
  * takes the newest 0.5.x.
- *
- * Run with: npx vitest run rolling
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -58,12 +56,9 @@ describe.each([
     vi.mocked(membrane.shouldRoll).mockImplementation(rule())
   })
 
-  // From membrane 0.5.81 the threshold never fired, since ChapterX handed it
-  // messageCount 0, so with prompt caching on a window was never cut back to
-  // recency_window_messages, while the suite, on 0.5.47, passed. A count of
-  // 49 is under the threshold and above recency_window_messages, so it would
-  // roll if membrane were handed maxMessages, which both rules compare with
-  // messageCount.
+  // A count of 49 is under the threshold and above recency_window_messages, so
+  // it would roll if membrane were handed maxMessages, which both rules compare
+  // with messageCount.
   it('cuts a window past recency_window_messages to it when the count since the last roll reaches rolling_threshold, and not before', () => {
     const messages = Array.from({ length: 60 }, (_, i) => message(i))
     const config = botConfig({ recency_window_messages: 40, rolling_threshold: 50 })

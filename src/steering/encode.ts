@@ -1,30 +1,19 @@
 /**
- * Post-generation probe readout via proxy readout endpoint + /v1/encode.
- *
- * Flow:
- *   1. Proxy captures response_token_ids from the final SSE chunk during streaming
- *   2. After generation, ChapterX calls GET /v1/readout/{completion_id} to retrieve them
- *   3. Then POSTs /v1/encode with those token_ids to get full probe projections
- *
- * The proxy stores readout data for ~5 minutes keyed by completion ID.
+ * The proxy captures response_token_ids from the final SSE chunk during
+ * streaming and stores readout data for ~5 minutes keyed by completion ID.
+ * After generation, ChapterX calls GET /v1/readout/{completion_id} to retrieve
+ * them, then POSTs /v1/encode with those token_ids to get full probe
+ * projections.
  */
 
 import { logger } from '../utils/logger.js'
 import type { VendorConfig } from '../types.js'
-
-// ---------------------------------------------------------------------------
-// Vendor credential resolution
-// ---------------------------------------------------------------------------
 
 export interface VendorCredentials {
   baseUrl: string
   apiKey: string
 }
 
-/**
- * Resolve vendor credentials (base URL + API key) for a given model name.
- * Matches model against vendor `provides` patterns (glob-style with *).
- */
 export function resolveVendorForModel(
   modelName: string,
   vendors: Record<string, VendorConfig>
@@ -60,10 +49,6 @@ export function resolveVendorForModel(
   return null
 }
 
-// ---------------------------------------------------------------------------
-// Readout data from proxy
-// ---------------------------------------------------------------------------
-
 export interface ProxyReadout {
   completion_id: string
   model: string
@@ -79,10 +64,6 @@ export interface ProxyReadout {
   probe_status: string | null
 }
 
-/**
- * Fetch readout data (response_token_ids, intervention_applied) from the proxy.
- * The proxy captures these from the final SSE chunk during streaming.
- */
 export async function fetchProxyReadout(
   completionId: string,
   credentials: VendorCredentials,
@@ -120,19 +101,11 @@ export async function fetchProxyReadout(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Encode call (full probe projections from token IDs)
-// ---------------------------------------------------------------------------
-
 export interface EncodeResult {
   token_probes: Record<string, number[][]>
   probe_names: Record<string, string[]>
 }
 
-/**
- * Call /v1/encode on the probe server to get full probe projections
- * for a set of token IDs.
- */
 export async function fetchProbeReadout(
   tokenIds: number[],
   probes: string[] | null,

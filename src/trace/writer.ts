@@ -1,24 +1,12 @@
-/**
- * Trace Writer
- * 
- * Persists traces to disk with proper organization and indexing.
- * Stores full request/response bodies separately from trace summaries.
- */
-
 import { writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync, appendFileSync } from 'fs'
 import { join } from 'path'
 import { ActivationTrace, TraceIndex } from './types.js'
 import { logger } from '../utils/logger.js'
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
 const TRACE_DIR = process.env.TRACE_DIR || './logs/traces'
 const BODIES_DIR = join(TRACE_DIR, 'bodies')
 const INDEX_FILE = join(TRACE_DIR, 'index.jsonl')
 
-// Ensure directories exist
 function ensureDirs(): void {
   if (!existsSync(TRACE_DIR)) {
     mkdirSync(TRACE_DIR, { recursive: true })
@@ -28,22 +16,14 @@ function ensureDirs(): void {
   }
 }
 
-// ============================================================================
-// Trace Writer
-// ============================================================================
-
 export class TraceWriter {
   constructor() {
     ensureDirs()
   }
   
-  /**
-   * Write a complete trace to disk
-   */
   writeTrace(trace: ActivationTrace, requestBodies?: any[], responseBodies?: any[], channelName?: string): string {
     const timestamp = trace.timestamp.toISOString().replace(/[:.]/g, '-')
     
-    // Organize traces by bot name
     const botDir = trace.botId ? join(TRACE_DIR, trace.botId) : TRACE_DIR
     if (trace.botId && !existsSync(botDir)) {
       mkdirSync(botDir, { recursive: true })
@@ -52,7 +32,6 @@ export class TraceWriter {
     const filename = `${trace.channelId}-${trace.traceId}-${timestamp}.json`
     const filepath = join(botDir, filename)
     
-    // Write request/response bodies separately (they're huge)
     const bodyRefs: { requests: string[]; responses: string[] } = {
       requests: [],
       responses: [],
@@ -76,7 +55,6 @@ export class TraceWriter {
       })
     }
     
-    // Update LLM calls with body references
     trace.llmCalls.forEach((call, i) => {
       if (bodyRefs.requests[i]) {
         call.requestBodyRef = bodyRefs.requests[i]
@@ -86,10 +64,8 @@ export class TraceWriter {
       }
     })
     
-    // Write trace
     writeFileSync(filepath, JSON.stringify(trace, null, 2))
     
-    // Append to index
     this.appendToIndex(trace, filename, channelName)
     
     logger.debug({ traceId: trace.traceId, filepath }, 'Wrote trace to disk')
@@ -97,11 +73,7 @@ export class TraceWriter {
     return filepath
   }
   
-  /**
-   * Append trace summary to index for fast lookups
-   */
   private appendToIndex(trace: ActivationTrace, filename: string, channelName?: string): void {
-    // Extract previews for quick scanning without loading full trace
     const firstTrigger = trace.activation?.triggerEvents?.[0]
     const triggerPreview = firstTrigger?.contentPreview?.slice(0, 100) || undefined
     const responsePreview = trace.outcome?.responseText?.slice(0, 100) || undefined
@@ -133,15 +105,10 @@ export class TraceWriter {
     
     const line = JSON.stringify(index) + '\n'
     
-    // Append to index file
     appendFileSync(INDEX_FILE, line)
   }
   
-  /**
-   * Load a trace by ID
-   */
   loadTrace(traceId: string): ActivationTrace | null {
-    // Find the trace file
     const files = readdirSync(TRACE_DIR).filter(f => f.includes(traceId) && f.endsWith('.json'))
     
     if (files.length === 0) {
@@ -153,9 +120,6 @@ export class TraceWriter {
     return JSON.parse(content) as ActivationTrace
   }
   
-  /**
-   * Load full request body for an LLM call
-   */
   loadRequestBody(bodyRef: string): any {
     const filepath = join(BODIES_DIR, bodyRef)
     if (!existsSync(filepath)) {
@@ -164,9 +128,6 @@ export class TraceWriter {
     return JSON.parse(readFileSync(filepath, 'utf-8'))
   }
   
-  /**
-   * Load full response body for an LLM call
-   */
   loadResponseBody(bodyRef: string): any {
     const filepath = join(BODIES_DIR, bodyRef)
     if (!existsSync(filepath)) {
@@ -175,9 +136,6 @@ export class TraceWriter {
     return JSON.parse(readFileSync(filepath, 'utf-8'))
   }
   
-  /**
-   * Find traces containing a specific Discord message ID
-   */
   findByMessageId(messageId: string): TraceIndex[] {
     const results: TraceIndex[] = []
     
@@ -198,16 +156,12 @@ export class TraceWriter {
           results.push(index)
         }
       } catch {
-        // Skip malformed lines
       }
     }
     
     return results
   }
   
-  /**
-   * Find recent traces for a channel
-   */
   findByChannel(channelId: string, limit = 20): TraceIndex[] {
     const results: TraceIndex[] = []
     
@@ -217,7 +171,6 @@ export class TraceWriter {
     
     const lines = readFileSync(INDEX_FILE, 'utf-8').split('\n').filter(Boolean)
     
-    // Read from end for recency
     for (let i = lines.length - 1; i >= 0 && results.length < limit; i--) {
       try {
         const index = JSON.parse(lines[i]!) as TraceIndex
@@ -225,16 +178,12 @@ export class TraceWriter {
           results.push(index)
         }
       } catch {
-        // Skip malformed lines
       }
     }
     
     return results
   }
   
-  /**
-   * Find failed traces
-   */
   findFailed(limit = 20): TraceIndex[] {
     const results: TraceIndex[] = []
     
@@ -251,16 +200,12 @@ export class TraceWriter {
           results.push(index)
         }
       } catch {
-        // Skip malformed lines
       }
     }
     
     return results
   }
   
-  /**
-   * List recent traces
-   */
   listRecent(limit = 20): TraceIndex[] {
     const results: TraceIndex[] = []
     
@@ -274,17 +219,12 @@ export class TraceWriter {
       try {
         results.push(JSON.parse(lines[i]!) as TraceIndex)
       } catch {
-        // Skip malformed lines
       }
     }
     
     return results
   }
 }
-
-// ============================================================================
-// Singleton instance
-// ============================================================================
 
 let writerInstance: TraceWriter | null = null
 

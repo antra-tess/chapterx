@@ -51,9 +51,6 @@ describe('AgentLoop active-channel event buffering', () => {
     }
   })
 
-  // A loop whose activation decisions run for real. Its Soma check records what
-  // each batch decided and answers with `somaAnswers` in turn, then "blocked",
-  // which ends the batch before any activation starts.
   function makeLoop(
     somaAnswers: Array<'allowed' | 'blocked'> = [],
     configOverrides: Record<string, unknown> = {},
@@ -102,8 +99,6 @@ describe('AgentLoop active-channel event buffering', () => {
       },
     }
     const stateManager = { getOrInitialize: async () => ({}), pruneToolCache: () => {} }
-    // The model call: an activation that reaches it gets this answer, then
-    // stops at the next stand-in it lacks.
     const contextBuilder = { buildContext: async () => ({ request: { messages: [] } }) }
     const loop = new AgentLoop(
       'bot',
@@ -126,7 +121,6 @@ describe('AgentLoop active-channel event buffering', () => {
     internals.collectPinnedConfigsWithInheritance = async () => []
     internals.collectPinnedSteersWithInheritance = async () => []
     const answered = { count: 0 }
-    // Each request the model is asked, with the tool path it took.
     const requests: Array<{ path: 'native' | 'inline'; request: any }> = []
     const modelAnswer = (path: 'native' | 'inline') => async (request: any) => {
       requests.push({ path, request })
@@ -193,10 +187,8 @@ describe('AgentLoop active-channel event buffering', () => {
     await loop.processBatch([botChunk, elsewhere, mention, laterMention])
 
     expect(soma).toEqual([{ channelId: 'channel', reason: 'mention', triggeringMessageId: '203' }])
-    // Soma looks for the user to charge in the deciding message alone.
     expect(somaEvents).toEqual([['203']])
     expect(queue.pollBatch()).toEqual([laterMention])
-    // The Soma-blocked branch released the channel.
     expect(loop.activeChannels.has('channel')).toBe(false)
   })
 
@@ -298,13 +290,10 @@ describe('AgentLoop active-channel event buffering', () => {
     expect(soma.map((call) => call.reason)).toEqual(['m_command'])
   })
 
-  // Runs one activation to its end while `held` events are deferred, its
-  // fetched context ending at message '100', and returns the requeued batch.
   async function activationHolding(harness: ReturnType<typeof makeLoop>, held: Event[]) {
     const { loop, queue, setFetchContext } = harness
     let openFetch!: () => void
     const fetchStarted = new Promise<void>((started) => {
-      // '99' is older than '100' though it sorts after it as a string.
       setFetchContext(() => new Promise((resolve) => {
         openFetch = () => resolve({ messages: [{ id: '98' }, { id: '100' }], images: [] })
         started()
@@ -461,7 +450,6 @@ describe('AgentLoop active-channel event buffering', () => {
   it('sends a bot with streaming off on the native tool path no tools, and warns while it has tools to withhold', async () => {
     const tool = { name: 'lookup', description: 'Look something up', inputSchema: { type: 'object', properties: {} } }
     const message = 'Tools not sent: with streaming off, membrane runs no tool calls on the native tool path. Set tools_enabled: false to stop this warning.'
-    // The harness's context builder, like the real one, leaves tools unset.
     const cases = [
       { config: { streaming: false }, available: [tool], path: 'native', tools: undefined, warned: true },
       { config: { streaming: false, continuation_model: 'claude-sonnet-4-5', mode: 'chat' }, available: [tool], path: 'native', tools: undefined, warned: true },
@@ -469,7 +457,6 @@ describe('AgentLoop active-channel event buffering', () => {
       { config: { streaming: false, tools_enabled: false }, available: [tool], path: 'native', tools: undefined, warned: false },
       { config: {}, available: [tool], path: 'native', tools: [tool], warned: false },
       { config: { streaming: true }, available: [tool], path: 'native', tools: [tool], warned: false },
-      // The inline tool path runs tools itself, streaming or not.
       { config: { streaming: false, continuation_model: 'claude-sonnet-4-5' }, available: [tool], path: 'inline', tools: [tool], warned: false },
     ]
     for (const { config, available, path, tools, warned } of cases) {

@@ -1,20 +1,3 @@
-/**
- * @deprecated — No longer used. Steering is now stateless (derived from pinned
- * .steer messages each activation, like .config). The pin cache lives in
- * connector.ts (pinnedSteerCache). This file is kept temporarily for reference
- * and can be deleted after verifying the new system works.
- *
- * Previously: Steering state store — per-channel per-bot steering config.
- *
- * Follows the pin cache pattern from connector.ts:
- *   - In-memory Map for fast access (hot path in shouldActivate/handleActivation)
- *   - Disk persistence for surviving restarts
- *   - Key: `${botId}:${channelId}`
- *
- * Disk layout:
- *   {steeringDir}/{channelId}/{botId}.json
- */
-
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { logger } from '../utils/logger.js'
@@ -33,22 +16,10 @@ export class SteeringStore {
     this.loadFromDisk()
   }
 
-  // -------------------------------------------------------------------------
-  // Public API
-  // -------------------------------------------------------------------------
-
-  /**
-   * Get steering config for a bot in a channel.
-   * Returns null if no steering is set.
-   */
   get(botId: string, channelId: string): ChannelSteering | null {
     return this.cache.get(this.key(botId, channelId)) ?? null
   }
 
-  /**
-   * Set steering config for a bot in a channel.
-   * Persists to both memory and disk.
-   */
   set(botId: string, channelId: string, config: ChannelSteering): void {
     const k = this.key(botId, channelId)
     this.cache.set(k, config)
@@ -61,10 +32,6 @@ export class SteeringStore {
     }, 'Steering config updated')
   }
 
-  /**
-   * Clear steering for a bot in a channel.
-   * Removes from memory and disk.
-   */
   clear(botId: string, channelId: string): void {
     const k = this.key(botId, channelId)
     this.cache.delete(k)
@@ -72,16 +39,10 @@ export class SteeringStore {
     logger.info({ botId, channelId }, 'Steering config cleared')
   }
 
-  /**
-   * Check if any steering is active for a bot in a channel.
-   */
   has(botId: string, channelId: string): boolean {
     return this.cache.has(this.key(botId, channelId))
   }
 
-  /**
-   * List all channels with active steering for a bot.
-   */
   listChannels(botId: string): string[] {
     const channels: string[] = []
     for (const k of this.cache.keys()) {
@@ -90,10 +51,6 @@ export class SteeringStore {
     }
     return channels
   }
-
-  // -------------------------------------------------------------------------
-  // Disk persistence
-  // -------------------------------------------------------------------------
 
   private loadFromDisk(): void {
     if (!existsSync(this.steeringDir)) return
@@ -122,11 +79,9 @@ export class SteeringStore {
                 logger.warn({ botId, channelId, errors: parsed.error.issues }, 'Invalid steering cache file — skipping')
               }
             } catch {
-              // Skip corrupted files
             }
           }
         } catch {
-          // Skip unreadable channel dirs
         }
       }
 
@@ -164,10 +119,6 @@ export class SteeringStore {
       logger.warn({ error, botId, channelId }, 'Failed to delete steering config from disk')
     }
   }
-
-  // -------------------------------------------------------------------------
-  // Internals
-  // -------------------------------------------------------------------------
 
   private key(botId: string, channelId: string): string {
     return `${botId}:${channelId}`

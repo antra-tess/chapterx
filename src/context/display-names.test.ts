@@ -1,14 +1,7 @@
-/**
- * Tests for display name mention rewriting
- *
- * Run with: npx vitest run display-names
- */
-
 import { describe, it, expect } from 'vitest'
 import { rewriteMentionsForDisplayNames, stripReplyTags } from './builder.js'
 import type { ContentBlock } from '../types.js'
 
-// Helper to make a text block and return it after applying the function
 function rewrite(
   text: string,
   map: Map<string, string>,
@@ -24,10 +17,6 @@ function strip(text: string): string {
   stripReplyTags(blocks)
   return (blocks[0] as { text: string }).text
 }
-
-// ============================================================================
-// rewriteMentionsForDisplayNames
-// ============================================================================
 
 describe('rewriteMentionsForDisplayNames', () => {
   it('rewrites <@username> to @DisplayName', () => {
@@ -112,10 +101,6 @@ describe('rewriteMentionsForDisplayNames', () => {
     expect(result).toBe('(replying to @Alice Smith) hey @Claude and @Alice Smith')
   })
 })
-
-// ============================================================================
-// stripReplyTags
-// ============================================================================
 
 describe('stripReplyTags', () => {
   it('strips <reply:@username> format', () => {

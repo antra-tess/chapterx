@@ -1,9 +1,3 @@
-/**
- * Tests for membrane adapter type conversions
- * 
- * Run with: npm test -- membrane-adapter
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   toMembraneMessage,
@@ -20,10 +14,6 @@ import {
 } from './adapter.js';
 import type { ParticipantMessage, LLMRequest, ContentBlock } from '../../types.js';
 import type { NormalizedMessage, NormalizedResponse } from './adapter.js';
-
-// ============================================================================
-// Message Conversion Tests
-// ============================================================================
 
 describe('Message Conversion', () => {
   describe('toMembraneMessage', () => {
@@ -113,10 +103,6 @@ describe('Message Conversion', () => {
     });
   });
 });
-
-// ============================================================================
-// Content Block Conversion Tests
-// ============================================================================
 
 describe('Content Block Conversion', () => {
   describe('text blocks', () => {
@@ -235,10 +221,6 @@ describe('Content Block Conversion', () => {
   });
 });
 
-// ============================================================================
-// Request Conversion Tests
-// ============================================================================
-
 describe('Request Conversion', () => {
   it('should convert LLMRequest to NormalizedRequest', () => {
     const input: LLMRequest = {
@@ -342,10 +324,6 @@ describe('Request Conversion', () => {
   });
 });
 
-// ============================================================================
-// Tool Mode Resolution Tests
-// ============================================================================
-
 describe('resolveToolModeForModel', () => {
   it('should return xml for direct Claude models', () => {
     expect(resolveToolModeForModel('claude-3-5-sonnet-20241022')).toBe('xml');
@@ -363,10 +341,6 @@ describe('resolveToolModeForModel', () => {
     expect(resolveToolModeForModel('some-other-model')).toBe('native');
   });
 });
-
-// ============================================================================
-// Response Conversion Tests
-// ============================================================================
 
 describe('Response Conversion', () => {
   it('should convert NormalizedResponse to LLMCompletion', () => {
@@ -418,7 +392,7 @@ describe('Response Conversion', () => {
       { input: 'stop_sequence', expected: 'stop_sequence' },
       { input: 'tool_use', expected: 'tool_use' },
       { input: 'refusal', expected: 'refusal' },
-      { input: 'abort', expected: 'end_turn' }, // abort maps to end_turn
+      { input: 'abort', expected: 'end_turn' },
     ];
     
     for (const { input, expected } of testCases) {
@@ -441,10 +415,6 @@ describe('Response Conversion', () => {
     }
   });
 });
-
-// ============================================================================
-// Tool Definition Conversion Tests
-// ============================================================================
 
 describe('Tool Definition Conversion', () => {
   it('should convert tool definition to membrane format', () => {
@@ -491,10 +461,6 @@ describe('Tool Definition Conversion', () => {
     expect(result.inputSchema.required).toEqual(original.inputSchema.required);
   });
 });
-
-// ============================================================================
-// Edge Case Tests - Session 4 Validation
-// ============================================================================
 
 describe('Edge Cases: Thinking Block Conversion', () => {
   it('should preserve membrane thinking block as structured block with signature', () => {
@@ -572,7 +538,6 @@ describe('Edge Cases: Thinking Block Conversion', () => {
       data: '[content redacted]',
     };
     
-    // Should pass through as unknown type
     const result = fromMembraneContentBlock(redactedBlock);
     expect(result.type).toBe('redacted_thinking');
   });

@@ -1,16 +1,3 @@
-/**
- * Tests that the agent loop's replaceMentions gives mentionsToIds the
- * conversation's authors, marking a webhook's, keeping other bots' and
- * leaving out the bot's own, and passes the bot's config on, config.name
- * included.
- *
- * The loop is built with stand-ins for everything it holds. replaceMentions
- * uses only the connector's getBotUsername, to join the bot's messages as the
- * context does.
- *
- * Run with: npx vitest run replace-mentions
- */
-
 import { describe, it, expect, afterEach } from 'vitest'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -25,7 +12,6 @@ afterEach(() => {
 
 type ReplaceMentions = (text: string, messages: unknown[], config: object) => Promise<string>
 
-/** The loop's replaceMentions, on a loop that knows its bot's user id and Discord username if given. */
 function replaceMentions(botUserId?: string, botUsername?: string): ReplaceMentions {
   const dir = mkdtempSync(join(tmpdir(), 'replace-mentions-test-'))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
@@ -60,7 +46,6 @@ describe('AgentLoop.replaceMentions', () => {
     const bot = { id: '999', username: 'sam_bot', displayName: 'Sam', bot: true }
     const messages = [{ author: bot, content: 'hi' }, message('111', 'sam_h4ndle', 'Sam')]
     expect(await replaceMentions('999')('@Sam', messages, { use_display_names_humans: true })).toBe('<@111>')
-    // Without its own id, the loop can't tell, and the name reads as shared.
     expect(await replaceMentions()('@Sam', messages, { use_display_names_humans: true })).toBe('@Sam')
   })
 
@@ -70,7 +55,6 @@ describe('AgentLoop.replaceMentions', () => {
     const asJack = message('222', 'sam_h4ndle', 'Sam', { content: '~Jack: I am the other Jack' })
     expect(await replaceMentions()('@Jack', [jack, asJack], { use_display_names_humans: true })).toBe('@Jack')
     expect(await replaceMentions()('@Jack', [jack, sam], { use_display_names_humans: true })).toBe('<@111>')
-    // Its <@Name> form stays out of the connector's lookup, which could find the real Jack.
     expect(await replaceMentions()('<@Jack>', [jack, asJack], {})).toBe('@Jack')
   })
 
@@ -107,10 +91,8 @@ describe('AgentLoop.replaceMentions', () => {
     const first = { author: bot, content: 'Here is the scene.', attachments: [] }
     const asJack = { author: bot, content: '~Jack: I am the other Jack', attachments: [{ id: 'a2' }] }
     const humans = { use_display_names_humans: true }
-    // Joined to the message before it, its ~Jack: is mid-text, and no Jack is shown.
     expect(await replaceMentions('999', 'sam_bot')('@Jack', [jack, first, asJack], humans)).toBe('<@111>')
     expect(await replaceMentions('999', 'sam_bot')('@Jack', [jack, asJack], humans)).toBe('@Jack')
-    // The join leaves the messages themselves as they were.
     expect(first.attachments).toEqual([])
   })
 
@@ -119,7 +101,6 @@ describe('AgentLoop.replaceMentions', () => {
     const bot = { id: '999', username: 'sam_bot', displayName: 'sam_bot', bot: true }
     const hiddenFirst = { author: bot, content: 'Here is the scene.', attachments: [], reactions: [{ emoji: '🫥' }] }
     const asJack = { author: bot, content: '~Jack: I am the other Jack', attachments: [] }
-    // Joined to the hidden message before it, the override is hidden with it.
     expect(await replaceMentions('999', 'sam_bot')('@Jack', [jack, hiddenFirst, asJack], { use_display_names_humans: true })).toBe('<@111>')
   })
 
@@ -164,7 +145,6 @@ describe('AgentLoop.replaceMentions', () => {
     const messages = [message('111', 'jack_one', 'Jack'), message('112', 'jack_two', 'Jack', { content: '.note to self' })]
     const humans = { use_display_names_humans: true }
     expect(await replaceMentions()('@Jack', messages, humans)).toBe('<@111>')
-    // When the context shows dot messages, the second Jack is in the conversation too.
     expect(await replaceMentions()('@Jack', messages, { ...humans, ignore_dotted_messages: false })).toBe('@Jack')
   })
 

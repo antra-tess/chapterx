@@ -1,11 +1,7 @@
 /**
- * Thinking cache: one response's thinking per assistant turn.
- *
  * The API rejects any turn in which thinking blocks from different responses
  * sit next to each other (a tool loop's steps flattened together). Blocks
  * from different responses separated by other content are accepted.
- *
- * Run with: npx vitest run thinking-cache
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'

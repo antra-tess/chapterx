@@ -1,8 +1,3 @@
-/**
- * Tool System
- * Wraps MCP client, plugin tools, and handles JSONL persistence
- */
-
 import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -19,19 +14,16 @@ export class ToolSystem {
   private loadedPlugins: string[] = []
   private loadedPluginObjects = new Map<string, ToolPlugin>()
   private pluginContext: Partial<PluginContext> = {}
-  private pluginContextFactory: any = null  // PluginContextFactory, typed as any to avoid circular import
-  private pluginConfigs: Record<string, any> = {}  // Per-plugin configs
+  private pluginContextFactory: any = null
+  private pluginConfigs: Record<string, any> = {}
   private mcpResources = new Map<string, Array<{ uri: string; name: string; description?: string; mimeType?: string }>>()
 
   constructor(private toolCacheDir: string) {}
 
-  /**
-   * Load tool plugins by name
-   */
   loadPlugins(pluginNames: string[]): void {
     for (const name of pluginNames) {
       if (this.loadedPlugins.includes(name)) {
-        continue  // Already loaded
+        continue
       }
       
       const plugin = availablePlugins[name]
@@ -40,7 +32,6 @@ export class ToolSystem {
         continue
       }
       
-      // Register each tool from the plugin
       for (const tool of plugin.tools) {
         this.tools.push({
           name: tool.name,
@@ -61,38 +52,23 @@ export class ToolSystem {
     }
   }
   
-  /**
-   * Get loaded plugin objects (for context injection)
-   */
   getLoadedPluginObjects(): Map<string, ToolPlugin> {
     return this.loadedPluginObjects
   }
 
-  /**
-   * Set context for plugin execution
-   */
   setPluginContext(context: Partial<PluginContext>): void {
     this.pluginContext = { ...this.pluginContext, ...context }
   }
   
-  /**
-   * Get current plugin context
-   */
   getPluginContext(): Partial<PluginContext> {
     return this.pluginContext
   }
   
-  /**
-   * Set plugin context factory for creating plugin-specific state contexts
-   */
   setPluginContextFactory(factory: any, pluginConfigs?: Record<string, any>): void {
     this.pluginContextFactory = factory
     this.pluginConfigs = pluginConfigs || {}
   }
 
-  /**
-   * Initialize MCP clients from configuration
-   */
   async initializeServers(serverConfigs: MCPServerConfig[]): Promise<void> {
     if (!serverConfigs || serverConfigs.length === 0) {
       logger.info('No MCP servers configured, tools disabled')
@@ -106,7 +82,6 @@ export class ToolSystem {
         await this.initializeServer(config)
       } catch (error) {
         logger.error({ error, server: config.name }, 'Failed to initialize MCP server')
-        // Continue with other servers
       }
     }
 
@@ -138,7 +113,6 @@ export class ToolSystem {
 
     await client.connect(transport)
 
-    // Load tools from this server
     const toolResponse = await client.listTools()
     const serverTools: ToolDefinition[] = toolResponse.tools.map((tool) => ({
       name: tool.name,
@@ -147,7 +121,6 @@ export class ToolSystem {
       serverName: config.name,
     }))
 
-    // Load resources from this server (if supported)
     try {
       const resourceResponse = await client.listResources()
       if (resourceResponse.resources && resourceResponse.resources.length > 0) {
@@ -165,7 +138,6 @@ export class ToolSystem {
         }, 'MCP resources discovered')
       }
     } catch (e) {
-      // Server may not support resources - that's ok
       logger.debug({ server: config.name }, 'MCP server does not support resources')
     }
 
@@ -178,9 +150,6 @@ export class ToolSystem {
     }, 'MCP server initialized')
   }
 
-  /**
-   * Get all available MCP resources
-   */
   getMcpResources(): Array<{ server: string; uri: string; name: string; description?: string }> {
     const allResources: Array<{ server: string; uri: string; name: string; description?: string }> = []
     for (const [server, resources] of this.mcpResources) {
@@ -191,11 +160,7 @@ export class ToolSystem {
     return allResources
   }
 
-  /**
-   * Read an MCP resource by URI
-   */
   async readMcpResource(uri: string): Promise<{ content: string; mimeType?: string } | null> {
-    // Find which server owns this resource
     for (const [serverName, resources] of this.mcpResources) {
       const resource = resources.find(r => r.uri === uri)
       if (resource) {
@@ -203,7 +168,6 @@ export class ToolSystem {
         if (client) {
           try {
             const result = await client.readResource({ uri })
-            // Result contains contents array
             const content = result.contents?.map((c: any) => {
               if (c.text) return c.text
               if (c.blob) return `[Binary data: ${c.uri || uri}]`
@@ -221,35 +185,23 @@ export class ToolSystem {
   }
 
 
-  /**
-   * Get available tools (filtered to exclude disabled plugins)
-   */
   getAvailableTools(): ToolDefinition[] {
     return this.tools.filter(tool => {
-      // Check if this is a plugin tool that is disabled
       if (tool.serverName?.startsWith('plugin:')) {
         const pluginName = tool.serverName.replace('plugin:', '')
         const pluginConfig = this.pluginConfigs[pluginName]
         if (pluginConfig?.state_scope === 'off') {
-          return false  // Filter out disabled plugin tools
+          return false
         }
       }
       return true
     })
   }
 
-  /**
-   * Get names of all available tools
-   */
   getToolNames(): string[] {
     return this.tools.map(t => t.name)
   }
 
-  /**
-   * Load tool cache from JSONL files (with results)
-   * @param existingMessageIds - Optional set of Discord message IDs that exist. 
-   *                            Entries with botMessageIds not in this set are filtered out.
-   */
   async loadCacheWithResults(
     botId: string, 
     channelId: string,
@@ -261,7 +213,6 @@ export class ToolSystem {
       return []
     }
 
-    // Read all JSONL files in the directory
     const fs = await import('fs/promises')
     const files = await fs.readdir(dirPath)
     const jsonlFiles = files.filter((f) => f.endsWith('.jsonl')).sort()
@@ -278,18 +229,15 @@ export class ToolSystem {
         for (const line of lines) {
           const entry = JSON.parse(line)
           
-          // Filter out entries where bot messages were deleted (or missing botMessageIds)
           const botMsgIds = entry.call.botMessageIds as string[] | undefined
           if (existingMessageIds) {
             if (!botMsgIds || botMsgIds.length === 0) {
-              // Old entry without botMessageIds - skip it (can't verify existence)
               filteredCount++
               logger.debug({ 
                 toolCallId: entry.call.id
               }, 'Filtering out tool cache entry - no botMessageIds (legacy entry)')
               continue
             }
-            // Check if at least one bot message still exists
             const hasExistingMessage = botMsgIds.some(id => existingMessageIds.has(id))
             if (!hasExistingMessage) {
               filteredCount++
@@ -301,7 +249,6 @@ export class ToolSystem {
             }
           }
           
-          // Truncate large results to prevent context bloat
           let result = entry.result.output
           const resultStr = toolOutputText(result)
           if (resultStr.length > 2000) {
@@ -324,7 +271,7 @@ export class ToolSystem {
             result: {
               output: result,
               error: entry.result.error,
-              images: entry.result.images,  // Restore MCP images from cache
+              images: entry.result.images,
             }
           })
         }
@@ -333,12 +280,6 @@ export class ToolSystem {
       }
     }
 
-    // Limit to the last 5 tool results to prevent context bloat. The entries
-    // just before them that share the oldest one's trigger are earlier rounds
-    // of the same activation. They come back with their prose and no result,
-    // so the next context still shows that activation's rounds in order and
-    // covers every message its rounds posted. Its final answer is covered by
-    // no entry, so it stays in the history.
     const firstWithResult = Math.max(0, allEntries.length - 5)
     const oldestTrigger = allEntries[firstWithResult]?.call.messageId
     let firstEntry = firstWithResult
@@ -364,9 +305,6 @@ export class ToolSystem {
     return limitedEntries
   }
 
-  /**
-   * Legacy method for backward compatibility
-   */
   async loadCache(botId: string, channelId: string): Promise<ToolCall[]> {
     const entries = await this.loadCacheWithResults(botId, channelId)
     return entries.map(e => e.call)
@@ -381,36 +319,21 @@ export class ToolSystem {
   private static readonly FUNC_RESULTS_OPEN = '<' + 'function_results>'
   private static readonly FUNC_RESULTS_CLOSE = '</' + 'function_results>'
 
-  /**
-   * Parse Anthropic-style tool calls from completion text
-   * Supports both formats:
-   *   [antml:function_calls] / [function_calls]
-   *   [antml:invoke] / [invoke]
-   *   [antml:parameter] / [parameter]
-   * 
-   * Returns the first complete function_calls block found, or null if none/incomplete.
-   * Also returns the text before and after the block for continuation.
-   */
   parseAnthropicToolCalls(completion: string): {
     calls: ToolCall[],
     beforeText: string,
     afterText: string,
     fullMatch: string,
   } | null {
-    // Try antml: prefixed format first, then plain format
-    // Match pattern: <(antml:)?function_calls>...</(antml:)?function_calls>
-    // Use global match to find ALL blocks, then pick the last one that doesn't have results yet
     const blockPattern = /<(antml:)?function_calls>([\s\S]*?)<\/(antml:)?function_calls>/g
     
     let blockMatch: RegExpExecArray | null = null
     let lastUnexecutedMatch: RegExpExecArray | null = null
     
     while ((blockMatch = blockPattern.exec(completion)) !== null) {
-      // Check if this block already has results after it
       const afterPos = blockMatch.index + blockMatch[0].length
-      const textAfter = completion.slice(afterPos, afterPos + 100) // Check next 100 chars
+      const textAfter = completion.slice(afterPos, afterPos + 100)
       if (!textAfter.trimStart().startsWith('<function_results>')) {
-        // This block hasn't been executed yet
         lastUnexecutedMatch = { ...blockMatch } as RegExpExecArray
         Object.assign(lastUnexecutedMatch, blockMatch)
         lastUnexecutedMatch.index = blockMatch.index
@@ -420,46 +343,40 @@ export class ToolSystem {
     blockMatch = lastUnexecutedMatch
     
     if (!blockMatch) {
-      // Check if there's an incomplete block (opened but not closed)
       const hasOpen = completion.includes(ToolSystem.FUNC_CALLS_OPEN_ANTML) || 
                       completion.includes(ToolSystem.FUNC_CALLS_OPEN_PLAIN)
       const hasClose = completion.includes(ToolSystem.FUNC_CALLS_CLOSE_ANTML) || 
                        completion.includes(ToolSystem.FUNC_CALLS_CLOSE_PLAIN)
       if (hasOpen && !hasClose) {
-        return null  // Incomplete - need more tokens
+        return null
       }
-      return null  // No tool calls
+      return null
     }
     
     const fullMatch = blockMatch[0]
-    const blockContent = blockMatch[2]!  // Group 2 is the content between tags
+    const blockContent = blockMatch[2]!
     const beforeText = completion.slice(0, completion.indexOf(fullMatch))
     const afterText = completion.slice(completion.indexOf(fullMatch) + fullMatch.length)
     
-    // Parse individual invoke blocks
-    // Support both <invoke> and <invoke> formats
     const invokePattern = /<(antml:)?invoke\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?invoke>/g
     const calls: ToolCall[] = []
     let invokeMatch
     
     while ((invokeMatch = invokePattern.exec(blockContent)) !== null) {
-      const toolName = invokeMatch[2]!  // Group 2 is the name
-      const invokeContent = invokeMatch[3]!  // Group 3 is the content
+      const toolName = invokeMatch[2]!
+      const invokeContent = invokeMatch[3]!
       
-      // Parse parameters - support both <parameter> and <parameter>
       const paramPattern = /<(antml:)?parameter\s+name="([^"]+)">([^<]*)<\/(antml:)?parameter>/g
       const input: Record<string, any> = {}
       let paramMatch
       
       while ((paramMatch = paramPattern.exec(invokeContent)) !== null) {
-        const paramName = paramMatch[2]!  // Group 2 is the name
-        let paramValue: any = paramMatch[3]!  // Group 3 is the value
+        const paramName = paramMatch[2]!
+        let paramValue: any = paramMatch[3]!
         
-        // Try to parse as JSON, otherwise keep as string
         try {
           paramValue = JSON.parse(paramValue)
         } catch {
-          // Keep as string
         }
         
         input[paramName] = paramValue
@@ -480,17 +397,11 @@ export class ToolSystem {
     return { calls, beforeText, afterText, fullMatch }
   }
 
-  /**
-   * Format tool result for injection into completion (Anthropic style)
-   */
   formatToolResultForInjection(_toolName: string, result: string): string {
     // No trailing whitespace - Anthropic API rejects it for assistant prefill
     return '\n\n' + ToolSystem.FUNC_RESULTS_OPEN + '\n' + result + '\n' + ToolSystem.FUNC_RESULTS_CLOSE
   }
 
-  /**
-   * Check if completion has an incomplete tool call block (opened but not closed)
-   */
   hasIncompleteToolCall(completion: string): boolean {
     const hasOpen = completion.includes(ToolSystem.FUNC_CALLS_OPEN_ANTML) || 
                     completion.includes(ToolSystem.FUNC_CALLS_OPEN_PLAIN)
@@ -499,58 +410,38 @@ export class ToolSystem {
     return hasOpen && !hasClose
   }
 
-  /**
-   * Strip tool call and result XML blocks from text (for display to Discord)
-   * Preserves any text before/after the blocks
-   */
   stripToolXml(text: string): string {
-    // Strip <function_calls>...</function_calls> blocks
     let result = text.replace(/<(antml:)?function_calls>[\s\S]*?<\/(antml:)?function_calls>/g, '')
-    // Strip <function_results>...</function_results> blocks
     result = result.replace(/<function_results>[\s\S]*?<\/function_results>/g, '')
-    // Clean up excessive whitespace from removals
     result = result.replace(/\n{3,}/g, '\n\n')
     return result.trim()
   }
 
-  /**
-   * Parse tool calls from completion text (for prefill mode) - LEGACY FORMAT
-   * Looks for XML-formatted tool calls like: <tool_name>{"param": "value"}</tool_name>
-   * Also handles empty calls: <tool_name></tool_name> or <tool_name>{}</tool_name>
-   * Skips tool calls that are escaped (wrapped in backticks or inside code blocks)
-   */
   parseToolCalls(completion: string, originalText: string): Array<{call: ToolCall, originalText: string}> {
     const results: Array<{call: ToolCall, originalText: string}> = []
 
-    // First, mask out code blocks and inline code to avoid parsing escaped tool calls
-    // Replace ``` blocks and `inline` with placeholder that won't match
     const masked = completion
       .replace(/```[\s\S]*?```/g, '[CODE_BLOCK]')
       .replace(/`[^`]+`/g, '[INLINE_CODE]')
 
-    // Pattern: <tool_name>optional_json</tool_name>
-    // Matches: <foo>{}</foo>, <foo>{"a":1}</foo>, <foo></foo>, <foo>  </foo>
     const pattern = /<(\w+)>\s*(\{[\s\S]*?\})?\s*<\/\1>/g
     let match
 
     while ((match = pattern.exec(masked)) !== null) {
       const toolName = match[1]
-      const jsonInput = match[2]  // May be undefined for empty tags
+      const jsonInput = match[2]
 
       if (!toolName) {
         continue
       }
       
-      // Check if this tool name exists in our known tools
       const knownTool = this.tools.find(t => t.name === toolName)
       if (!knownTool) {
-        // Not a known tool - might be regular XML in the conversation, skip it
         logger.trace({ toolName }, 'Skipping unknown tool name (might be regular XML)')
         continue
       }
 
       try {
-        // Parse JSON or default to empty object
         const input = jsonInput ? JSON.parse(jsonInput.trim()) : {}
         
         results.push({
@@ -558,7 +449,7 @@ export class ToolSystem {
             id: this.generateToolCallId(),
             name: toolName,
             input,
-            messageId: '',  // Will be set later by Agent Loop
+            messageId: '',
             timestamp: new Date(),
             originalCompletionText: originalText,
           },
@@ -574,14 +465,9 @@ export class ToolSystem {
     return results
   }
 
-  /**
-   * Execute a tool (plugin or MCP)
-   */
   async executeTool(call: ToolCall): Promise<ToolResult> {
-    // Check if this is a plugin tool
     const pluginHandler = this.pluginHandlers.get(call.name)
     if (pluginHandler) {
-      // Check if the plugin is disabled (state_scope: 'off')
       const toolDef = this.tools.find(t => t.name === call.name)
       if (toolDef?.serverName?.startsWith('plugin:')) {
         const pluginName = toolDef.serverName.replace('plugin:', '')
@@ -615,7 +501,6 @@ export class ToolSystem {
         
         let result = await pluginHandler(call.input, context)
         
-        // Call lifecycle hooks for plugins that own this tool
         const toolDef = this.tools.find(t => t.name === call.name)
         if (toolDef?.serverName?.startsWith('plugin:')) {
           const pluginName = toolDef.serverName.replace('plugin:', '')
@@ -623,25 +508,21 @@ export class ToolSystem {
           
           if (this.pluginContextFactory) {
             try {
-              // Get plugin-specific config
               const pluginConfig = this.pluginConfigs[pluginName]
               
-              // Create a plugin-specific state context
               const pluginStateContext = this.pluginContextFactory.createStateContext(
                 pluginName,
                 context,
-                undefined,  // inheritanceInfo
-                undefined,  // epicReducer
+                undefined,
+                undefined,
                 pluginConfig
               )
               
-              // Call onToolExecution hook
               if (plugin?.onToolExecution) {
                 await plugin.onToolExecution(call.name, call.input, result, pluginStateContext)
                 logger.debug({ pluginName, toolName: call.name }, 'Called onToolExecution hook')
               }
               
-              // Call postProcessResult hook to allow enriching the result
               if (plugin?.postProcessResult) {
                 const resultStr = typeof result === 'string' ? result : JSON.stringify(result)
                 result = await plugin.postProcessResult(call.name, call.input, resultStr, pluginStateContext)
@@ -673,13 +554,11 @@ export class ToolSystem {
       }
     }
 
-    // MCP tool execution
     if (this.mcpClients.size === 0 && this.pluginHandlers.size === 0) {
       throw new ToolError('No tools initialized')
     }
 
     try {
-      // Find which server provides this tool
       const toolDef = this.tools.find((t) => t.name === call.name)
       const serverName = toolDef?.serverName || 'default'
       const client = this.mcpClients.get(serverName) || this.mcpClients.values().next().value
@@ -695,7 +574,6 @@ export class ToolSystem {
         arguments: call.input,
       })
 
-      // Parse MCP result content - extract text and images separately
       const { textOutput, images } = this.parseMcpResultContent(result.content)
 
       return {
@@ -716,9 +594,6 @@ export class ToolSystem {
     }
   }
 
-  /**
-   * Persist tool use to JSONL file
-   */
   async persistToolUse(
     botId: string,
     channelId: string,
@@ -731,7 +606,6 @@ export class ToolSystem {
     const dirPath = join(this.toolCacheDir, botId, channelId)
     const filePath = join(dirPath, fileName)
 
-    // Ensure directory exists
     if (!existsSync(dirPath)) {
       mkdirSync(dirPath, { recursive: true })
     }
@@ -743,8 +617,8 @@ export class ToolSystem {
         input: call.input,
         messageId: call.messageId,
         originalCompletionText: call.originalCompletionText,
-        botMessageIds: call.botMessageIds,  // May be undefined, will be updated later
-        coveredMessageIds: call.coveredMessageIds,  // A native call's own; others get theirs later
+        botMessageIds: call.botMessageIds,
+        coveredMessageIds: call.coveredMessageIds,
       },
       result: {
         output: result.output,
@@ -762,11 +636,6 @@ export class ToolSystem {
     }
   }
 
-  /**
-   * Update tool cache entries with liveness anchors and, for entries that don't
-   * carry their own, the subset of Discord messages whose visible text is
-   * reconstructed by originalCompletionText.
-   */
   async updateBotMessageIds(
     botId: string,
     channelId: string,
@@ -779,7 +648,6 @@ export class ToolSystem {
     const dirPath = join(this.toolCacheDir, botId, channelId)
     if (!existsSync(dirPath)) return
     
-    // Read all JSONL files and update matching entries
     const files = readdirSync(dirPath).filter(f => f.endsWith('.jsonl'))
     
     for (const file of files) {
@@ -819,10 +687,6 @@ export class ToolSystem {
     }
   }
 
-  /**
-   * Remove tool cache entries associated with a deleted bot message
-   * Called when a bot message is deleted from Discord
-   */
   async removeEntriesByBotMessageId(
     botId: string,
     channelId: string,
@@ -849,7 +713,7 @@ export class ToolSystem {
               toolCallId: entry.call?.id,
               deletedMessageId 
             }, 'Removing tool cache entry - bot message deleted')
-            return false  // Remove this entry
+            return false
           }
           return true
         } catch {
@@ -859,7 +723,6 @@ export class ToolSystem {
       
       if (filteredLines.length < lines.length) {
         if (filteredLines.length === 0) {
-          // Delete empty file
           const { unlinkSync } = require('fs')
           unlinkSync(filePath)
         } else {
@@ -874,9 +737,6 @@ export class ToolSystem {
     }
   }
 
-  /**
-   * Close all MCP clients
-   */
   async close(): Promise<void> {
     for (const [name, client] of this.mcpClients.entries()) {
       try {
@@ -893,13 +753,6 @@ export class ToolSystem {
     return `call_${Date.now()}_${Math.random().toString(36).substring(7)}`
   }
 
-  /**
-   * Parse MCP result content - extract text and images separately
-   * MCP content can be an array of content blocks:
-   * - { type: 'text', text: string }
-   * - { type: 'image', data: string, mimeType: string }
-   * - { type: 'resource', ... } (embedded resources - treated as text)
-   */
   private parseMcpResultContent(content: any): {
     textOutput: string
     images: Array<{ data: string; mimeType: string }>
@@ -907,17 +760,14 @@ export class ToolSystem {
     const images: Array<{ data: string; mimeType: string }> = []
     const textParts: string[] = []
 
-    // Handle null/undefined
     if (!content) {
       return { textOutput: '', images: [] }
     }
 
-    // Handle string content directly
     if (typeof content === 'string') {
       return { textOutput: content, images: [] }
     }
 
-    // Handle array of content blocks (standard MCP format)
     if (Array.isArray(content)) {
       for (const block of content) {
         if (!block || typeof block !== 'object') {
@@ -928,7 +778,6 @@ export class ToolSystem {
         if (block.type === 'text' && typeof block.text === 'string') {
           textParts.push(block.text)
         } else if (block.type === 'image') {
-          // MCP image content block
           const data = block.data || block.source?.data
           const mimeType = block.mimeType || block.source?.media_type || 'image/png'
           if (data) {
@@ -936,20 +785,16 @@ export class ToolSystem {
             logger.debug({ mimeType, dataLength: data.length }, 'Extracted image from MCP tool result')
           }
         } else if (block.type === 'resource') {
-          // Embedded resource - extract text if available
           if (block.resource?.text) {
             textParts.push(block.resource.text)
           } else if (block.resource?.blob) {
-            // Binary resource - just note its presence
             textParts.push(`[Binary resource: ${block.resource.uri || 'unknown'}]`)
           }
         } else {
-          // Unknown block type - stringify it
           textParts.push(JSON.stringify(block))
         }
       }
     } else {
-      // Non-array content - stringify it
       textParts.push(typeof content === 'string' ? content : JSON.stringify(content))
     }
 

@@ -1,10 +1,3 @@
-/**
- * Trace Collector
- * 
- * Accumulates events during an activation to build a complete trace.
- * Used via AsyncLocalStorage so any component can log to the current trace.
- */
-
 import { AsyncLocalStorage } from 'async_hooks'
 import { randomUUID } from 'crypto'
 import {
@@ -20,25 +13,12 @@ import {
   LogEntry,
 } from './types.js'
 
-// ============================================================================
-// Trace Context (AsyncLocalStorage)
-// ============================================================================
-
 const traceContext = new AsyncLocalStorage<TraceCollector>()
 
-/**
- * Get the current trace collector (if we're inside an activation)
- */
 export function getCurrentTrace(): TraceCollector | undefined {
   return traceContext.getStore()
 }
 
-/**
- * Run a function with a trace collector context
- * 
- * If the function throws, the error is recorded in the trace and the trace
- * is still returned (along with the error) so it can be written to disk.
- */
 export async function withTrace<T>(
   channelId: string,
   triggeringMessageId: string,
@@ -53,11 +33,9 @@ export async function withTrace<T>(
     const trace = collector.finalize()
     return { result, trace, channelName }
   } catch (err) {
-    // Record the error in the trace
     const error = err instanceof Error ? err : new Error(String(err))
-    collector.recordError('llm_call', error)  // Default to llm_call phase, could be refined
+    collector.recordError('llm_call', error)
     
-    // Log the error to the trace
     collector.captureLog('error', `Activation failed: ${error.message}`, {
       stack: error.stack,
     })
@@ -66,10 +44,6 @@ export async function withTrace<T>(
     return { trace, error, channelName }
   }
 }
-
-// ============================================================================
-// Trace Collector
-// ============================================================================
 
 export class TraceCollector {
   private traceId: string
@@ -92,7 +66,6 @@ export class TraceCollector {
   private outcome?: OutcomeInfo
   private logs: LogEntry[] = []
   
-  // For tracking current LLM call (used by provider)
   private currentLLMCall?: {
     callId: string
     depth: number
@@ -100,16 +73,12 @@ export class TraceCollector {
   }
   
   constructor(channelId: string, triggeringMessageId: string, botId: string) {
-    this.traceId = randomUUID().slice(0, 8)  // Short ID for readability
+    this.traceId = randomUUID().slice(0, 8)
     this.startTime = new Date()
     this.channelId = channelId
     this.triggeringMessageId = triggeringMessageId
     this.botId = botId
   }
-  
-  // ──────────────────────────────────────────────────────────────────────────
-  // Setters for metadata
-  // ──────────────────────────────────────────────────────────────────────────
   
   setGuildId(guildId: string): void {
     this.guildId = guildId
@@ -131,13 +100,6 @@ export class TraceCollector {
     delete this.config.discord_token
   }
   
-  // ──────────────────────────────────────────────────────────────────────────
-  // Log Capture
-  // ──────────────────────────────────────────────────────────────────────────
-  
-  /**
-   * Capture a log entry
-   */
   captureLog(
     level: LogEntry['level'],
     message: string,
@@ -151,36 +113,18 @@ export class TraceCollector {
     })
   }
   
-  // ──────────────────────────────────────────────────────────────────────────
-  // Raw Discord Messages
-  // ──────────────────────────────────────────────────────────────────────────
-  
-  /**
-   * Store raw Discord messages before transformation
-   */
   recordRawDiscordMessages(messages: RawDiscordMessage[]): void {
     this.rawDiscordMessages = messages
   }
-  
-  // ──────────────────────────────────────────────────────────────────────────
-  // Activation Recording
-  // ──────────────────────────────────────────────────────────────────────────
   
   recordActivation(info: ActivationInfo): void {
     this.activation = info
   }
   
-  // ──────────────────────────────────────────────────────────────────────────
-  // Context Build Recording
-  // ──────────────────────────────────────────────────────────────────────────
-  
   recordContextBuild(info: ContextBuildInfo): void {
     this.contextBuild = info
   }
   
-  /**
-   * Helper to build ContextMessageInfo from a participant message
-   */
   static buildMessageInfo(
     position: number,
     discordMessageId: string | null,
@@ -212,13 +156,6 @@ export class TraceCollector {
     }
   }
   
-  // ──────────────────────────────────────────────────────────────────────────
-  // LLM Call Recording
-  // ──────────────────────────────────────────────────────────────────────────
-  
-  /**
-   * Start tracking an LLM call
-   */
   startLLMCall(depth: number): string {
     const callId = `${this.traceId}-llm-${this.llmCalls.length}`
     this.currentLLMCall = {
@@ -229,9 +166,6 @@ export class TraceCollector {
     return callId
   }
   
-  /**
-   * Complete an LLM call with results
-   */
   completeLLMCall(
     callId: string,
     request: LLMCallInfo['request'],
@@ -262,7 +196,6 @@ export class TraceCollector {
       request,
       response,
       tokenUsage,
-      // Keep requestBodyRef for backwards compat (first request), add requestBodyRefs for all
       requestBodyRef: options?.requestBodyRef ?? options?.requestBodyRefs?.[0],
       requestBodyRefs: options?.requestBodyRefs,
       responseBodyRef: options?.responseBodyRef ?? options?.responseBodyRefs?.[options?.responseBodyRefs?.length - 1],
@@ -276,9 +209,6 @@ export class TraceCollector {
     this.currentLLMCall = undefined
   }
   
-  /**
-   * Record an LLM call error
-   */
   failLLMCall(
     callId: string,
     error: LLMCallInfo['error'],
@@ -328,10 +258,6 @@ export class TraceCollector {
     return this.currentLLMCall?.callId
   }
   
-  // ──────────────────────────────────────────────────────────────────────────
-  // Tool Execution Recording
-  // ──────────────────────────────────────────────────────────────────────────
-  
   recordToolExecution(info: Omit<ToolExecutionInfo, 'llmCallId'>): void {
     const llmCallId = this.llmCalls[this.llmCalls.length - 1]?.callId || 'unknown'
     this.toolExecutions.push({
@@ -339,10 +265,6 @@ export class TraceCollector {
       llmCallId,
     })
   }
-  
-  // ──────────────────────────────────────────────────────────────────────────
-  // Outcome Recording
-  // ──────────────────────────────────────────────────────────────────────────
   
   recordOutcome(info: OutcomeInfo): void {
     this.outcome = info
@@ -372,10 +294,6 @@ export class TraceCollector {
     }
   }
   
-  // ──────────────────────────────────────────────────────────────────────────
-  // Finalization
-  // ──────────────────────────────────────────────────────────────────────────
-  
   finalize(): ActivationTrace {
     return {
       traceId: this.traceId,
@@ -402,10 +320,6 @@ export class TraceCollector {
     }
   }
   
-  // ──────────────────────────────────────────────────────────────────────────
-  // Accessors
-  // ──────────────────────────────────────────────────────────────────────────
-  
   getTraceId(): string {
     return this.traceId
   }
@@ -419,27 +333,14 @@ export class TraceCollector {
   }
 }
 
-// ============================================================================
-// Convenience functions for components to use
-// ============================================================================
-
-/**
- * Record context build info to current trace (if any)
- */
 export function traceContextBuild(info: ContextBuildInfo): void {
   getCurrentTrace()?.recordContextBuild(info)
 }
 
-/**
- * Start an LLM call in current trace
- */
 export function traceStartLLMCall(depth: number): string | undefined {
   return getCurrentTrace()?.startLLMCall(depth)
 }
 
-/**
- * Complete an LLM call in current trace
- */
 export function traceCompleteLLMCall(
   callId: string,
   request: LLMCallInfo['request'],
@@ -458,16 +359,10 @@ export function traceCompleteLLMCall(
   getCurrentTrace()?.completeLLMCall(callId, request, response, tokenUsage, model, options)
 }
 
-/**
- * Record tool execution in current trace
- */
 export function traceToolExecution(info: Omit<ToolExecutionInfo, 'llmCallId'>): void {
   getCurrentTrace()?.recordToolExecution(info)
 }
 
-/**
- * Capture a log entry to current trace
- */
 export function traceLog(
   level: LogEntry['level'],
   message: string,
@@ -476,16 +371,10 @@ export function traceLog(
   getCurrentTrace()?.captureLog(level, message, data)
 }
 
-/**
- * Record raw Discord messages to current trace
- */
 export function traceRawDiscordMessages(messages: RawDiscordMessage[]): void {
   getCurrentTrace()?.recordRawDiscordMessages(messages)
 }
 
-/**
- * Set bot config in current trace
- */
 export function traceSetConfig(config: Record<string, any>): void {
   getCurrentTrace()?.setConfig(config)
 }

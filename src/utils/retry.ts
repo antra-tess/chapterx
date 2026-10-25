@@ -1,7 +1,3 @@
-/**
- * Retry utilities with exponential backoff
- */
-
 import { logger } from './logger.js'
 
 export interface RetryOptions {
@@ -12,9 +8,6 @@ export interface RetryOptions {
   onRetry?: (error: Error, attempt: number) => void
 }
 
-/**
- * Retry a function with configurable backoff
- */
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   options: RetryOptions
@@ -39,12 +32,10 @@ export async function retryWithBackoff<T>(
         break
       }
 
-      // Call retry callback if provided
       if (onRetry) {
         onRetry(lastError, attempt)
       }
 
-      // Calculate delay
       let delay = initialDelay
       if (exponential) {
         delay = Math.min(initialDelay * Math.pow(2, attempt - 1), maxDelay)
@@ -67,16 +58,10 @@ export async function retryWithBackoff<T>(
   throw lastError
 }
 
-/**
- * Sleep for specified milliseconds
- */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/**
- * Retry for LLM calls (no exponential backoff, fixed retry count)
- */
 export async function retryLLM<T>(
   fn: () => Promise<T>,
   maxAttempts: number
@@ -88,15 +73,12 @@ export async function retryLLM<T>(
   })
 }
 
-/**
- * Retry for Discord API calls (exponential backoff with cap)
- */
 export async function retryDiscord<T>(
   fn: () => Promise<T>,
   maxBackoffMs: number = 32000
 ): Promise<T> {
   return retryWithBackoff(fn, {
-    maxAttempts: 10,  // Generous retry count for Discord
+    maxAttempts: 10,
     initialDelay: 1000,
     maxDelay: maxBackoffMs,
     exponential: true,

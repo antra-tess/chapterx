@@ -1,19 +1,5 @@
-/**
- * Message filtering and merging transforms
- *
- * Pure functions that operate on message arrays:
- * - mergeConsecutiveBotMessages: combine sequential bot messages at Discord level
- * - filterDotMessages: remove dot commands and reaction-hidden messages
- * - mergeConsecutiveParticipantMessages: combine sequential same-participant messages at LLM level
- */
-
 import type { DiscordMessage, ParticipantMessage } from '../../types.js'
 
-/**
- * Merge consecutive messages from the same bot into a single message.
- * Dot messages (commands like .config) are never merged — they need to stay
- * separate so filterDotMessages can remove them later.
- */
 export function mergeConsecutiveBotMessages(
   messages: DiscordMessage[],
   botName: string
@@ -24,9 +10,6 @@ export function mergeConsecutiveBotMessages(
     const isBotMessage = msg.author.displayName === botName
     const lastMsg = merged[merged.length - 1]
 
-    // Don't merge messages starting with "." (tool outputs, preambles)
-    // These need to stay separate so they can be filtered later
-    // Strip reply prefix before checking (replies look like "<reply:@user> .test")
     const contentWithoutReply = msg.content.trim().replace(/^<reply:@[^>]+>\s*/, '')
     const lastContentWithoutReply = lastMsg?.content.trim().replace(/^<reply:@[^>]+>\s*/, '') || ''
     const isDotMessage = contentWithoutReply.startsWith('.')
@@ -39,9 +22,7 @@ export function mergeConsecutiveBotMessages(
       !isDotMessage &&
       !lastIsDotMessage
     ) {
-      // Merge with previous message (space separator)
       lastMsg.content = `${lastMsg.content} ${msg.content}`
-      // Keep attachments
       lastMsg.attachments.push(...msg.attachments)
     } else {
       merged.push({ ...msg })
@@ -51,29 +32,10 @@ export function mergeConsecutiveBotMessages(
   return merged
 }
 
-/**
- * Filter dot commands and reaction-hidden messages from context.
- *
- * Dot prefix: any `.` not immediately followed by another `.`. Covers real
- * commands (`.config`) and hide-markers (`. side comment`, `.*bit*`, `.4.7`).
- * Ellipsis (`..`, `...`) is preserved because the second dot breaks the match.
- * Reply (`<reply:@user>`) and leading mentions are stripped first so
- * `<@alice> .config` still filters. Covers both the bracketed form (`<@name>`,
- * raw `<@&role>`) and the bare `@name` form that a resolved role mention becomes
- * (e.g. `@glm52` after the portal- strip / role-name resolution).
- *
- * .steer is preserved when steerVisible is true.
- *
- * Also filters messages with the 🫥 (dotted_line_face) reaction.
- *
- * The 👁️‍🗨️ (eye_in_speech_bubble) reaction overrides hiding: a dotted
- * message or a 🫥-reacted message with 👁️‍🗨️ is kept in context.
- */
 export function filterDotMessages(messages: DiscordMessage[], steerVisible: boolean = true, ignoreDotted: boolean = true): DiscordMessage[] {
   if (!ignoreDotted) return messages
   return messages.filter((msg) => {
-    // 👁️‍🗨️ reaction overrides all hiding — always keep the message
-    // Discord returns emoji name without variation selectors (U+FE0F),
+    // Discord returns the emoji name without variation selectors (U+FE0F),
     // so match both forms: 👁‍🗨 (bare) and 👁️‍🗨️ (with VS16)
     if (msg.reactions?.some(r => r.emoji === '👁‍🗨' || r.emoji === '👁️‍🗨️' || r.emoji === 'eye_in_speech_bubble')) {
       return true
@@ -85,7 +47,6 @@ export function filterDotMessages(messages: DiscordMessage[], steerVisible: bool
     if (/^\.(?!\.)/.test(stripped) && !(steerVisible && /^\.steer\b/.test(stripped))) {
       return false
     }
-    // Filter messages with dotted_line_face reaction (🫥)
     if (msg.reactions?.some(r => r.emoji === '🫥' || r.emoji === 'dotted_line_face')) {
       return false
     }
@@ -93,12 +54,6 @@ export function filterDotMessages(messages: DiscordMessage[], steerVisible: bool
   })
 }
 
-/**
- * Merge consecutive ParticipantMessages from bots.
- * Handles "m continue" scenarios where a bot has multiple sequential messages
- * that should appear as one turn in the LLM context.
- * Only merges bot messages — consecutive user messages stay separate.
- */
 export function mergeConsecutiveParticipantMessages(
   messages: ParticipantMessage[]
 ): ParticipantMessage[] {
@@ -107,30 +62,22 @@ export function mergeConsecutiveParticipantMessages(
   for (const msg of messages) {
     const lastMsg = merged[merged.length - 1]
 
-    // Only merge consecutive messages from bots, not from users
     if (lastMsg && lastMsg.participant === msg.participant && msg.isBot) {
-      // Merge content arrays
-      // For text blocks, we join with space; for other types, just append
       const lastTextBlockIndex = lastMsg.content.map(c => c.type).lastIndexOf('text')
       const lastTextBlock = lastTextBlockIndex >= 0 ? lastMsg.content[lastTextBlockIndex] : null
       const firstContentBlock = msg.content[0]
 
       if (lastTextBlock && lastTextBlock.type === 'text' && firstContentBlock?.type === 'text') {
-        // Join text with space
         lastTextBlock.text = `${lastTextBlock.text} ${firstContentBlock.text}`
-        // Append remaining content blocks
         lastMsg.content.push(...msg.content.slice(1))
       } else {
-        // Just append all content blocks
         lastMsg.content.push(...msg.content)
       }
 
-      // Keep the cache breakpoint if either message had it
       if (msg.cacheBreakpoint) {
         lastMsg.cacheBreakpoint = msg.cacheBreakpoint
       }
     } else {
-      // Different participant - start new message
       merged.push({ ...msg, content: [...msg.content] })
     }
   }

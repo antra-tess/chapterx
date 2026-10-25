@@ -1,8 +1,3 @@
-/**
- * The request logs (logs/llm-requests and logs/membrane-requests) replace each
- * media block's payload with its length, in each shape a provider's request
- * gives it, and keep everything else as it was, JSON text included.
- */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -15,7 +10,6 @@ const SIGNATURE = 'EqQBCkgIARABGAIiQL3hNDp6X0J4YmpqMTVwOW5GQmxtUjRGS29kUWdZd0pJ'
 const marker = (payload: string) => `[BASE64_DATA_${payload.length}_BYTES]`
 
 let dir: string
-// The loggers run as they do in a provider; they need nothing its constructor sets.
 const provider = Object.create(MembraneProvider.prototype) as any
 
 beforeEach(() => {
@@ -28,7 +22,6 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-/** Log a request as a provider's onRequest does, and read the file back. */
 function logged(request: unknown, log: 'llm-requests' | 'membrane-requests' = 'llm-requests'): any {
   const name = log === 'llm-requests' ? provider.logRequestToFile(request) : provider.logMembraneRequestToFile(request)
   expect(name).toBeTypeOf('string')

@@ -1,10 +1,3 @@
-/**
- * Context Builder — Thin Orchestrator
- *
- * Transforms Discord messages to normalized participant-based LLM context.
- * Each pipeline stage is implemented in a focused module under ./stages/.
- */
-
 import {
   LLMRequest,
   ContextBuildResult,
@@ -16,6 +9,7 @@ import { Activation } from '../activation/index.js'
 import { logger } from '../utils/logger.js'
 import { attachThinkingBlocks, sanitizeThinkingRuns, type ThinkingGroup } from '../agent/thinking-cache.js'
 import {
+  CACHE_MARKER_BUFFER,
   determineCacheMarker,
   applyChapterXCacheMarker,
 } from './rolling.js'
@@ -25,7 +19,6 @@ import {
 } from '../trace/index.js'
 import { ContextInjection } from '../tools/plugins/types.js'
 
-// Pipeline stages
 import {
   mergeConsecutiveBotMessages,
   filterDotMessages,
@@ -61,7 +54,6 @@ export interface BuildContextParams {
   botDiscordUsername?: string
   activations?: Activation[]
   pluginInjections?: ContextInjection[]
-  /** Persisted native thinking blocks keyed by the bot message ID they anchor to */
   thinkingByMessageId?: Map<string, ThinkingGroup>
 }
 
@@ -77,7 +69,6 @@ export class ContextBuilder {
     let messages = discordContext.messages
     const mergedMessageIds = new Set<string>()
 
-    // 1. Merge consecutive bot messages
     const botDisplayName = botDiscordUsername || config.name
     if (!config.preserve_thinking_context) {
       const beforeMerge = messages.length
@@ -90,7 +81,6 @@ export class ContextBuilder {
       }
     }
 
-    // 2. Filter dot messages
     const beforeFilter = messages.length
     messages = filterDotMessages(messages, config.steer_visible === true, config.ignore_dotted_messages !== false)
     const filteredCount = beforeFilter - messages.length
@@ -100,10 +90,9 @@ export class ContextBuilder {
       totalAfterFilter: messages.length,
     }, 'Messages after dot filtering')
 
-    // 2.5. Pre-determine cache marker for image selection
     let imageSelectionMarker = lastCacheMarker
     if (!imageSelectionMarker && messages.length > 0) {
-      const buffer = 20
+      const buffer = CACHE_MARKER_BUFFER
       const messageIds = messages.map(m => m.id)
       const botIds = new Set<string>()
       for (const m of messages) {
@@ -118,7 +107,6 @@ export class ContextBuilder {
       }, 'Pre-calculated cache marker for image selection (first activation)')
     }
 
-    // 3. Convert to participant messages
     let participantMessages = await formatMessages(
       messages,
       discordContext.images,
@@ -133,7 +121,6 @@ export class ContextBuilder {
       totalParticipants: participantMessages.length,
     }, 'Participant messages after formatMessages')
 
-    // 4. Interleave historical tool use from cache
     if (!config.preserve_thinking_context) {
       const toolMessages = formatToolUseWithResults(toolCacheWithResults, config.name)
       const interleavedMessages = interleaveToolMessages(participantMessages, toolMessages)
@@ -158,18 +145,14 @@ export class ContextBuilder {
       }, 'Skipping tool cache interleaving (preserve_thinking_context enabled)')
     }
 
-    // 5. Inject activation completions
     if (config.preserve_thinking_context && activations && activations.length > 0) {
       injectActivationCompletions(participantMessages, activations, config.name)
     }
 
-    // 6. Inject plugin context injections
     if (pluginInjections && pluginInjections.length > 0) {
       insertPluginInjections(participantMessages, pluginInjections, messages)
     }
 
-    // 6b. Re-attach persisted native thinking blocks (with signatures) to the
-    // bot's past messages — before merging, so anchors resolve by messageId.
     // Restores reasoning continuity for models whose thinking lives in the
     // encrypted signature (e.g., Fable 5 with display:'omitted').
     if (thinkingByMessageId && thinkingByMessageId.size > 0) {
@@ -179,10 +162,8 @@ export class ContextBuilder {
       }
     }
 
-    // 7. Merge consecutive messages from the bot (not users)
     participantMessages = mergeConsecutiveParticipantMessages(participantMessages)
 
-    // 8. Apply limits
     const { messages: finalMessages, didTruncate, messagesRemoved } = applyLimits(
       participantMessages,
       messagesSinceRoll,
@@ -193,9 +174,8 @@ export class ContextBuilder {
       participantMessages.push(...finalMessages)
     }
 
-    // 8b. The API rejects any turn where thinking blocks from different
-    // responses sit next to each other (pre-fix tool-loop cache entries).
-    // Drop such runs; everything else is sent as persisted.
+    // The API rejects any turn where thinking blocks from different
+    // responses sit next to each other.
     if (thinkingByMessageId && thinkingByMessageId.size > 0) {
       const dropped = sanitizeThinkingRuns(participantMessages, thinkingByMessageId.values())
       if (dropped > 0) {
@@ -203,7 +183,6 @@ export class ContextBuilder {
       }
     }
 
-    // 9. Determine and apply cache marker
     let cacheMarker = determineCacheMarkerFromMessages(messages, lastCacheMarker, didTruncate, botDisplayName)
     if (cacheMarker) {
       cacheMarker = recoverOrphanedCacheMarker(cacheMarker, participantMessages, config.name)
@@ -212,13 +191,11 @@ export class ContextBuilder {
       }
     }
 
-    // 10. Add empty completion message
     participantMessages.push({
       participant: config.name,
       content: [{ type: 'text', text: '' }],
     })
 
-    // 11. Build stop sequences and model config
     const stop_sequences = buildStopSequences(participantMessages, config)
     logger.debug({ stop_sequences, participantCount: participantMessages.length }, 'Built stop sequences')
 
@@ -228,11 +205,10 @@ export class ContextBuilder {
       context_prefix: config.context_prefix,
       prefill_user_message: config.prefill_user_message,
       config: extractModelConfig(config),
-      tools: config.tools_enabled ? undefined : undefined,  // Tools added by Agent Loop
+      tools: config.tools_enabled ? undefined : undefined,
       stop_sequences,
     }
 
-    // 12. Build trace info
     const traceInfo = buildTraceInfo(
       participantMessages,
       discordContext,
@@ -263,5 +239,4 @@ export class ContextBuilder {
   }
 }
 
-// Re-export mention helpers for backward compatibility (used by display-names.test.ts)
 export { rewriteMentionsForDisplayNames, stripReplyTags } from './stages/mentions.js'

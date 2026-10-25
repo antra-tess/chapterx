@@ -1,13 +1,4 @@
-/**
- * Tests for event-driven pin tracking in DiscordConnector.
- *
- * These test the live pin map that replaced the old fetchPinned-based caches.
- * We instantiate a real DiscordConnector (its Client is just an EventEmitter
- * internally, no network calls until .login()) and drive gateway events via
- * `client.emit(...)`. Private state and helpers are accessed via `as any`.
- *
- * Run with: npm test -- connector.pin-tracking
- */
+/** A real DiscordConnector: its Client makes no network call until .login(). */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'fs'
@@ -17,17 +8,13 @@ import type { Message } from 'discord.js'
 import { DiscordConnector } from './connector.js'
 import { EventQueue } from '../agent/event-queue.js'
 
-// ────────────────────────────────────────────────────────────────────────────
-// Harness
-// ────────────────────────────────────────────────────────────────────────────
-
 const CH = '100000000000000001'
 const USER = '700000000000000001'
 const BOT = '700000000000000099'
 
 type Harness = {
   connector: DiscordConnector
-  client: any  // connector.client is private; raw EventEmitter-shaped object here
+  client: any
   pins: () => Map<string, any> | undefined
   cleanup: () => void
 }
@@ -77,10 +64,6 @@ function makeHarness(): Harness {
     cleanup: () => rmSync(tmpCache, { recursive: true, force: true }),
   }
 }
-
-// ────────────────────────────────────────────────────────────────────────────
-// Event → state mutations
-// ────────────────────────────────────────────────────────────────────────────
 
 describe('pin tracking: messageCreate', () => {
   let h: Harness
@@ -159,15 +142,10 @@ describe('pin tracking: messageDelete', () => {
   })
 })
 
-// ────────────────────────────────────────────────────────────────────────────
-// Read path: fetchPinnedConfigs / fetchPinnedSteerMessages
-// ────────────────────────────────────────────────────────────────────────────
-
 describe('fetchPinnedConfigs', () => {
   let h: Harness
   beforeEach(() => {
     h = makeHarness()
-    // Stub bootstrap so cold-path tests don't hit network
     ;(h.connector as any).bootstrapChannelPins = vi.fn(async () => {
       (h.connector as any).pinnedByChannel.set(CH, new Map())
     })
@@ -189,7 +167,6 @@ describe('fetchPinnedConfigs', () => {
   })
 
   it('sorts by message id (ascending) so later pins override earlier', async () => {
-    // Insert out of order
     h.client.emit('messageUpdate', fakeMsg({ id: '2', content: '.config\n---\nb: 2', pinned: false }), fakeMsg({ id: '2', content: '.config\n---\nb: 2', pinned: true }))
     h.client.emit('messageUpdate', fakeMsg({ id: '1', content: '.config\n---\na: 1', pinned: false }), fakeMsg({ id: '1', content: '.config\n---\na: 1', pinned: true }))
     const configs = await h.connector.fetchPinnedConfigs(CH)
@@ -218,7 +195,6 @@ describe('fetchPinnedConfigs: identity & mention targeting', () => {
     ;(h.connector as any).bootstrapChannelPins = vi.fn(async () => {
       (h.connector as any).pinnedByChannel.set(CH, new Map())
     })
-    // Give the connector a Discord identity to resolve targets against.
     h.client.user = { id: BOT, username: 'glm5.2', globalName: 'GLM 5.2' }
   })
   afterEach(() => h.cleanup())

@@ -1,72 +1,36 @@
-/**
- * Context fetch pipeline — standalone functions for fetching Discord messages
- * and resolving .history commands.
- *
- * Extracted from connector.ts for clarity and testability. The core insight:
- * process messages in fetch order (newest-first), handle .history as early return,
- * no mutable cross-call state.
- */
-
 import { MessageType, type Message, type TextChannel, type GuildMember, type Role } from 'discord.js'
 import pino from 'pino'
 
 const logger = pino({ name: 'context-fetch' })
 
-// ────────────────────────────────────────────────────────────────────────────
-// Types
-// ────────────────────────────────────────────────────────────────────────────
-
-/** Dependency injection interface — mocked in tests, backed by push cache in production. */
 export interface FetchDeps {
-  /** Fetch a batch of messages before a cursor (newest-first, matching Discord API order). */
+  /** Newest-first, as Discord's API returns them. */
   fetchBatch(channel: TextChannel, options: { before?: string; limit: number }): Promise<Message[]>
-  /** Fetch a single message by ID. */
   fetchSingle(channel: TextChannel, messageId: string): Promise<Message | null>
-  /** Resolve a channel ID to a TextChannel object. */
   resolveChannel(channelId: string): Promise<TextChannel | null>
-  /** The bot's own user ID (for .history bot targeting). */
   botUserId: string
 }
 
-/** Result of a channel message fetch with .history resolution. */
 export interface HistoryResult {
-  /** Messages in chronological order (oldest first). */
   messages: Message[]
-  /** Whether a .history clear or range was encountered. */
   didClear: boolean
-  /** If .history range was used, the channel ID we jumped from. */
   originChannelId: string | null
 }
 
-/** Parsed .history range command. */
 export interface HistoryRange {
-  first?: string  // Discord message URL — range start (oldest boundary)
-  last: string    // Discord message URL — range end (newest boundary)
+  first?: string
+  last: string
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Parse helpers (extracted from connector.ts)
-// ────────────────────────────────────────────────────────────────────────────
-
-/**
- * Parse a .history command's content.
- *
- * @returns
- *   - `null` — clear context (bare `.history` or body without `last:`)
- *   - `HistoryRange` — range fetch with `last:` (and optionally `first:`) URLs
- *   - `false` — malformed command (has body but no `---` separator)
- */
 export function parseHistoryCommand(content: string): HistoryRange | null | false {
   const lines = content.split('\n')
 
-  // Bare .history (or .history <@bot>) with no body = clear context
   if (lines.length < 2 || lines.slice(1).every(l => !l.trim())) {
     return null
   }
 
-  // Must have --- separator for YAML body
   if (lines[1]?.trim() !== '---') {
-    return false // Malformed command
+    return false
   }
 
   let first: string | undefined
@@ -83,7 +47,6 @@ export function parseHistoryCommand(content: string): HistoryRange | null | fals
     }
   }
 
-  // No last field = empty body = clear history
   if (!last) {
     return null
   }
@@ -91,42 +54,20 @@ export function parseHistoryCommand(content: string): HistoryRange | null | fals
   return { first, last }
 }
 
-/** Extract the message ID from a Discord message URL. */
 export function extractMessageIdFromUrl(url: string): string | null {
   // Discord URL format: https://discord.com/channels/guild_id/channel_id/message_id
   const match = url.match(/\/channels\/\d+\/\d+\/(\d+)/)
   return match ? match[1]! : null
 }
 
-/** Extract the channel ID from a Discord message URL. */
 export function extractChannelIdFromUrl(url: string): string | null {
   // Discord URL format: https://discord.com/channels/guild_id/channel_id/message_id
   const match = url.match(/\/channels\/\d+\/(\d+)\/\d+/)
   return match ? match[1]! : null
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Core fetch functions
-// ────────────────────────────────────────────────────────────────────────────
-
 const MAX_RECURSION_DEPTH = 5
 
-/**
- * Fetch messages from a channel with .history resolution.
- *
- * Replaces the old `fetchMessagesRecursive`. Processes messages newest-first
- * (matching Discord API direction), so when a .history command is encountered,
- * the already-collected messages are exactly the "newer" messages to keep.
- *
- * @param channel        The channel to fetch from
- * @param startFromId    Fetch backward from this message (typically the trigger). Included in results.
- * @param stopAtId       Stop when this message ID is reached (for .history range `first:` boundary). Included in results.
- * @param maxMessages    Maximum messages to return
- * @param authorizedRoles  Role names authorized to use .history commands
- * @param ignoreHistory  If true, skip .history processing entirely (for API exports)
- * @param deps           Dependency injection (push cache, channel resolver, bot ID)
- * @param _depth         Internal recursion depth counter (default 0)
- */
 export async function fetchChannelMessages(
   channel: TextChannel,
   startFromId: string | undefined,
@@ -142,11 +83,9 @@ export async function fetchChannelMessages(
     return { messages: [], didClear: true, originChannelId: null }
   }
 
-  // Collected messages in newest-first order (reversed to chronological at return)
   const collected: Message[] = []
   let cursor = startFromId
 
-  // Include the trigger message itself
   if (startFromId) {
     const triggerMsg = await deps.fetchSingle(channel, startFromId)
     if (triggerMsg) {
@@ -164,12 +103,9 @@ export async function fetchChannelMessages(
 
     if (batch.length === 0) break
 
-    // Ensure batch is in newest-first order (matching Discord API)
-    // Sort descending by ID for consistency regardless of data source
     batch.sort((a, b) => (a.id > b.id ? -1 : a.id < b.id ? 1 : 0))
 
     for (const msg of batch) {
-      // Check stop boundary (for .history range `first:` parameter)
       if (stopAtId && msg.id <= stopAtId) {
         if (msg.id === stopAtId) {
           collected.push(msg)
@@ -178,8 +114,6 @@ export async function fetchChannelMessages(
         break
       }
 
-      // Check for .history command — must start with ".history" followed by whitespace or end-of-string
-      // to avoid false positives like ".historybook" or ".history-lesson"
       if (!ignoreHistory && msg.content?.startsWith('.history') && /^\.history(?:\s|$)/.test(msg.content)) {
         const historyResult = await processHistoryCommand(
           msg,
@@ -192,18 +126,13 @@ export async function fetchChannelMessages(
           _depth,
         )
         if (historyResult) {
-          // .history was processed — return immediately
           return historyResult
         }
-        // .history didn't apply to us (wrong bot target, unauthorized, malformed) — skip it
         continue
       }
 
-      // Skip all system messages (channel rename, pin, boost, thread created, etc.)
-      // Only keep Default (0) and Reply (19)
       if (msg.type !== MessageType.Default && msg.type !== MessageType.Reply) continue
 
-      // Log null-author messages for diagnosis — these shouldn't exist
       if (!msg.author) {
         logger.warn({
           messageId: msg.id,
@@ -222,23 +151,14 @@ export async function fetchChannelMessages(
       collected.push(msg)
     }
 
-    // Move cursor to oldest message in batch for next iteration
     const oldest = batch[batch.length - 1]
     if (!oldest) break
     cursor = oldest.id
   }
 
-  // Reverse to chronological order (oldest first)
   return { messages: collected.reverse(), didClear: false, originChannelId: null }
 }
 
-/**
- * Process a .history command encountered during message fetching.
- *
- * @returns
- *   - `HistoryResult` — the .history was processed (clear or range). Caller should return this.
- *   - `null` — the .history doesn't apply to this bot (wrong target, unauthorized, malformed). Caller should skip it.
- */
 export async function processHistoryCommand(
   msg: Message,
   currentChannel: TextChannel,
@@ -249,37 +169,31 @@ export async function processHistoryCommand(
   deps: FetchDeps,
   depth: number,
 ): Promise<HistoryResult | null> {
-  // ── Authorization check ──
   if (authorizedRoles.length > 0) {
     const member = msg.member as GuildMember | null
     if (member) {
       const memberRoles = Array.from(member.roles.cache.values()).map((r: Role) => r.name)
       if (!authorizedRoles.some(role => memberRoles.includes(role))) {
-        return null // Unauthorized — skip
+        return null
       }
     } else {
-      return null // Can't verify — skip
+      return null
     }
   }
 
-  // ── Bot targeting check ──
-  // .history <@botId> targets a specific bot; skip if it's not us
   const mentionMatch = msg.content.match(/^\.history\s+<@!?(\d+)>/)
   const targetBotId = mentionMatch?.[1]
   if (targetBotId && targetBotId !== deps.botUserId) {
-    return null // Targeted at a different bot — skip
+    return null
   }
 
-  // ── Parse the command ──
   const parsed = parseHistoryCommand(msg.content)
 
   if (parsed === false) {
-    // Malformed .history (body without --- separator) — skip entirely
     return null
   }
 
   if (parsed === null) {
-    // Clear: return only the messages newer than this .history
     logger.debug({
       messageId: msg.id,
       channelId: currentChannel.id,
@@ -287,13 +201,12 @@ export async function processHistoryCommand(
     }, '.history clear — returning newer messages only')
 
     return {
-      messages: collectedNewer.slice().reverse(), // Chronological order
+      messages: collectedNewer.slice().reverse(),
       didClear: true,
       originChannelId: null,
     }
   }
 
-  // ── Range: fetch linked messages ──
   const targetChannelId = extractChannelIdFromUrl(parsed.last)
   const targetChannel = targetChannelId
     ? await deps.resolveChannel(targetChannelId)
@@ -324,7 +237,6 @@ export async function processHistoryCommand(
     depth: depth + 1,
   }, '.history range — recursively fetching linked messages')
 
-  // Recursive fetch of the linked range
   const rangeResult = await fetchChannelMessages(
     targetChannel,
     histLastId,
@@ -336,7 +248,6 @@ export async function processHistoryCommand(
     depth + 1,
   )
 
-  // Combine: [historical range messages] + [messages newer than .history in current channel]
   return {
     messages: [...rangeResult.messages, ...collectedNewer.slice().reverse()],
     didClear: true,

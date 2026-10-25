@@ -1,11 +1,4 @@
-/**
- * DiscordConnector.convertMessage: a voice message's flag, as a mark on its
- * attachment, and an attachment's length reach Chapter X's message, for the
- * line that stands in for an attachment a request doesn't carry.
- *
- * A real DiscordConnector (its Client makes no network call until .login()),
- * given messages shaped like discord.js's, with its own flag bitfield.
- */
+/** A real DiscordConnector: its Client makes no network call until .login(). */
 import { describe, it, expect, afterEach } from 'vitest'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'

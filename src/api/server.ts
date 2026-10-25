@@ -1,10 +1,5 @@
-/**
- * HTTP API Server
- * Provides REST endpoints for accessing Discord conversation history
- */
-
 import express, { Request, Response, NextFunction } from 'express'
-import { DiscordConnector } from '../discord/connector.js'
+import { DiscordConnector, HISTORY_AND_FILTER_BUFFER } from '../discord/connector.js'
 import { displayNameClasses } from '../discord/member-names.js'
 import { ConfigSystem } from '../config/system.js'
 import { ContextBuilder } from '../context/builder.js'
@@ -16,14 +11,14 @@ export interface ApiConfig {
 }
 
 export interface MessageExportRequest {
-  last: string  // Discord message URL (required)
-  first?: string  // Discord message URL to stop at (optional)
+  last: string
+  first?: string
   recencyWindow?: {
     messages?: number
     characters?: number
   }
-  maxImages?: number  // Max images to fetch (default: 50)
-  ignoreHistory?: boolean  // Skip .history command processing (raw fetch)
+  maxImages?: number
+  ignoreHistory?: boolean
 }
 
 export interface MessageExportResponse {
@@ -34,7 +29,6 @@ export interface MessageExportResponse {
       username: string
       displayName: string
       bot: boolean
-      // Future: mappedParticipant?: string
     }
     content: string
     timestamp: string
@@ -48,8 +42,8 @@ export interface MessageExportResponse {
       filename: string
       contentType?: string
       size: number
-      base64Data?: string  // Base64-encoded image data
-      mediaType?: string   // Detected MIME type
+      base64Data?: string
+      mediaType?: string
     }>
     referencedMessageId?: string
   }>
@@ -81,13 +75,11 @@ export class ApiServer {
   private setupMiddleware(): void {
     this.app.use(express.json())
     
-    // CORS headers for cross-origin requests
     this.app.use((req: Request, res: Response, next: NextFunction): void => {
       res.header('Access-Control-Allow-Origin', '*')
       res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
       res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
       
-      // Handle preflight requests
       if (req.method === 'OPTIONS') {
         res.sendStatus(200)
         return
@@ -95,9 +87,7 @@ export class ApiServer {
       next()
     })
     
-    // Bearer token authentication
     this.app.use((req: Request, res: Response, next: NextFunction) => {
-      // Skip auth for health check and OPTIONS
       if (req.path === '/health' || req.method === 'OPTIONS') {
         return next()
       }
@@ -117,12 +107,10 @@ export class ApiServer {
   }
 
   private setupRoutes(): void {
-    // Health check
     this.app.get('/health', (_req: Request, res: Response) => {
       res.json({ status: 'ok', timestamp: new Date().toISOString() })
     })
 
-    // Export messages endpoint
     this.app.post('/api/messages/export', async (req: Request, res: Response) => {
       try {
         const body = req.body as MessageExportRequest
@@ -141,7 +129,6 @@ export class ApiServer {
       } catch (error: any) {
         logger.error({ error, body: req.body }, 'API error in /api/messages/export')
         
-        // Map known errors to appropriate status codes
         if (error.message?.includes('Invalid Discord message URL')) {
           res.status(400).json({ 
             error: 'Bad Request',
@@ -169,7 +156,6 @@ export class ApiServer {
       }
     })
 
-    // Get user info
     this.app.get('/api/users/:userId', async (req: Request, res: Response) => {
       try {
         const userId = req.params.userId
@@ -202,7 +188,6 @@ export class ApiServer {
       }
     })
 
-    // Get user avatar
     this.app.get('/api/users/:userId/avatar', async (req: Request, res: Response) => {
       try {
         const userId = req.params.userId
@@ -243,9 +228,6 @@ export class ApiServer {
       }
     })
 
-    // List channels the bot has access to, with last-activity timestamps.
-    // Timestamps are derived from Discord snowflake IDs (no fetches needed)
-    // so this is fast even with hundreds of channels across many guilds.
     this.app.get('/api/channels', async (req: Request, res: Response) => {
       try {
         const guildIdFilter = req.query.guildId as string | undefined
@@ -292,7 +274,6 @@ export class ApiServer {
           }
         }
 
-        // Newest activity first; channels with no messages sink to the bottom
         channels.sort((a, b) => {
           if (!a.lastMessageId) return 1
           if (!b.lastMessageId) return -1
@@ -317,9 +298,6 @@ export class ApiServer {
       }
     })
 
-    // Latest N raw messages for a channel, same shape as /api/messages/export.
-    // Distinct from /api/context/build (which pipeline-processes for LLM use)
-    // and from export (which requires a boundary message URL).
     this.app.get('/api/channels/:channelId/latest', async (req: Request, res: Response) => {
       try {
         const channelId = req.params.channelId
@@ -334,7 +312,7 @@ export class ApiServer {
         const maxImages = req.query.maxImages !== undefined
           ? Math.max(parseInt(req.query.maxImages as string) || 0, 0)
           : 50
-        const ignoreHistory = req.query.ignoreHistory !== 'false'  // Default true, like export
+        const ignoreHistory = req.query.ignoreHistory !== 'false'
 
         const result = await this.fetchLatestMessages(channelId, messages, maxImages, ignoreHistory)
         res.json(result)
@@ -353,7 +331,6 @@ export class ApiServer {
       }
     })
 
-    // Build full LLM context for a channel (get_prompt equivalent)
     this.app.post('/api/context/build', async (req: Request, res: Response) => {
       try {
         if (!this.configSystem || !this.contextBuilder || !this.botName) {
@@ -365,8 +342,8 @@ export class ApiServer {
         }
 
         const { channel, messages: messageCount } = req.body as {
-          channel: string  // Discord channel URL or channel ID
-          messages?: number  // Number of messages to include (default: bot config)
+          channel: string
+          messages?: number
         }
 
         if (!channel) {
@@ -399,7 +376,6 @@ export class ApiServer {
   private async exportMessages(request: MessageExportRequest): Promise<MessageExportResponse> {
     logger.debug({ last: request.last, first: request.first }, 'Starting exportMessages')
     
-    // Parse URLs to extract IDs
     const channelId = this.extractChannelIdFromUrl(request.last)
     const guildId = this.extractGuildIdFromUrl(request.last)
     const lastMessageId = this.extractMessageIdFromUrl(request.last)
@@ -411,26 +387,21 @@ export class ApiServer {
       throw new Error('Invalid Discord message URL format')
     }
 
-    // Determine recency window (default: 50 messages)
     const recencyWindow = request.recencyWindow || { messages: 50 }
-    const maxFetch = recencyWindow.messages ? recencyWindow.messages + 100 : 1000
+    const maxFetch = recencyWindow.messages ? recencyWindow.messages + HISTORY_AND_FILTER_BUFFER : 1000
 
-    // Use connector.fetchContext() which automatically:
-    // - Recursively handles .history commands during traversal (unless ignoreHistory)
-    // - Downloads and caches images
-    // - Converts to DiscordMessage format
-    const maxImages = request.maxImages ?? 50  // Default to 50 to prevent RAM bloat
-    const ignoreHistory = request.ignoreHistory ?? true  // Default to true for raw export (skip .history processing)
+    const maxImages = request.maxImages ?? 50
+    const ignoreHistory = request.ignoreHistory ?? true
     logger.debug({ channelId, targetMessageId: lastMessageId, firstMessageId, depth: maxFetch, maxImages, ignoreHistory }, 'Calling fetchContext')
     let context
     try {
       context = await this.connector.fetchContext({
         channelId,
         depth: maxFetch,
-        targetMessageId: lastMessageId,  // Start from the 'last' URL
-        firstMessageId,  // Stop at 'first' URL if provided
+        targetMessageId: lastMessageId,
+        firstMessageId,
         maxImages,
-        ignoreHistory,  // Skip .history processing for raw export
+        ignoreHistory,
       })
     } catch (error: any) {
       if (error.code === 50001) {
@@ -455,7 +426,6 @@ export class ApiServer {
       throw new Error(`No messages found in channel ${channelId}. The bot may lack access.`)
     }
 
-    // Trim to 'first' message if specified (works across channels after .history traversal)
     if (firstMessageId) {
       const firstIndex = messages.findIndex(m => m.id === firstMessageId)
       if (firstIndex >= 0) {
@@ -470,13 +440,10 @@ export class ApiServer {
       }
     }
 
-    // Track original count before applying recency window
     const messagesBeforeTruncation = messages.length
 
-    // Apply recency window
     messages = this.applyRecencyWindow(messages, recencyWindow)
     
-    // Track if recency window actually truncated (before merge which also reduces count)
     const wasExplicitlyTruncated = !!(request.recencyWindow 
       && messagesBeforeTruncation > messages.length)
     
@@ -484,10 +451,8 @@ export class ApiServer {
       logger.debug({ beforeTruncate: messagesBeforeTruncation, afterTruncate: messages.length }, 'Applied recency window')
     }
 
-    // Merge consecutive messages from the same bot
     messages = this.mergeConsecutiveBotMessages(messages)
 
-    // Transform to export format (from DiscordMessage to API format)
     const exportedMessages = messages.map(m => this.toExportMessage(m, imageCache))
 
     return {
@@ -503,7 +468,6 @@ export class ApiServer {
     }
   }
 
-  /** Convert a fetched DiscordMessage to the public export shape. */
   private toExportMessage(msg: any, imageCache: Map<string, any>): any {
     return {
       id: msg.id,
@@ -512,7 +476,6 @@ export class ApiServer {
         username: msg.author.username,
         displayName: msg.author.displayName,
         bot: msg.author.bot,
-        // Future: mappedParticipant will go here
       },
       content: msg.content,
       timestamp: msg.timestamp.toISOString(),
@@ -533,7 +496,6 @@ export class ApiServer {
     }
   }
 
-  /** Fetch the latest N raw messages for a channel — backs /api/channels/:id/latest */
   private async fetchLatestMessages(
     channelId: string,
     messageCount: number,
@@ -580,7 +542,6 @@ export class ApiServer {
   private async getUserInfo(userId: string, guildId?: string): Promise<any> {
     const client = (this.connector as any).client
     
-    // Fetch user from Discord
     let user
     try {
       user = await client.users.fetch(userId)
@@ -595,7 +556,6 @@ export class ApiServer {
       throw new Error(`Unknown User: User ${userId} not found`)
     }
 
-    // Get guild-specific info if guildId provided
     let displayName = user.username
     let roles: string[] = []
     
@@ -612,7 +572,6 @@ export class ApiServer {
         } else if (error.code === 10007) {
           throw new Error(`User ${userId} is not a member of guild ${guildId}`)
         }
-        // Don't throw for guild fetch failures - just use global info
         logger.warn({ error, userId, guildId }, 'Using global user info instead of guild-specific')
       }
     }
@@ -650,17 +609,14 @@ export class ApiServer {
   private applyRecencyWindow(messages: any[], window: { messages?: number, characters?: number }): any[] {
     let result = messages
 
-    // Apply message limit
     if (window.messages && messages.length > window.messages) {
       result = messages.slice(-window.messages)
     }
 
-    // Apply character limit
     if (window.characters) {
       const kept: any[] = []
       let charCount = 0
 
-      // Work backwards from most recent
       for (let i = result.length - 1; i >= 0; i--) {
         const msg = result[i] as any
         if (!msg) continue
@@ -681,10 +637,6 @@ export class ApiServer {
     return result
   }
 
-  /**
-   * Merge consecutive messages from the same bot into a single message
-   * This helps with bots that split responses across multiple Discord messages
-   */
   private mergeConsecutiveBotMessages(messages: any[]): any[] {
     if (messages.length === 0) return messages
 
@@ -692,7 +644,6 @@ export class ApiServer {
     let current: any = null
 
     for (const msg of messages) {
-      // Only merge bot messages
       if (!msg.author?.bot) {
         if (current) {
           merged.push(current)
@@ -702,17 +653,12 @@ export class ApiServer {
         continue
       }
 
-      // Check if this bot message should be merged with the previous
       if (current && current.author?.id === msg.author?.id) {
-        // Same bot - merge content
         current.content = current.content + '\n' + msg.content
-        // Track all merged IDs, use the LAST message's ID for the merged result
         current._mergedIds = current._mergedIds || [current.id]
         current._mergedIds.push(msg.id)
-        current.id = msg.id  // Use latest message's ID
-        // Merge attachments
+        current.id = msg.id
         current.attachments = [...(current.attachments || []), ...(msg.attachments || [])]
-        // Merge reactions (dedupe by emoji)
         const existingEmojis = new Set((current.reactions || []).map((r: any) => r.emoji))
         for (const reaction of (msg.reactions || [])) {
           if (!existingEmojis.has(reaction.emoji)) {
@@ -721,7 +667,6 @@ export class ApiServer {
           }
         }
       } else {
-        // Different bot or first bot message
         if (current) {
           merged.push(current)
         }
@@ -729,7 +674,6 @@ export class ApiServer {
       }
     }
 
-    // Don't forget the last message
     if (current) {
       merged.push(current)
     }
@@ -757,13 +701,7 @@ export class ApiServer {
     return match ? match[1]! : null
   }
 
-  /**
-   * Build the full LLM context for a channel, as the bot would see it.
-   * Runs the complete context builder pipeline with an optional message count override.
-   * Character limits and other truncation are disabled so you get the full window.
-   */
   private async buildFullContext(channel: string, messageCount?: number): Promise<any> {
-    // Parse channel ID from URL or use as-is
     let channelId: string
     let guildId: string = ''
     const urlMatch = channel.match(/\/channels\/(\d+)\/(\d+)/)
@@ -776,23 +714,20 @@ export class ApiServer {
       throw new Error('Invalid channel: provide a Discord channel URL or numeric channel ID')
     }
 
-    // Load bot config for this channel
     const config = this.configSystem!.loadConfig({
       botName: this.botName!,
       guildId,
       channelConfigs: [],
     })
 
-    // Override limits: use provided message count, disable character limits
     const fetchMessages = messageCount || config.recency_window_messages || 200
-    const fetchDepth = fetchMessages + 100  // Buffer for .history and filtering
+    const fetchDepth = fetchMessages + HISTORY_AND_FILTER_BUFFER
 
-    // Fetch context from Discord
     const discordContext = await this.connector.fetchContext({
       channelId,
       depth: fetchDepth,
       maxImages: config.include_images ? Math.max((config.max_images || 5) * 2, 10) : 0,
-      displayNames: displayNameClasses(config),  // Server nicknames for display-name labels, as an activation has
+      displayNames: displayNameClasses(config),
     })
 
     const discordFetched = discordContext.messages.length
@@ -801,27 +736,24 @@ export class ApiServer {
       throw new Error(`No messages found in channel ${channelId}`)
     }
 
-    // Build config with overridden limits
     const overriddenConfig = {
       ...config,
       recency_window_messages: fetchMessages,
-      recency_window_characters: Infinity,  // No character limit
-      hard_max_characters: Infinity,  // No hard limit
+      recency_window_characters: Infinity,
+      hard_max_characters: Infinity,
     }
 
     const botUsername = this.connector.getBotUsername()
 
-    // Run full context builder pipeline
     const contextResult = await this.contextBuilder!.buildContext({
       discordContext,
-      toolCacheWithResults: [],  // No tool cache for inspection
+      toolCacheWithResults: [],
       lastCacheMarker: null,
       messagesSinceRoll: 0,
       config: overriddenConfig,
       botDiscordUsername: botUsername || undefined,
     })
 
-    // Format the output: participant messages with text content
     const messages = contextResult.request.messages.map(msg => ({
       participant: msg.participant,
       content: msg.content

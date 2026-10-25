@@ -1,10 +1,3 @@
-/**
- * formatMessages and the attachments a request doesn't carry: each one gets a
- * line, so the model is told it was sent.
- *
- * Image preparation is stood in for, so a test decides what an image's bytes
- * come to and whether resampling works.
- */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { CachedDocument, CachedImage, DiscordAttachment, DiscordMessage, ParticipantMessage } from '../../types.js'
 
@@ -54,8 +47,6 @@ function cachedImage(attachment: DiscordAttachment, bytes = 64): CachedImage {
   return { url: attachment.url, data: Buffer.alloc(bytes, 1), mediaType: 'image/png', hash: 'h', width: 8, height: 8 } as CachedImage
 }
 
-/** Each message as [participant, its blocks], a text block as its text and
- *  any other block as <type>. */
 function shown(messages: ParticipantMessage[]): Array<[string, string[]]> {
   return messages.map((m) => [m.participant, m.content.map((c) => (c.type === 'text' ? (c as { text: string }).text : `<${c.type}>`))])
 }
@@ -207,8 +198,6 @@ describe('formatMessages: an attachment the request does not carry', () => {
 
 describe('limitImages', () => {
   it('puts a line in the place of each image past the limit, oldest first, and keeps the newest', async () => {
-    // Selection marks the message at its first image; every cached image in a
-    // selected message is pushed, and limitImages brings them to max_images.
     const a = file('a.png', 'image/png', 64)
     const b = file('b.png', 'image/png', 64)
     const c = file('c.png', 'image/png', 64)

@@ -1,9 +1,3 @@
-/**
- * Structured logging with pino
- * Supports per-activation file logging with async context tracking
- * Also captures logs to the active trace for debugging
- */
-
 import pino from 'pino'
 import { AsyncLocalStorage } from 'async_hooks'
 import { existsSync, mkdirSync, createWriteStream } from 'fs'
@@ -14,12 +8,10 @@ import type { LogEntry } from '../trace/types.js'
 const isDevelopment = process.env.NODE_ENV !== 'production'
 const logDir = process.env.LOG_DIR || './logs/activations'
 
-// Ensure log directory exists
 if (!existsSync(logDir)) {
   mkdirSync(logDir, { recursive: true })
 }
 
-// Base logger for console output
 const baseLogger = pino({
   level: process.env.LOG_LEVEL || (isDevelopment ? 'debug' : 'info'),
   transport: isDevelopment
@@ -34,14 +26,12 @@ const baseLogger = pino({
     : undefined,
 })
 
-// General log file for non-activation logs
 const generalLogPath = join(logDir, 'general.log')
 const generalLogStream = createWriteStream(generalLogPath, { flags: 'a' })
 const generalFileLogger = pino({
   level: 'debug',
 }, generalLogStream)
 
-// Async context storage for tracking which activation we're in
 interface ActivationContext {
   logger: pino.Logger
   id: string
@@ -49,33 +39,23 @@ interface ActivationContext {
 
 const activationContext = new AsyncLocalStorage<ActivationContext>()
 
-// Map to track all active activation loggers
 const activationLoggers = new Map<string, { logger: pino.Logger, stream: NodeJS.WritableStream }>()
 
-/**
- * Main logger - routes to console + file + trace (if active)
- */
 export const logger = new Proxy(baseLogger, {
   get(target, prop: string) {
     if (['trace', 'debug', 'info', 'warn', 'error', 'fatal'].includes(prop)) {
       return (...args: any[]) => {
-        // Log to console
         (target as any)[prop](...args)
         
-        // Log to file - check async context first
         const context = activationContext.getStore()
         if (context?.logger) {
-          // Inside activation - log to activation file
           (context.logger as any)[prop](...args)
         } else {
-          // Outside activation - log to general file
           (generalFileLogger as any)[prop](...args)
         }
         
-        // Also capture to trace if we're inside an activation
         const trace = getCurrentTrace()
         if (trace) {
-          // Parse the pino-style arguments
           // pino allows: logger.info(obj, msg) or logger.info(msg)
           let message: string
           let data: Record<string, unknown> | undefined
@@ -95,9 +75,6 @@ export const logger = new Proxy(baseLogger, {
   }
 })
 
-/**
- * Run a function with activation-specific logging context
- */
 export async function withActivationLogging<T>(
   channelId: string,
   messageId: string,
@@ -118,7 +95,6 @@ export async function withActivationLogging<T>(
   logger.debug({ channelId, messageId, logFile: filename }, 'Started activation logging')
   
   try {
-    // Run the function with this activation's context
     return await activationContext.run(
       { logger: activationLogger, id: activationId },
       fn
@@ -126,7 +102,6 @@ export async function withActivationLogging<T>(
   } finally {
     logger.debug({ activationId }, 'Stopped activation logging')
     
-    // Clean up
     const entry = activationLoggers.get(activationId)
     if (entry) {
       entry.stream.end()
@@ -135,27 +110,16 @@ export async function withActivationLogging<T>(
   }
 }
 
-/**
- * Legacy functions for backward compatibility (now no-ops since we use withActivationLogging)
- */
 export function startActivationLogging(_channelId: string, _messageId: string): void {
-  // No-op - using withActivationLogging instead
 }
 
 export function stopActivationLogging(): void {
-  // No-op - using withActivationLogging instead
 }
 
-/**
- * Create a child logger with additional context
- */
 export function createLogger(context: Record<string, any>) {
   return logger.child(context)
 }
 
-/**
- * Log levels for convenience
- */
 export const log = {
   trace: logger.trace.bind(logger),
   debug: logger.debug.bind(logger),

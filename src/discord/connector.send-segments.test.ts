@@ -1,15 +1,4 @@
-/**
- * Tests for DiscordConnector.sendSegmentChunks — the markdown-aware segment
- * sender used by AgentLoop. The key property: mention/emoji resolution happens
- * BEFORE the (single) markdown split, so resolution can never push a chunk past
- * the limit and trigger an unrecorded second split. Bridge metadata is returned
- * per sent message so the caller can strip it during context reconstruction.
- *
- * We instantiate a real DiscordConnector (its Client is an EventEmitter, no
- * network until .login()) and stub channel.fetch / resolve* via `as any`.
- *
- * Run with: npm test -- connector.send-segments
- */
+/** A real DiscordConnector: its Client makes no network call until .login(). */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'fs'
@@ -40,7 +29,6 @@ function makeConnector() {
     }),
   }
   ;(connector as any).client = { channels: { fetch: async () => channel } }
-  // No-op mention resolution by default; tests override resolveEmojis as needed.
   ;(connector as any).resolveMentions = async (c: string) => c
   ;(connector as any).resolveEmojis = (c: string) => c
 
@@ -69,7 +57,6 @@ describe('DiscordConnector.sendSegmentChunks', () => {
       [{ kind: 'fence', opener: '```python', closer: '```' }],
     )
     expect(chunks[0]!.bridgeOpen).toBe('```python\n')
-    // The actual sent text begins with the reopened fence.
     expect(h.sent[0]!.startsWith('```python\n')).toBe(true)
   })
 
@@ -81,8 +68,6 @@ describe('DiscordConnector.sendSegmentChunks', () => {
 
   it('splits AFTER emoji resolution: expansion past 1800 still bridges the fence', async () => {
     const { connector, sent } = h
-    // Emoji shortcode expands to a long custom-emoji tag, pushing a sub-1800
-    // pre-resolution body over the 1800 split threshold mid-fence.
     ;(connector as any).resolveEmojis = (c: string) =>
       c.replace(/:big:/g, '<:big:123456789012345678901234567890>')
     const body = 'x'.repeat(1790)
@@ -90,17 +75,13 @@ describe('DiscordConnector.sendSegmentChunks', () => {
 
     const { chunks } = await connector.sendSegmentChunks(CH, content, undefined, [])
 
-    // Resolution happened before the split → it actually crossed 1800 → 2 msgs.
     expect(chunks.length).toBeGreaterThan(1)
-    // Every sent message is a self-contained, fence-balanced render.
     for (const text of sent) {
       expect(text.length).toBeLessThanOrEqual(1800)
       expect((text.match(/```/g) || []).length % 2).toBe(0)
     }
-    // The boundary is bridged AND recorded (so context reconstruction can strip).
     expect(chunks[0]!.bridgeClose).toBeTruthy()
     expect(chunks[1]!.bridgeOpen).toBeTruthy()
-    // The shortcode was resolved before splitting (not sent verbatim).
     expect(sent.join('')).not.toContain(' :big: ')
     expect(sent.join('')).toContain('<:big:123456789012345678901234567890>')
   })
@@ -139,7 +120,6 @@ describe('DiscordConnector.sendSegmentChunks with its mention lookup', () => {
   let h: ReturnType<typeof makeConnector>
   beforeEach(() => {
     h = makeConnector()
-    // The connector's own lookup, on a server whose member search finds one Jack.
     delete (h.connector as any).resolveMentions
     const jack = { user: { id: '123', username: 'jack_h4ndle', bot: false }, displayName: 'Jack', joinedAt: new Date(0) }
     ;(h.channel as any).guild = { id: 'guild-1', members: { fetch: async () => new Collection([['123', jack]]) } }

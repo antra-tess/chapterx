@@ -1,24 +1,12 @@
-/**
- * Plugin Context Factory
- * 
- * Creates PluginStateContext instances for plugins to use.
- */
-
 import { PluginContext, PluginStateContext } from './types.js'
 import { PluginStateManager, StateScope } from './state.js'
 import { logger } from '../../utils/logger.js'
 
 export interface PluginContextFactoryParams {
   cacheDir: string
-  messageIds: string[]  // Ordered list of message IDs in context (oldest to newest)
+  messageIds: string[]
 }
 
-/**
- * Factory for creating plugin contexts with state management.
- * 
- * A single factory instance is used per agent loop execution,
- * and creates contexts for each plugin as needed.
- */
 export class PluginContextFactory {
   private stateManagers = new Map<string, PluginStateManager>()
   private cacheDir: string
@@ -31,16 +19,12 @@ export class PluginContextFactory {
     this.messageIds = params.messageIds
     this.messageIdSet = new Set(params.messageIds)
     
-    // Build position map for fast lookups
     this.messagePositions = new Map()
     for (let i = 0; i < params.messageIds.length; i++) {
       this.messagePositions.set(params.messageIds[i]!, i)
     }
   }
   
-  /**
-   * Get or create state manager for a plugin
-   */
   private getStateManager(pluginId: string): PluginStateManager {
     if (!this.stateManagers.has(pluginId)) {
       this.stateManagers.set(pluginId, new PluginStateManager(this.cacheDir, pluginId))
@@ -48,9 +32,6 @@ export class PluginContextFactory {
     return this.stateManagers.get(pluginId)!
   }
   
-  /**
-   * Create a full PluginStateContext for a plugin
-   */
   createStateContext(
     pluginId: string,
     baseContext: PluginContext,
@@ -64,12 +45,10 @@ export class PluginContextFactory {
     const stateManager = this.getStateManager(pluginId)
     const { channelId, currentMessageId } = baseContext
     
-    // Capture these for use in closures
     const messageIdSet = this.messageIdSet
     const messagePositions = this.messagePositions
     const messageIds = this.messageIds
     
-    // Determine configured scope (default to 'channel')
     const configuredScope = pluginConfig?.state_scope || 'channel'
     
     const messagesSinceId = (messageId: string | null): number => {
@@ -78,7 +57,6 @@ export class PluginContextFactory {
       const position = messagePositions.get(messageId)
       if (position === undefined) return Infinity
       
-      // Distance from end of array
       return messageIds.length - 1 - position
     }
     
@@ -108,8 +86,8 @@ export class PluginContextFactory {
             }
             return stateManager.getEpicState<T>(
               channelId,
-              null,  // Get latest state
-              messageIdSet,  // Captured from outer scope
+              null,
+              messageIdSet,
               epicReducer
             )
           
@@ -130,7 +108,6 @@ export class PluginContextFactory {
             break
           
           case 'epic':
-            // For epic, record as an event
             await stateManager.recordEpicEvent(channelId, currentMessageId, state)
             break
           
@@ -148,39 +125,31 @@ export class PluginContextFactory {
         return stateManager.getEpicState<T>(
           channelId,
           messageId,
-          messageIdSet,  // Captured from outer scope
+          messageIdSet,
           epicReducer
         )
       },
     }
   }
   
-  /**
-   * Calculate current depth for an injection based on when it was modified
-   */
   calculateCurrentDepth(
     lastModifiedAt: string | null,
     targetDepth: number
   ): number {
     if (!lastModifiedAt) {
-      return targetDepth  // Settled at target
+      return targetDepth
     }
     
     const position = this.messagePositions.get(lastModifiedAt)
     if (position === undefined) {
-      return targetDepth  // Message not in context, assume settled
+      return targetDepth
     }
     
-    // Calculate messages since modification
     const messagesSince = this.messageIds.length - 1 - position
     
-    // Depth is min of messagesSince and targetDepth
     return Math.min(messagesSince, targetDepth)
   }
   
-  /**
-   * Update message IDs (call when context changes during execution)
-   */
   updateMessageIds(messageIds: string[]): void {
     this.messageIds = messageIds
     this.messageIdSet = new Set(messageIds)
