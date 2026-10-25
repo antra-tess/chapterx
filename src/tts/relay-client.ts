@@ -72,8 +72,8 @@ export class TTSRelayClient {
 
   constructor(config: RelayClientConfig) {
     this.config = {
-      reconnectIntervalMs: 5000,
       ...config,
+      reconnectIntervalMs: config.reconnectIntervalMs ?? 5000,
     };
   }
 
