@@ -1,9 +1,3 @@
-/**
- * Tests for `.sleep` parsing + SleepState behaviour.
- *
- * Run with: npm test -- sleep
- */
-
 import { describe, it, expect, beforeEach } from 'vitest'
 import { parseSleepMessage, isSleepActive, SleepState, type SleepConnectorLike, type BotIdentity } from './sleep.js'
 import type { TrackedPin } from '../discord/connector.js'
@@ -12,8 +6,6 @@ const BOT = 'haiku45'
 const DISPLAY = 'Haiku'
 const CH = 'ch-1'
 
-// Keep existing tests ergonomic: a helper that builds a BotIdentity from the
-// two positional strings the old parseSleepMessage signature took.
 function id(botId: string, configName?: string, extra: Partial<BotIdentity> = {}): BotIdentity {
   return { botId, configName, ...extra }
 }
@@ -69,10 +61,6 @@ describe('parseSleepMessage: mention targeting', () => {
     expect(parseSleepMessage(`.sleep <@&555>\n---\n${body}`, { botId: BOT }, { mentionedRoleIds: ['555'] }, ['777'])).toBeNull()
   })
 })
-
-// ────────────────────────────────────────────────────────────────────────────
-// parseSleepMessage
-// ────────────────────────────────────────────────────────────────────────────
 
 describe('parseSleepMessage: happy paths', () => {
   it('parses a duration-only sleep', () => {
@@ -181,9 +169,6 @@ describe('parseSleepMessage: target matching', () => {
   })
 
   it('discord global-name match — handles spaces (the real-world bug)', () => {
-    // Admin writes `.sleep Opus 4.7` (the name they see in Discord).
-    // botId is `opus47`, config name is `Opus4.7` (no space) — neither matches.
-    // The Discord global name `Opus 4.7` is the one that must resolve it.
     expect(parseSleepMessage(
       `.sleep Opus 4.7\n${body}`,
       id('opus47', 'Opus4.7', { discordGlobalName: 'Opus 4.7' }),
@@ -217,14 +202,9 @@ describe('parseSleepMessage: target matching', () => {
   })
 
   it('`.sleep all` is NOT treated specially — use empty target to mean all', () => {
-    // Since `.config` never learned `all`, `.sleep` doesn't either.
     expect(parseSleepMessage(`.sleep all\n${body}`, id(BOT))).toBeNull()
   })
 })
-
-// ────────────────────────────────────────────────────────────────────────────
-// isSleepActive
-// ────────────────────────────────────────────────────────────────────────────
 
 describe('isSleepActive', () => {
   const START = Date.parse('2026-04-16T20:30:00Z')
@@ -253,8 +233,8 @@ describe('isSleepActive', () => {
 
   it('with both gates: ends at whichever trips first (count)', () => {
     const p = { startedAt: START, durationSeconds: 600, messages: 3 }
-    expect(isSleepActive(p, 2, START + 1_000)).toBe(true)    // within both
-    expect(isSleepActive(p, 3, START + 1_000)).toBe(false)   // count tripped first
+    expect(isSleepActive(p, 2, START + 1_000)).toBe(true)
+    expect(isSleepActive(p, 3, START + 1_000)).toBe(false)
   })
 
   it('with both gates: ends at whichever trips first (time)', () => {
@@ -263,10 +243,6 @@ describe('isSleepActive', () => {
     expect(isSleepActive(p, 0, START + 600_000)).toBe(false)
   })
 })
-
-// ────────────────────────────────────────────────────────────────────────────
-// SleepState
-// ────────────────────────────────────────────────────────────────────────────
 
 describe('SleepState.observeMessage', () => {
   let connector: FakeConnector
@@ -389,12 +365,12 @@ describe('SleepState.isSleeping', () => {
 
   it('count gate: active below threshold, inactive at/above', () => {
     connector.set(CH, [sleep('p1', { startedAt: '2026-04-16T20:30:00Z', messages: 3 })])
-    expect(state.isSleeping(CH, START + 1_000)).toBe(true)  // count=0
+    expect(state.isSleeping(CH, START + 1_000)).toBe(true)
     state.observeMessage(CH, 'p1')
     state.observeMessage(CH, 'p1')
-    expect(state.isSleeping(CH, START + 1_000)).toBe(true)  // count=2, still below 3
+    expect(state.isSleeping(CH, START + 1_000)).toBe(true)
     state.observeMessage(CH, 'p1')
-    expect(state.isSleeping(CH, START + 1_000)).toBe(false) // count=3, expired
+    expect(state.isSleeping(CH, START + 1_000)).toBe(false)
   })
 
   it('pin for another bot does not put this bot to sleep', () => {
@@ -416,10 +392,6 @@ describe('SleepState.isSleeping', () => {
   })
 })
 
-// ────────────────────────────────────────────────────────────────────────────
-// Semantic check: "sleep for N messages" blocks N, (N+1)th passes
-// ────────────────────────────────────────────────────────────────────────────
-
 describe('sleep semantics: N-blocked', () => {
   it('with the loop-ordering (isSleeping check BEFORE observe): N blocked, (N+1)th passes', () => {
     const connector = new FakeConnector()
@@ -427,14 +399,12 @@ describe('sleep semantics: N-blocked', () => {
     const START = Date.parse('2026-04-16T20:30:00Z')
     connector.set(CH, [sleep('p1', { startedAt: '2026-04-16T20:30:00Z', messages: 3 })])
 
-    // Simulate the loop.ts order: for each event, (1) check isSleeping, (2) observeMessage.
     const passedAt: number[] = []
     for (let i = 1; i <= 5; i++) {
       const sleeping = state.isSleeping(CH, START + 1_000)
       state.observeMessage(CH, 'p1')
       if (!sleeping) passedAt.push(i)
     }
-    // Events 1, 2, 3 should be blocked; 4 and 5 pass.
     expect(passedAt).toEqual([4, 5])
   })
 })

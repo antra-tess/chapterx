@@ -8,11 +8,6 @@ import { logger } from '../utils/logger.js'
 import { scanMarkdown } from '../utils/discord-markdown.js'
 import { ToolSystem } from '../tools/system.js'
 
-/**
- * With `scanCarry`, each send ends in the markdown carry its text leaves open
- * from the carry it starts in, as the connector's split gives it; otherwise in
- * none.
- */
 function makeLoop(toolOutput: { value: unknown } = { value: 'tool result' }, options: { scanCarry?: boolean } = {}) {
   const cacheDir = mkdtempSync(join(tmpdir(), 'agent-native-send-test-'))
   let nextMessageId = 1
@@ -124,8 +119,6 @@ describe('AgentLoop native-tool sending', () => {
       { type: 'text', text: 'First preamble. Second preamble. Final answer.' },
     ])
     expect(result.sentMessageIds).toEqual(['sent-1', 'sent-2', 'sent-3'])
-    // Each round's calls cache the prose posted in that round and cover the
-    // messages that carried it; the final answer stays uncovered.
     expect(harness.persisted()).toEqual([
       { text: 'First preamble.', covers: ['sent-1'] },
       { text: 'First preamble.', covers: ['sent-1'] },
@@ -154,8 +147,6 @@ describe('AgentLoop native-tool sending', () => {
     cleanup = harness.cleanup
 
     await harness.run(async (_request, callbacks) => {
-      // A round whose text is only markup shows nothing on Discord, so it
-      // caches nothing; the next round caches only what it showed.
       await callbacks.onPreToolContent('<thinking>Which log first?</thinking>')
       await callbacks.onToolCalls(
         [{ id: 'tool-1', name: 'lookup', input: {} }],
@@ -231,7 +222,6 @@ describe('AgentLoop native-tool sending', () => {
     cleanup = harness.cleanup
     const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
 
-    // With people labelled by display name, the model names Alice as @Alice.
     const result = await harness.run(async (_request, callbacks) => {
       await callbacks.onPreToolContent('Asking @Alice. ')
       await callbacks.onToolCalls(
@@ -247,10 +237,7 @@ describe('AgentLoop native-tool sending', () => {
     }, discordMessages, { use_display_names_humans: true })
 
     expect(harness.sent()).toEqual(['Asking <@111>.', 'Thanks, <@111>.'])
-    // The next context shows the cache as written, so it keeps the model's
-    // words, not the id that was sent.
     expect(harness.persisted()).toEqual([{ text: 'Asking @Alice.', covers: ['sent-1'] }])
-    // The response the completion returns keeps the model's words too.
     expect(result.completion.content).toEqual([{ type: 'text', text: 'Asking @Alice. Thanks, @Alice.' }])
   })
 
@@ -274,7 +261,6 @@ describe('AgentLoop native-tool sending', () => {
       }
     }, discordMessages)
 
-    // The round's post leaves the code block open, so the reply starts in it.
     expect(harness.sent()).toEqual(['Run this:\n```\nping <@alice>', 'more <@alice>\n```\nDone, <@111>.'])
     expect(result.completion.content).toEqual([
       { type: 'text', text: 'Run this:\n```\nping <@alice>\nmore <@alice>\n```\nDone, <@alice>.' },
@@ -286,11 +272,8 @@ describe('AgentLoop native-tool sending', () => {
     cleanup = harness.cleanup
     const discordMessages = [{ id: 'm-1', author: { id: '111', username: 'alice', displayName: 'Alice', bot: false }, content: 'hi' }]
 
-    // The thinking block keeps the indentation past the trim that strips tool XML;
-    // the segment's own trim takes it off.
     await harness.run(async () => done('<thinking>plan</thinking>\n    ```\ncode\n``` x\n@Alice'), discordMessages, { use_display_names_humans: true })
 
-    // Sent without its indentation, the block opens a line and nothing ends it, so @Alice is in it.
     expect(harness.sent()).toEqual(['```\ncode\n``` x\n@Alice'])
   })
 

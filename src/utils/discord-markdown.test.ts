@@ -1,21 +1,3 @@
-/**
- * Exhaustive test suite for src/utils/discord-markdown.ts
- *
- * Covers: splitPreservingMarkdown, scanMarkdown, closeMarks, reopenMarks, exclusiveOnly.
- *
- * Organisation:
- *  1. Helpers & invariant checkers
- *  2. closeMarks / reopenMarks / exclusiveOnly unit tests
- *  3. scanMarkdown unit tests
- *  4. splitPreservingMarkdown — plain-text / fast-path
- *  5. splitPreservingMarkdown — code fences
- *  6. splitPreservingMarkdown — inline code
- *  7. splitPreservingMarkdown — emphasis
- *  8. splitPreservingMarkdown — nesting & ordering
- *  9. splitPreservingMarkdown — startCarry continuation
- * 10. splitPreservingMarkdown — edge cases
- */
-
 import { describe, it, expect } from 'vitest'
 import {
   splitPreservingMarkdown,
@@ -29,11 +11,6 @@ import {
   type OpenMark,
 } from './discord-markdown.js'
 
-// ---------------------------------------------------------------------------
-// 1. Shared helpers
-// ---------------------------------------------------------------------------
-
-/** Strip bridge strings from every chunk and concatenate — must equal original. */
 function reconstruct(chunks: ChunkPiece[]): string {
   return chunks
     .map((c) => {
@@ -45,14 +22,12 @@ function reconstruct(chunks: ChunkPiece[]): string {
     .join('')
 }
 
-/** Every chunk's text must be <= maxLength. */
 function assertAllWithinLimit(chunks: ChunkPiece[], maxLength: number): void {
   for (const c of chunks) {
     expect(c.text.length).toBeLessThanOrEqual(maxLength)
   }
 }
 
-/** Count (non-overlapping) occurrences of needle in haystack. */
 function countOccurrences(haystack: string, needle: string): number {
   let n = 0
   let pos = 0
@@ -63,10 +38,6 @@ function countOccurrences(haystack: string, needle: string): number {
   return n
 }
 
-// ---------------------------------------------------------------------------
-// 2. closeMarks / reopenMarks / exclusiveOnly
-// ---------------------------------------------------------------------------
-
 describe('closeMarks', () => {
   it('returns empty string for empty stack', () => {
     expect(closeMarks([])).toBe('')
@@ -74,7 +45,6 @@ describe('closeMarks', () => {
 
   it('closes a simple fence (adds leading newline)', () => {
     const stack: MarkdownCarry = [{ kind: 'fence', opener: '```bash', closer: '```' }]
-    // closeMarks with a non-newline-terminated body will prepend \n
     const result = closeMarks(stack)
     expect(result).toBe('\n```')
   })
@@ -84,7 +54,6 @@ describe('closeMarks', () => {
       { kind: 'bold', opener: '**', closer: '**' },
       { kind: 'italic', opener: '*', closer: '*' },
     ]
-    // innermost = italic (index 1) → close * first then **
     expect(closeMarks(stack)).toBe('***')
   })
 
@@ -114,7 +83,6 @@ describe('reopenMarks', () => {
       { kind: 'bold', opener: '**', closer: '**' },
       { kind: 'italic', opener: '*', closer: '*' },
     ]
-    // outermost = bold (index 0) → reopen ** first then *
     expect(reopenMarks(stack)).toBe('***')
   })
 
@@ -157,10 +125,6 @@ describe('exclusiveOnly', () => {
     expect(result[0]!.kind).toBe('fence')
   })
 })
-
-// ---------------------------------------------------------------------------
-// 3. scanMarkdown
-// ---------------------------------------------------------------------------
 
 describe('scanMarkdown', () => {
   it('returns empty for plain text', () => {
@@ -248,17 +212,12 @@ describe('scanMarkdown', () => {
   it('backtick with backtick in info string is NOT a fence opener', () => {
     // ```foo`bar  — info contains backtick, invalid fence
     const carry = scanMarkdown('```foo`bar\ncode')
-    // Should see inlineCode for ```, not a fence
-    // The ``` tries to open fence but info has backtick → rejected
-    // Then ``` at line start with invalid info → falls to inline code
-    // Let's just assert it doesn't open a fence
     expect(carry.every((m) => m.kind !== 'fence')).toBe(true)
   })
 
   it('closing fence with info string is NOT a valid closer', () => {
     // A closing fence with trailing content (not whitespace) does NOT close the fence
     const carry = scanMarkdown('```\ncode\n``` not-a-close')
-    // The "``` not-a-close" line has non-whitespace after the marker → not a valid close
     expect(carry).toHaveLength(1)
     expect(carry[0]!.kind).toBe('fence')
   })
@@ -279,7 +238,6 @@ describe('scanMarkdown', () => {
   it('scanMarkdown with startCarry', () => {
     const startCarry = scanMarkdown('```python\nprint(1)')
     expect(startCarry[0]!.kind).toBe('fence')
-    // Continue: provide the closing line
     const carry2 = scanMarkdown('print(2)\n```\ndone', startCarry)
     expect(carry2).toEqual([])
   })
@@ -306,10 +264,6 @@ describe('scanMarkdown', () => {
     expect(carry).toEqual([])
   })
 })
-
-// ---------------------------------------------------------------------------
-// 4. splitPreservingMarkdown — plain text / fast path
-// ---------------------------------------------------------------------------
 
 describe('splitPreservingMarkdown — plain text', () => {
   it('empty string → single empty chunk', () => {
@@ -367,10 +321,6 @@ describe('splitPreservingMarkdown — plain text', () => {
     expect(reconstruct(r.chunks)).toBe(text)
   })
 })
-
-// ---------------------------------------------------------------------------
-// 5. splitPreservingMarkdown — code fences
-// ---------------------------------------------------------------------------
 
 describe('splitPreservingMarkdown — code fences', () => {
   it('short fence fits in one chunk → no split, no bridge', () => {
@@ -449,17 +399,14 @@ describe('splitPreservingMarkdown — code fences', () => {
   })
 
   it('backtick fence with backtick in info string is NOT a valid opener', () => {
-    // ```foo`bar is rejected as fence opener
     const text = '```foo`bar\ncode line\n```'
     const r = splitPreservingMarkdown(text, 500)
-    // There should be no fence carry since it's not a valid fence
     expect(r.endCarry.every((m) => m.kind !== 'fence')).toBe(true)
   })
 
   it('closing fence with info string is NOT a valid closer — fence stays open', () => {
     const text = '```\ncode\n``` extra'
     const r = splitPreservingMarkdown(text, 500)
-    // The fence is still open (closer has non-whitespace trailing)
     expect(r.endCarry.some((m) => m.kind === 'fence')).toBe(true)
   })
 
@@ -475,7 +422,6 @@ describe('splitPreservingMarkdown — code fences', () => {
     const text = '~~~\n' + body + '~~~'
     const r = splitPreservingMarkdown(text, 80)
     expect(reconstruct(r.chunks)).toBe(text)
-    // All chunks should use ~~~ for bridging, not ```
     for (const c of r.chunks) {
       if (c.bridgeOpen) {
         expect(c.bridgeOpen).toBe('~~~\n')
@@ -512,7 +458,6 @@ describe('splitPreservingMarkdown — code fences', () => {
     const r = splitPreservingMarkdown(text, 100)
     for (const c of r.chunks) {
       if (c.bridgeClose) {
-        // bridgeClose for a fence should end with the marker
         expect(c.bridgeClose.trimEnd().endsWith('```')).toBe(true)
       }
     }
@@ -527,10 +472,6 @@ describe('splitPreservingMarkdown — code fences', () => {
   })
 
   it('split exactly at the opener line boundary respects the limit', () => {
-    // Regression: the budget loop must size each chunk against the ACTUAL closer
-    // (closeMarksForBody, which skips a leading '\n' when the body already ends
-    // with one) rather than closeMarks (which always prepends '\n'). Otherwise a
-    // fence cut at a newline boundary overflows maxLength by 1.
     const body = 'code\n'.repeat(3)
     const text = '```\n' + body + '```'
     const r = splitPreservingMarkdown(text, 9)
@@ -551,7 +492,6 @@ describe('splitPreservingMarkdown — code fences', () => {
     const r = splitPreservingMarkdown(text, 100)
     expect(reconstruct(r.chunks)).toBe(text)
     assertAllWithinLimit(r.chunks, 100)
-    // Last chunk (or the one after fence) should not be fenced
     const lastChunk = r.chunks[r.chunks.length - 1]!
     expect(lastChunk.text).toContain('AfterText')
     expect(r.endCarry).toEqual([])
@@ -576,14 +516,9 @@ describe('splitPreservingMarkdown — code fences', () => {
     const text = '```\ncode without final newline```'
     // The closing ``` is NOT on its own line here, so fence stays open
     const r = splitPreservingMarkdown(text, 500)
-    // fence is unclosed because ``` is mid-line
     expect(r.endCarry.some((m) => m.kind === 'fence')).toBe(true)
   })
 })
-
-// ---------------------------------------------------------------------------
-// 6. splitPreservingMarkdown — inline code
-// ---------------------------------------------------------------------------
 
 describe('splitPreservingMarkdown — inline code', () => {
   it('short inline code fits in one chunk — no split', () => {
@@ -613,7 +548,6 @@ describe('splitPreservingMarkdown — inline code', () => {
     // `` opened, closed by single ` — should NOT close it
     const text = '``code`rest'
     const r = splitPreservingMarkdown(text, 200)
-    // The `` is still open (single ` inside doesn't close it)
     expect(r.endCarry.some((m) => m.kind === 'inlineCode')).toBe(true)
   })
 
@@ -651,10 +585,6 @@ describe('splitPreservingMarkdown — inline code', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// 7. splitPreservingMarkdown — emphasis
-// ---------------------------------------------------------------------------
-
 describe('splitPreservingMarkdown — emphasis', () => {
   it('matched bold → no endCarry', () => {
     const r = splitPreservingMarkdown('**bold**', 1000)
@@ -686,13 +616,11 @@ describe('splitPreservingMarkdown — emphasis', () => {
 
   it('italic (*) split — bridges correctly in each chunk', () => {
     // NOTE: closing * must NOT be preceded by whitespace (would make it non-right-flanking)
-    // Use join(' ') to avoid trailing space before closing *
     const text = '*' + Array.from({ length: 60 }, (_, i) => `word${i}`).join(' ') + '*'
     const r = splitPreservingMarkdown(text, 100)
     expect(r.chunks.length).toBeGreaterThan(1)
     expect(reconstruct(r.chunks)).toBe(text)
     assertAllWithinLimit(r.chunks, 100)
-    // Each chunk should have balanced * (from bridge)
     for (const c of r.chunks) {
       const n = countOccurrences(c.text, '*')
       expect(n % 2).toBe(0)
@@ -772,17 +700,9 @@ describe('splitPreservingMarkdown — emphasis', () => {
   })
 
   it('right-flanking ** with whitespace before — NOT a valid closer', () => {
-    // "** close" — the ** has a space before it (after), so it is NOT right-flanking
-    // The ** before is left-flanking (nothing before), this ** has space before → not a match
-    // Actually: "bold **" trailing space means ** may not be a closer
-    // The text: **bold ** — the closer "**" has a space immediately before it (word char?)
-    // Let's test a clear case: opening with no close
     const carry = scanMarkdown('**bold  **')
     // "  **" — two spaces before **, so before = ' ' which is whitespace → not right-flanking → not a closer
     // So **bold  ** should NOT close the bold
-    // (checking the implementation behavior)
-    // The opening ** sees: before=undefined (start), after='b' → canOpen=true
-    // The closing ** sees: before=' ' → canClose = !isWhitespace(' ') = false → not a closer
     expect(carry.some((m) => m.kind === 'bold')).toBe(true)
   })
 
@@ -803,13 +723,11 @@ describe('splitPreservingMarkdown — emphasis', () => {
 
   it('lone ~ (not ~~) is literal', () => {
     const carry = scanMarkdown('~single tilde~')
-    // ~ with len=1 has no kind in EMPHASIS_BY_CHAR → literal
     expect(carry).toEqual([])
   })
 
   it('lone | is literal', () => {
     const carry = scanMarkdown('|single pipe|')
-    // | with len=1 has no kind → literal
     expect(carry).toEqual([])
   })
 
@@ -830,8 +748,6 @@ describe('splitPreservingMarkdown — emphasis', () => {
   })
 
   it('italic inside bold split — bridgeClose closes italic first', () => {
-    // **bold *italic* back**
-    // If split inside *italic*, close * before **
     const text = '**bold ' + '*italic '.repeat(10) + '* back**'
     const r = splitPreservingMarkdown(text, 40)
     expect(reconstruct(r.chunks)).toBe(text)
@@ -839,27 +755,19 @@ describe('splitPreservingMarkdown — emphasis', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// 8. Nesting & ordering of close/reopen
-// ---------------------------------------------------------------------------
-
 describe('splitPreservingMarkdown — nesting and ordering', () => {
   it('nested bold+italic: close inner first, reopen outer first', () => {
-    // **bold _italic_** — if split mid-italic, bridgeClose should be "_**" and bridgeOpen should be "**_"
     const text = '**bold _' + 'w '.repeat(30) + '_back**'
     const r = splitPreservingMarkdown(text, 60)
     expect(reconstruct(r.chunks)).toBe(text)
     assertAllWithinLimit(r.chunks, 60)
-    // Check ordering on a chunk that has both open
     for (const c of r.chunks) {
       if (c.bridgeClose && c.bridgeOpen) {
-        // bridgeClose: innermost first (italic before bold)
         const closeIdx_italic = c.bridgeClose.indexOf('_')
         const closeIdx_bold = c.bridgeClose.indexOf('**')
         if (closeIdx_italic !== -1 && closeIdx_bold !== -1) {
           expect(closeIdx_italic).toBeLessThan(closeIdx_bold)
         }
-        // bridgeOpen: outermost first (bold before italic)
         const openIdx_bold = c.bridgeOpen.indexOf('**')
         const openIdx_italic = c.bridgeOpen.indexOf('_')
         if (openIdx_bold !== -1 && openIdx_italic !== -1) {
@@ -882,7 +790,6 @@ describe('splitPreservingMarkdown — nesting and ordering', () => {
     const r = splitPreservingMarkdown(text, 80)
     expect(reconstruct(r.chunks)).toBe(text)
     for (const c of r.chunks) {
-      // No emphasis-type bridge — only fence bridges allowed
       if (c.bridgeOpen) expect(c.bridgeOpen).toMatch(/^(`{3,}|~{3,})/)
       if (c.bridgeClose) expect(c.bridgeClose.trim()).toMatch(/^(`{3,}|~{3,})$/)
     }
@@ -895,10 +802,6 @@ describe('splitPreservingMarkdown — nesting and ordering', () => {
     assertAllWithinLimit(r.chunks, 80)
   })
 })
-
-// ---------------------------------------------------------------------------
-// 9. startCarry continuation
-// ---------------------------------------------------------------------------
 
 describe('splitPreservingMarkdown — startCarry', () => {
   it('inherited fence carry — first chunk prepends reopener', () => {
@@ -925,7 +828,6 @@ describe('splitPreservingMarkdown — startCarry', () => {
   })
 
   it('inherited fence carry — budget accounts for reopener length', () => {
-    // reopener is "```bash\n" (8 chars); with maxLength=50, first chunk body ≤ 42
     const carry = scanMarkdown('```bash\n')
     const text = 'x'.repeat(100)
     const r = splitPreservingMarkdown(text, 50, carry)
@@ -963,10 +865,6 @@ describe('splitPreservingMarkdown — startCarry', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// 10. Edge cases
-// ---------------------------------------------------------------------------
-
 describe('splitPreservingMarkdown — edge cases', () => {
   it('text is only newlines', () => {
     const text = '\n\n\n\n\n'
@@ -976,7 +874,6 @@ describe('splitPreservingMarkdown — edge cases', () => {
   })
 
   it('maxLength of 4 — still produces chunks without stalling', () => {
-    // Very small maxLength to test the guard-against-stall path
     const text = 'abcde'
     const r = splitPreservingMarkdown(text, 4)
     expect(reconstruct(r.chunks)).toBe(text)
@@ -992,7 +889,6 @@ describe('splitPreservingMarkdown — edge cases', () => {
   })
 
   it('no markdown fast path: hasNoDelimiters → single chunk', () => {
-    // Text with no backtick, asterisk, underscore, tilde, pipe, or backslash
     const text = 'Hello world! This is a plain sentence. 12345 abc DEF.'
     const r = splitPreservingMarkdown(text, 1000)
     expect(r.chunks).toHaveLength(1)
@@ -1014,7 +910,6 @@ describe('splitPreservingMarkdown — edge cases', () => {
   it('a single very long line inside a fence — hard-splits but each piece is fenced', () => {
     const longLine = 'x'.repeat(100)
     const text = '```\n' + longLine + '\n```'
-    // maxLength=40: overhead is "```\n" (4) + "\n```" (4) = 8, leaving 32 chars per chunk
     const r = splitPreservingMarkdown(text, 40)
     expect(reconstruct(r.chunks)).toBe(text)
     assertAllWithinLimit(r.chunks, 40)
@@ -1044,10 +939,6 @@ describe('splitPreservingMarkdown — edge cases', () => {
   })
 
   it('text with all emphasis kinds back to back respects the limit', () => {
-    // Regression: when avoidDelimiterBisect pulls `cut` back to a construct's
-    // contentEnd it adds that construct's closer to the stack; the budget loop
-    // re-derives the close-stack at the FINAL cut so those closer chars are
-    // always counted and no chunk exceeds maxLength.
     const text = '**bold** _italic_ __under__ ~~strike~~ ||spoiler|| ***bi***'
     const r = splitPreservingMarkdown(text, 20)
     expect(reconstruct(r.chunks)).toBe(text)
@@ -1071,7 +962,7 @@ describe('splitPreservingMarkdown — edge cases', () => {
   it('fence with 1-3 spaces of indent is still a valid fence opener', () => {
     const text = '  ```\ncode\n```'
     const r = splitPreservingMarkdown(text, 1000)
-    expect(r.endCarry).toEqual([]) // closed
+    expect(r.endCarry).toEqual([])
   })
 
   it('fence with 4 spaces of indent is NOT a valid fence opener', () => {
@@ -1079,7 +970,6 @@ describe('splitPreservingMarkdown — edge cases', () => {
     const text = '    ```\ncode\n```'
     const r = splitPreservingMarkdown(text, 1000)
     // The ``` with 4 spaces prefix is not a fence opener in CommonMark
-    // The last ``` without indent is not a fence closer (no open fence)
     expect(r.endCarry.every((m) => m.kind !== 'fence')).toBe(true)
   })
 
@@ -1106,8 +996,6 @@ describe('splitPreservingMarkdown — edge cases', () => {
       expect(reconstruct(r.chunks)).toBe(ch)
     }
   })
-  // A chunk with no content, only whitespace or a construct's markers, is a
-  // message with nothing in it to show.
   it('sends a paragraph break between two full chunks at the start of the next one', () => {
     const text = 'x'.repeat(1800) + '\n\n' + 'y'.repeat(1800)
     const r = splitPreservingMarkdown(text, 1800)
@@ -1153,9 +1041,6 @@ describe('splitPreservingMarkdown — edge cases', () => {
   })
 
   it('keeps a closer and the whitespace after it with the text\'s last content', () => {
-    // Bold or a code block that ends with the text's content, then a paragraph
-    // break: the last chunk takes some of that content, not just the closer
-    // and the break, which would be an empty bold or an empty code block.
     for (const text of ['**' + 'a'.repeat(1796) + '**\n\n', '```\n' + 'a'.repeat(1792) + '\n```\n\n']) {
       const r = splitPreservingMarkdown(text, 1800)
       for (const c of r.chunks) expect(c.text).toContain('a')
@@ -1165,9 +1050,6 @@ describe('splitPreservingMarkdown — edge cases', () => {
   })
 
   it('keeps the last content with trailing blank lines when the closer makes the last window too long', () => {
-    // The whole text fits the window, but not with the closer an unclosed fence
-    // needs at the end, so the chunk shrinks to fit: the blank lines and the
-    // closer must not end up in a chunk of their own, an empty code block.
     const text = '```\n' + 'a'.repeat(1790) + '\n'.repeat(5)
     const r = splitPreservingMarkdown(text, 1800)
     expect(r.chunks.length).toBeGreaterThan(1)
@@ -1181,8 +1063,6 @@ describe('splitPreservingMarkdown — edge cases', () => {
   })
 
   it('splits a text whose only content is its first character, then more whitespace than a chunk holds', () => {
-    // Nothing can keep the trailing whitespace with content here; the split
-    // still ends, with the content in the first chunk.
     const text = 'z' + '\n'.repeat(2000)
     const r = splitPreservingMarkdown(text, 1800)
     expect(r.chunks[0]!.text.startsWith('z')).toBe(true)
@@ -1196,10 +1076,6 @@ describe('splitPreservingMarkdown — edge cases', () => {
     expect(r.chunks.map((c) => c.text)).toEqual(['x'.repeat(900) + '\n\n', 'y'.repeat(1800)])
   })
 })
-
-// ---------------------------------------------------------------------------
-// 11. Invariant stress tests
-// ---------------------------------------------------------------------------
 
 describe('splitPreservingMarkdown — stress / invariants', () => {
   it('invariant: every chunk <= maxLength for mixed content', () => {
@@ -1256,50 +1132,34 @@ describe('splitPreservingMarkdown — stress / invariants', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// 11. Cross-send continuity (the reported bug)
-// ---------------------------------------------------------------------------
-// A fence opened before a tool call and continued after it spans two
-// independent sends (a streaming pre-tool flush, then the final send).
-// AgentLoop.sendSegments threads endCarry → startCarry across the two; this
-// models that threading at the utility level.
 describe('splitPreservingMarkdown — cross-send continuity', () => {
   it('keeps the fence balanced across two separate sends', () => {
     const preTool = 'Here are the flags:\n```bash\n--disable-blink-features=AutomationControlled'
     const postTool = '--password-store=basic\n```\nThat avoids keyring weirdness.'
 
     const r1 = splitPreservingMarkdown(preTool, 1750, [])
-    const carry = exclusiveOnly(r1.endCarry) // only exclusive constructs cross a send boundary
+    const carry = exclusiveOnly(r1.endCarry)
     expect(carry.map((m) => m.kind)).toEqual(['fence'])
     const r2 = splitPreservingMarkdown(postTool, 1750, carry)
 
     const all = [...r1.chunks, ...r2.chunks]
-    // Every Discord message renders with a balanced fence count.
     for (const c of all) {
       expect((c.text.match(/```/g) || []).length % 2).toBe(0)
     }
-    // The second send reopens the fence the first one closed.
     expect(r2.chunks[0]!.text.startsWith('```bash\n')).toBe(true)
     expect(r2.chunks[0]!.bridgeOpen).toBe('```bash\n')
-    // Context reconstruction strips the synthetic bridges back to the original.
     expect(reconstruct(all)).toBe(preTool + postTool)
   })
 
   it('drops dangling emphasis at a send boundary (not carried)', () => {
     const r = splitPreservingMarkdown('this is **bold', 1750, [])
     expect(r.endCarry.map((m) => m.kind)).toEqual(['bold'])
-    expect(exclusiveOnly(r.endCarry)).toEqual([]) // emphasis does not cross a send
+    expect(exclusiveOnly(r.endCarry)).toEqual([])
   })
 })
 
-// ---------------------------------------------------------------------------
-// 12. Regression: fuzz-found defects
-// ---------------------------------------------------------------------------
-
-/** Run-merging delimiter chars (backslash escapes, so it is excluded). */
 const SEAM_CHARS = new Set(['`', '~', '*', '_', '|'])
 
-/** Strip the bridges from a chunk to recover its original body slice. */
 function bodyOf(c: ChunkPiece): string {
   let t = c.text
   if (c.bridgeOpen && t.startsWith(c.bridgeOpen)) t = t.slice(c.bridgeOpen.length)
@@ -1307,11 +1167,6 @@ function bodyOf(c: ChunkPiece): string {
   return t
 }
 
-/**
- * Assert no chunk fuses a synthetic bridge with an identical delimiter run in
- * the adjacent body (defect 2): the reopener's last char must differ from the
- * body's first char, and the closer's first char from the body's last char.
- */
 function assertNoSeamMerge(chunks: ChunkPiece[]): void {
   for (const c of chunks) {
     const body = bodyOf(c)
@@ -1345,7 +1200,6 @@ describe('splitPreservingMarkdown — defect 1: giant fence reopener', () => {
     const r = splitPreservingMarkdown(text, 120)
     assertAllWithinLimit(r.chunks, 120)
     expect(reconstruct(r.chunks)).toBe(text)
-    // Any fence reopener is the marker + a single info word, never the verbatim line.
     for (const c of r.chunks) {
       if (c.bridgeOpen && c.bridgeOpen.startsWith('```')) {
         expect(c.bridgeOpen).not.toContain(' ')
@@ -1371,7 +1225,6 @@ describe('splitPreservingMarkdown — defect 2: bridge/body delimiter-run merge 
     assertAllWithinLimit(r.chunks, 80)
     expect(reconstruct(r.chunks)).toBe(text)
     assertNoSeamMerge(r.chunks)
-    // No chunk starts a spurious double-backtick run from bridge + body.
     for (const c of r.chunks) expect(c.text).not.toContain('``x')
   })
 
@@ -1393,9 +1246,6 @@ describe('splitPreservingMarkdown — defect 2: bridge/body delimiter-run merge 
   })
 
   it('final chunk does not fuse an inline-code closer with trailing body backticks', () => {
-    // Unclosed inline code whose original content ends in backticks: Discord
-    // already renders it literally, so the final chunk leaves it open rather
-    // than emitting a closer that would fuse into a longer backtick run.
     const text = '**bold**``````the lorem ' + 'ipsum'.repeat(50) + '**bold**```'
     const r = splitPreservingMarkdown(text, 2000)
     expect(reconstruct(r.chunks)).toBe(text)
@@ -1464,7 +1314,6 @@ describe('codeRanges', () => {
   it('runs a block or span nothing closes to the end of the text, where the splitter closes it', () => {
     expect(codeIn('a ` b ```\nc')).toEqual(['` b ```\nc'])
     expect(codeIn('a\n```\nc')).toEqual(['```\nc'])
-    // The splitter's last chunk closes the span it leaves open.
     const { chunks } = splitPreservingMarkdown('a ` b', 1800)
     expect(chunks.map((c) => c.text)).toEqual(['a ` b`'])
   })
@@ -1480,8 +1329,6 @@ describe('codeRanges', () => {
     expect(codeIn('k\n```\nThanks', [{ kind: 'fence', opener: '```py', closer: '```' }])).toEqual(['k\n```'])
     expect(codeIn('x` y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`'])
     expect(codeIn('x` y `z` w', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['x`', '`z`'])
-    // The reopener fuses with a backtick the text starts with: the splitter sends ``x @J ``,
-    // and its own parse, with the span open, reads the "``" before "y" as an opener.
     expect(codeIn('`x @J ``y', [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toEqual(['`x @J ``y'])
     const { chunks } = splitPreservingMarkdown('`x @J ``y', 1800, [{ kind: 'inlineCode', opener: '`', closer: '`' }])
     expect(chunks[0]!.text.startsWith('``x @J ``')).toBe(true)

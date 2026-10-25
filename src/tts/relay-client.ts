@@ -1,18 +1,7 @@
-/**
- * TTS Relay Client
- *
- * Connects ChapterX bots to the TTS relay server for streaming text
- * to local TTS clients (Melodeus).
- */
-
 import WebSocket from 'ws';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger({ module: 'tts-relay' });
-
-// ============================================================================
-// Types
-// ============================================================================
 
 export type BlockType = 'text' | 'thinking' | 'tool_call' | 'tool_result';
 export type InterruptionReason = 'user_speech' | 'manual' | 'timeout';
@@ -68,14 +57,10 @@ export interface ActivationEndPayload {
 
 export interface InterruptionEvent {
   channelId: string;
-  spokenText: string;       // The text that was voiced - match against recent messages
+  spokenText: string;
   reason: InterruptionReason;
   timestamp: number;
 }
-
-// ============================================================================
-// Relay Client
-// ============================================================================
 
 export class TTSRelayClient {
   private config: Required<RelayClientConfig>;
@@ -92,9 +77,6 @@ export class TTSRelayClient {
     };
   }
 
-  /**
-   * Connect to the relay server
-   */
   async connect(): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN) {
       logger.debug('Already connected to relay');
@@ -105,9 +87,6 @@ export class TTSRelayClient {
     return this.doConnect();
   }
 
-  /**
-   * Disconnect from the relay server
-   */
   disconnect(): void {
     this.shouldReconnect = false;
     this.clearReconnectTimer();
@@ -121,23 +100,14 @@ export class TTSRelayClient {
     logger.info({ botId: this.config.botId }, 'Disconnected from relay');
   }
 
-  /**
-   * Check if connected and authenticated
-   */
   isConnected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN && this.authenticated;
   }
 
-  /**
-   * Set handler for interruption events from TTS clients
-   */
   onInterruption(handler: (event: InterruptionEvent) => void): void {
     this.onInterruptionHandler = handler;
   }
 
-  /**
-   * Send a text chunk to the relay
-   */
   sendChunk(payload: ChunkPayload): void {
     if (!this.isConnected()) {
       logger.debug('Cannot send chunk: not connected');
@@ -154,9 +124,6 @@ export class TTSRelayClient {
     this.send(message);
   }
 
-  /**
-   * Send a block_start event to the relay
-   */
   sendBlockStart(payload: BlockStartPayload): void {
     if (!this.isConnected()) {
       logger.debug('Cannot send block_start: not connected');
@@ -173,9 +140,6 @@ export class TTSRelayClient {
     this.send(message);
   }
 
-  /**
-   * Send a block_complete event to the relay
-   */
   sendBlockComplete(payload: BlockCompletePayload): void {
     if (!this.isConnected()) {
       logger.debug('Cannot send block_complete: not connected');
@@ -192,10 +156,6 @@ export class TTSRelayClient {
     this.send(message);
   }
 
-  /**
-   * Send activation_start event to the relay
-   * Called when bot begins processing a message (thinking animation/sound)
-   */
   sendActivationStart(payload: ActivationPayload): void {
     if (!this.isConnected()) {
       logger.debug('Cannot send activation_start: not connected');
@@ -213,10 +173,6 @@ export class TTSRelayClient {
     logger.debug({ channelId: payload.channelId }, 'Sent activation_start');
   }
 
-  /**
-   * Send activation_end event to the relay
-   * Called when bot finishes processing (complete, abort, or error)
-   */
   sendActivationEnd(payload: ActivationEndPayload): void {
     if (!this.isConnected()) {
       logger.debug('Cannot send activation_end: not connected');
@@ -233,10 +189,6 @@ export class TTSRelayClient {
     this.send(message);
     logger.debug({ channelId: payload.channelId, reason: payload.reason }, 'Sent activation_end');
   }
-
-  // ============================================================================
-  // Private Methods
-  // ============================================================================
 
   private async doConnect(): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -321,7 +273,7 @@ export class TTSRelayClient {
       case 'auth_error':
         clearTimeout(connectTimeout);
         logger.error({ error: message.error }, 'Relay authentication failed');
-        this.shouldReconnect = false; // Don't reconnect on auth failure
+        this.shouldReconnect = false;
         onConnectFailed(new Error(message.error));
         break;
 
@@ -372,7 +324,6 @@ export class TTSRelayClient {
     this.reconnectTimer = setTimeout(() => {
       logger.info({ botId: this.config.botId }, 'Attempting to reconnect to relay');
       this.doConnect().catch(() => {
-        // Error already logged, reconnect will be scheduled
       });
     }, this.config.reconnectIntervalMs);
   }

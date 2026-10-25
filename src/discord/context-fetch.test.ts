@@ -1,12 +1,3 @@
-/**
- * Tests for the context fetch pipeline.
- *
- * These test the extracted, standalone functions in context-fetch.ts
- * using mocked FetchDeps — no Discord.js client or push cache needed.
- *
- * Run with: npm test -- context-fetch
- */
-
 import { describe, it, expect } from 'vitest'
 import { MessageType, type Message, type TextChannel } from 'discord.js'
 import {
@@ -25,16 +16,10 @@ const GUILD_ID = '800000000000000001'
 const CH1_ID = '100000000000000001'
 const CH2_ID = '100000000000000002'
 
-/** Build a Discord message URL from numeric IDs. */
 function discordUrl(channelId: string, messageId: string, guildId = GUILD_ID): string {
   return `https://discord.com/channels/${guildId}/${channelId}/${messageId}`
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Test helpers
-// ────────────────────────────────────────────────────────────────────────────
-
-/** Create a mock Message with minimal fields needed by the fetch pipeline. */
 function msg(id: string, content: string, opts?: {
   authorId?: string
   memberRoles?: string[]
@@ -63,7 +48,6 @@ function msg(id: string, content: string, opts?: {
   } as unknown as Message
 }
 
-/** Create a mock TextChannel. */
 function channel(id: string): TextChannel {
   return {
     id,
@@ -72,11 +56,6 @@ function channel(id: string): TextChannel {
   } as unknown as TextChannel
 }
 
-/**
- * Create mock FetchDeps backed by in-memory message arrays.
- *
- * Channels is a map of channelId → Message[] (in any order — will be sorted internally).
- */
 function createMockDeps(
   channels: Record<string, Message[]>,
   botUserId: string = BOT_ID,
@@ -90,7 +69,7 @@ function createMockDeps(
       let startIdx = 0
       if (opts.before) {
         startIdx = sorted.findIndex(m => m.id < opts.before!)
-        if (startIdx === -1) return [] // All messages are newer than cursor
+        if (startIdx === -1) return []
       }
       return sorted.slice(startIdx, startIdx + opts.limit)
     },
@@ -110,10 +89,6 @@ function createMockDeps(
     botUserId,
   }
 }
-
-// ────────────────────────────────────────────────────────────────────────────
-// parseHistoryCommand
-// ────────────────────────────────────────────────────────────────────────────
 
 describe('parseHistoryCommand', () => {
   it('returns null for bare .history (clear)', () => {
@@ -170,10 +145,6 @@ describe('parseHistoryCommand', () => {
   })
 })
 
-// ────────────────────────────────────────────────────────────────────────────
-// URL extraction helpers
-// ────────────────────────────────────────────────────────────────────────────
-
 describe('extractMessageIdFromUrl', () => {
   it('extracts message ID from standard Discord URL', () => {
     expect(extractMessageIdFromUrl('https://discord.com/channels/111/222/333')).toBe('333')
@@ -203,10 +174,6 @@ describe('extractChannelIdFromUrl', () => {
     expect(extractChannelIdFromUrl('not-a-url')).toBeNull()
   })
 })
-
-// ────────────────────────────────────────────────────────────────────────────
-// fetchChannelMessages — basic fetch (no .history)
-// ────────────────────────────────────────────────────────────────────────────
 
 describe('fetchChannelMessages — basic fetch', () => {
   const CH = CH1_ID
@@ -295,10 +262,6 @@ describe('fetchChannelMessages — basic fetch', () => {
   })
 })
 
-// ────────────────────────────────────────────────────────────────────────────
-// fetchChannelMessages — .history clear
-// ────────────────────────────────────────────────────────────────────────────
-
 describe('fetchChannelMessages — .history clear', () => {
   const CH = CH1_ID
 
@@ -360,9 +323,9 @@ describe('fetchChannelMessages — .history clear', () => {
     const deps = createMockDeps({
       [CH]: [
         msg('1', 'ancient'),
-        msg('2', '.history'),   // older — should be ignored
+        msg('2', '.history'),
         msg('3', 'between'),
-        msg('4', '.history'),   // newer — should win
+        msg('4', '.history'),
         msg('5', 'after'),
         msg('6', 'trigger'),
       ],
@@ -390,10 +353,6 @@ describe('fetchChannelMessages — .history clear', () => {
     expect(result.messages.map(m => m.id)).toEqual(['3', '4', '5', '6'])
   })
 })
-
-// ────────────────────────────────────────────────────────────────────────────
-// fetchChannelMessages — .history bot targeting
-// ────────────────────────────────────────────────────────────────────────────
 
 describe('fetchChannelMessages — .history bot targeting', () => {
   const CH = CH1_ID
@@ -424,7 +383,6 @@ describe('fetchChannelMessages — .history bot targeting', () => {
     }, BOT_ID)
 
     const result = await fetchChannelMessages(ch, '3', undefined, 100, [], false, deps)
-    // .history was skipped — all messages present (minus .history msg itself which is skipped via continue)
     expect(result.messages.map(m => m.id)).toEqual(['1', '3'])
     expect(result.didClear).toBe(false)
   })
@@ -434,16 +392,15 @@ describe('fetchChannelMessages — .history bot targeting', () => {
     const deps = createMockDeps({
       [CH]: [
         msg('1', 'very old'),
-        msg('2', '.history'),                          // bare — applies to all bots
+        msg('2', '.history'),
         msg('3', 'between'),
-        msg('4', `.history <@${OTHER_BOT_ID}>`),       // newer but for different bot — skipped
+        msg('4', `.history <@${OTHER_BOT_ID}>`),
         msg('5', 'after'),
         msg('6', 'trigger'),
       ],
     }, BOT_ID)
 
     const result = await fetchChannelMessages(ch, '6', undefined, 100, [], false, deps)
-    // .history @other is skipped, then bare .history at id=2 is found
     expect(result.messages.map(m => m.id)).toEqual(['3', '5', '6'])
     expect(result.didClear).toBe(true)
   })
@@ -463,10 +420,6 @@ describe('fetchChannelMessages — .history bot targeting', () => {
   })
 })
 
-// ────────────────────────────────────────────────────────────────────────────
-// fetchChannelMessages — .history range
-// ────────────────────────────────────────────────────────────────────────────
-
 describe('fetchChannelMessages — .history range', () => {
   it('fetches from linked channel and prepends to newer messages', async () => {
     const ch = channel(CH1_ID)
@@ -485,7 +438,6 @@ describe('fetchChannelMessages — .history range', () => {
     })
 
     const result = await fetchChannelMessages(ch, '400', undefined, 100, [], false, deps)
-    // [ch2 messages in chronological order] + [ch1 messages after .history]
     expect(result.messages.map(m => m.id)).toEqual(['250', '300', '350', '300', '400'])
     expect(result.didClear).toBe(true)
     expect(result.originChannelId).toBe(CH1_ID)
@@ -523,13 +475,11 @@ describe('fetchChannelMessages — .history range', () => {
     })
 
     const result = await fetchChannelMessages(ch, '200', undefined, 100, [], false, deps)
-    // Range should include messages from 220 to 280 (inclusive)
     const ids = result.messages.map(m => m.id)
     expect(ids).toContain('220')
     expect(ids).toContain('240')
     expect(ids).toContain('260')
     expect(ids).toContain('280')
-    // Should NOT include '200' from ch2 ('too old')
     expect(result.messages.find(m => m.id === '200' && m.content === 'too old')).toBeUndefined()
   })
 
@@ -543,7 +493,6 @@ describe('fetchChannelMessages — .history range', () => {
         msg('300', 'after'),
         msg('400', 'trigger'),
       ],
-      // NONEXISTENT channel doesn't exist in mock
     })
 
     const result = await fetchChannelMessages(ch, '400', undefined, 100, [], false, deps)
@@ -551,10 +500,6 @@ describe('fetchChannelMessages — .history range', () => {
     expect(result.didClear).toBe(true)
   })
 })
-
-// ────────────────────────────────────────────────────────────────────────────
-// fetchChannelMessages — .history interactions
-// ────────────────────────────────────────────────────────────────────────────
 
 describe('fetchChannelMessages — .history interactions', () => {
   it('.history in linked range channel is resolved recursively', async () => {
@@ -566,17 +511,15 @@ describe('fetchChannelMessages — .history interactions', () => {
       ],
       [CH2_ID]: [
         msg('100', 'very old in ch2'),
-        msg('200', '.history'),  // clear in ch2
+        msg('200', '.history'),
         msg('300', 'after clear in ch2'),
         msg('400', 'end of ch2'),
       ],
     })
 
     const result = await fetchChannelMessages(ch, '200', undefined, 100, [], false, deps)
-    // ch2 had a .history clear at id=200, so only ch2 messages after it should appear
     const ch2Messages = result.messages.filter(m => m.content.includes('ch2'))
     expect(ch2Messages.map(m => m.id)).toEqual(['300', '400'])
-    // Plus ch1 trigger
     expect(result.messages[result.messages.length - 1]!.id).toBe('200')
   })
 
@@ -585,9 +528,9 @@ describe('fetchChannelMessages — .history interactions', () => {
     const deps = createMockDeps({
       [CH1_ID]: [
         msg('100', 'ancient'),
-        msg('200', `.history\n---\nlast: ${discordUrl(CH2_ID, '300')}`), // range — older
+        msg('200', `.history\n---\nlast: ${discordUrl(CH2_ID, '300')}`),
         msg('300', 'between'),
-        msg('400', '.history'), // clear — newer, wins
+        msg('400', '.history'),
         msg('500', 'after clear'),
         msg('600', 'trigger'),
       ],
@@ -597,17 +540,11 @@ describe('fetchChannelMessages — .history interactions', () => {
     })
 
     const result = await fetchChannelMessages(ch, '600', undefined, 100, [], false, deps)
-    // Clear at 400 is newest .history → only 500, 600
     expect(result.messages.map(m => m.id)).toEqual(['500', '600'])
     expect(result.didClear).toBe(true)
-    // originChannelId should be null since the effective .history was a clear, not a range
     expect(result.originChannelId).toBeNull()
   })
 })
-
-// ────────────────────────────────────────────────────────────────────────────
-// fetchChannelMessages — recursion safety
-// ────────────────────────────────────────────────────────────────────────────
 
 describe('fetchChannelMessages — recursion safety', () => {
   it('stops at max recursion depth (cycle A→B→A)', async () => {
@@ -623,16 +560,11 @@ describe('fetchChannelMessages — recursion safety', () => {
       ],
     })
 
-    // Should not infinite loop — returns within max depth
     const result = await fetchChannelMessages(ch, '200', undefined, 100, [], false, deps)
     expect(result.didClear).toBe(true)
     expect(result.messages).toBeDefined()
   })
 })
-
-// ────────────────────────────────────────────────────────────────────────────
-// fetchChannelMessages — stopAtId boundary
-// ────────────────────────────────────────────────────────────────────────────
 
 describe('fetchChannelMessages — stopAtId boundary', () => {
   const CH = CH1_ID
@@ -669,10 +601,6 @@ describe('fetchChannelMessages — stopAtId boundary', () => {
   })
 })
 
-// ────────────────────────────────────────────────────────────────────────────
-// fetchChannelMessages — ignoreHistory flag
-// ────────────────────────────────────────────────────────────────────────────
-
 describe('fetchChannelMessages — ignoreHistory', () => {
   const CH = CH1_ID
 
@@ -688,15 +616,10 @@ describe('fetchChannelMessages — ignoreHistory', () => {
     })
 
     const result = await fetchChannelMessages(ch, '4', undefined, 100, [], true, deps)
-    // .history is included as a regular message
     expect(result.messages.map(m => m.id)).toEqual(['1', '2', '3', '4'])
     expect(result.didClear).toBe(false)
   })
 })
-
-// ────────────────────────────────────────────────────────────────────────────
-// fetchChannelMessages — authorization
-// ────────────────────────────────────────────────────────────────────────────
 
 describe('fetchChannelMessages — authorization', () => {
   const CH = CH1_ID
@@ -736,7 +659,7 @@ describe('fetchChannelMessages — authorization', () => {
     const deps = createMockDeps({
       [CH]: [
         msg('1', 'old'),
-        msg('2', '.history'),  // member is null
+        msg('2', '.history'),
         msg('3', 'trigger'),
       ],
     })
@@ -760,19 +683,15 @@ describe('fetchChannelMessages — authorization', () => {
   })
 })
 
-// ────────────────────────────────────────────────────────────────────────────
-// fetchChannelMessages — edge cases from review
-// ────────────────────────────────────────────────────────────────────────────
-
 describe('fetchChannelMessages — edge cases', () => {
   it('.history range overriding an older .history clear (range is newer, wins)', async () => {
     const ch = channel(CH1_ID)
     const deps = createMockDeps({
       [CH1_ID]: [
         msg('100', 'ancient'),
-        msg('200', '.history'),                                                 // older clear
+        msg('200', '.history'),
         msg('300', 'between'),
-        msg('400', `.history\n---\nlast: ${discordUrl(CH2_ID, '300')}`),        // newer range — wins
+        msg('400', `.history\n---\nlast: ${discordUrl(CH2_ID, '300')}`),
         msg('500', 'after range'),
         msg('600', 'trigger'),
       ],
@@ -784,11 +703,8 @@ describe('fetchChannelMessages — edge cases', () => {
     })
 
     const result = await fetchChannelMessages(ch, '600', undefined, 100, [], false, deps)
-    // Newest-first: trigger(600), 500, then .history range at 400 → fetch CH2 → return
-    // Range wins, older clear is never reached
     expect(result.didClear).toBe(true)
     expect(result.originChannelId).toBe(CH1_ID)
-    // Should be [CH2 messages] + [500, 600]
     expect(result.messages.map(m => m.id)).toEqual(['100', '200', '300', '500', '600'])
   })
 
@@ -797,13 +713,12 @@ describe('fetchChannelMessages — edge cases', () => {
     const deps = createMockDeps({
       [CH1_ID]: [
         msg('100', 'old'),
-        msg('200', '.historybook is a great read'),  // NOT a .history command
+        msg('200', '.historybook is a great read'),
         msg('300', 'trigger'),
       ],
     })
 
     const result = await fetchChannelMessages(ch, '300', undefined, 100, [], false, deps)
-    // .historybook should NOT trigger .history processing
     expect(result.didClear).toBe(false)
     expect(result.messages.map(m => m.id)).toEqual(['100', '200', '300'])
   })
@@ -819,8 +734,6 @@ describe('fetchChannelMessages — edge cases', () => {
       ],
     })
 
-    // stopAtId='200' falls between 100 and 300
-    // The <= check catches msg 100 (100 <= 200), but 100 !== 200 so it's NOT included
     const result = await fetchChannelMessages(ch, '700', '200', 100, [], false, deps)
     expect(result.messages.map(m => m.id)).toEqual(['300', '500', '700'])
     expect(result.messages.find(m => m.id === '100')).toBeUndefined()
@@ -845,8 +758,6 @@ describe('fetchChannelMessages — edge cases', () => {
       ],
     })
 
-    // maxMessages=6: trigger(500) + 3 messages(400,300,200) = 4 collected when .history hit
-    // Recursive call gets maxMessages - 4 = 2 → only 2 messages from CH2
     const result = await fetchChannelMessages(ch, '500', undefined, 6, [], false, deps)
     expect(result.messages.length).toBeLessThanOrEqual(6)
     expect(result.didClear).toBe(true)
@@ -866,7 +777,6 @@ describe('fetchChannelMessages — edge cases', () => {
     })
 
     const result = await fetchChannelMessages(ch, '600', undefined, 100, [], false, deps)
-    // Range fetches msg 100-200 from same channel, then messages after .history (500, 600)
     expect(result.didClear).toBe(true)
     expect(result.messages.map(m => m.id)).toEqual(['100', '200', '500', '600'])
   })

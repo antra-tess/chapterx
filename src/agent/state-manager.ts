@@ -1,17 +1,9 @@
-/**
- * Channel State Manager
- * Manages per-channel state (tool cache, cache markers, message counts)
- */
-
 import { ChannelState, ToolCall } from '../types.js'
 import { logger } from '../utils/logger.js'
 
 export class ChannelStateManager {
   private states = new Map<string, ChannelState>()
 
-  /**
-   * Get or initialize state for a channel
-   */
   async getOrInitialize(
     botId: string,
     channelId: string,
@@ -33,9 +25,6 @@ export class ChannelStateManager {
     return this.states.get(key)!
   }
 
-  /**
-   * Update tool cache for a channel
-   */
   updateToolCache(
     botId: string,
     channelId: string,
@@ -45,10 +34,6 @@ export class ChannelStateManager {
     state.toolCache.push(...newCalls)
   }
 
-  /**
-   * Prune old tool calls from cache
-   * Removes calls older than the oldest message in context
-   */
   pruneToolCache(
     botId: string,
     channelId: string,
@@ -72,9 +57,6 @@ export class ChannelStateManager {
     }
   }
 
-  /**
-   * Update cache marker position
-   */
   updateCacheMarker(
     botId: string,
     channelId: string,
@@ -84,42 +66,26 @@ export class ChannelStateManager {
     state.lastCacheMarker = marker
   }
 
-  /**
-   * Increment message count since last roll
-   */
   incrementMessageCount(botId: string, channelId: string): void {
     const state = this.getState(botId, channelId)
     state.messagesSinceRoll++
   }
 
-  /**
-   * Reset message count (after rolling)
-   */
   resetMessageCount(botId: string, channelId: string): void {
     const state = this.getState(botId, channelId)
     state.messagesSinceRoll = 0
   }
 
-  /**
-   * Update the oldest message ID for cache stability
-   * Called when rolling to record the starting point of the cached context
-   */
   updateCacheOldestMessageId(botId: string, channelId: string, messageId: string | null): void {
     const state = this.getState(botId, channelId)
     state.cacheOldestMessageId = messageId
   }
 
-  /**
-   * Get the oldest message ID for cache stability
-   */
   getCacheOldestMessageId(botId: string, channelId: string): string | null {
     const state = this.getState(botId, channelId)
     return state.cacheOldestMessageId
   }
 
-  /**
-   * Get state (throws if not initialized)
-   */
   private getState(botId: string, channelId: string): ChannelState {
     const key = this.makeKey(botId, channelId)
     const state = this.states.get(key)

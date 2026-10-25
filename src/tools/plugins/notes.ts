@@ -1,12 +1,3 @@
-/**
- * Notes Plugin
- * 
- * Simple note-taking plugin that demonstrates:
- * - Channel-scoped persistent state
- * - Context injection with aging behavior
- * - Lifecycle hooks for updating injection depth
- */
-
 import { ToolPlugin, PluginContext, PluginStateContext, ContextInjection } from './types.js'
 import { logger } from '../../utils/logger.js'
 
@@ -41,8 +32,6 @@ const plugin: ToolPlugin = {
         required: ['content'],
       },
       handler: async (input: { content: string }, context: PluginContext) => {
-        // Note: For actual state management, this would use PluginStateContext
-        // This handler just logs - real state updates happen in onToolExecution
         logger.debug({ 
           content: input.content.slice(0, 50),
           channelId: context.channelId 
@@ -60,8 +49,6 @@ const plugin: ToolPlugin = {
       },
       handler: async (_input: any, context: PluginContext) => {
         logger.debug({ channelId: context.channelId }, 'Notes list requested')
-        // Note: Handler can't access state directly, but we return a message
-        // The actual notes are visible in context injection
         return 'Notes are displayed in context above. Use read_note with an ID to retrieve a specific note.'
       },
     },
@@ -92,7 +79,6 @@ const plugin: ToolPlugin = {
           return 'Please provide either an id or search term'
         }
         
-        // Handler returns placeholder - actual retrieval happens in onToolExecution
         return input.id 
           ? `Looking up note: ${input.id}`
           : `Searching notes for: ${input.search}`
@@ -122,17 +108,12 @@ const plugin: ToolPlugin = {
     },
   ],
   
-  /**
-   * Get context injections - returns notes to be injected into context
-   */
   getContextInjections: async (context: PluginStateContext): Promise<ContextInjection[]> => {
-    // Check if injection is disabled via config (defaults to true)
     const config = context.pluginConfig as { inject_into_context?: boolean } | undefined
     if (config?.inject_into_context === false) {
       return []
     }
     
-    // Use configured scope (defaults to 'channel')
     const scope = context.configuredScope
     const state = await context.getState<NotesState>(scope)
     
@@ -140,7 +121,6 @@ const plugin: ToolPlugin = {
       return []
     }
     
-    // Format notes for display
     const notesContent = [
       '## 📝 Saved Notes',
       '',
@@ -152,22 +132,18 @@ const plugin: ToolPlugin = {
     return [{
       id: 'notes-display',
       content: notesContent,
-      targetDepth: 10,  // Settle near tool descriptions
+      targetDepth: 10,
       lastModifiedAt: state.lastModifiedMessageId,
-      priority: 100,  // High priority - show before other injections
+      priority: 100,
     }]
   },
   
-  /**
-   * Lifecycle hook - called after tool execution to update state
-   */
   onToolExecution: async (
     toolName: string,
     input: any,
     _result: any,
     context: PluginStateContext
   ): Promise<void> => {
-    // Use configured scope (defaults to 'channel')
     const scope = context.configuredScope
     const state = await context.getState<NotesState>(scope) || {
       notes: [],
@@ -209,9 +185,6 @@ const plugin: ToolPlugin = {
     }
   },
   
-  /**
-   * Post-process tool results to inject actual note content
-   */
   postProcessResult: async (
     toolName: string,
     input: any,

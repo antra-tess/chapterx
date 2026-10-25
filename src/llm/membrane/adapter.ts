@@ -1,10 +1,3 @@
-/**
- * Membrane Adapter
- * 
- * Type conversion functions between chapterx and membrane formats.
- * These are nearly identical but have subtle differences in field locations.
- */
-
 import type {
   ParticipantMessage,
   ContentBlock,
@@ -14,7 +7,6 @@ import type {
   StopReason,
 } from '../../types.js';
 
-// Import types from @animalabs/membrane
 import type {
   NormalizedMessage,
   NormalizedRequest,
@@ -31,7 +23,6 @@ import type {
 } from '@animalabs/membrane';
 import { getFormatterForModel } from './factory.js';
 
-// Re-export types for use by other modules (preserving existing API)
 export type {
   NormalizedMessage,
   NormalizedRequest,
@@ -44,18 +35,6 @@ export type {
   ToolMode,
 };
 
-// ============================================================================
-// Message Conversion
-// ============================================================================
-
-/**
- * Convert chapterx ParticipantMessage to membrane NormalizedMessage
- * 
- * Key differences handled:
- * - cacheBreakpoint passes through directly (used by formatter for cache_control)
- * - timestamp, messageId move to metadata
- * - Image source.media_type → source.mediaType
- */
 export function toMembraneMessage(msg: ParticipantMessage): NormalizedMessage {
   const result: NormalizedMessage = {
     participant: msg.participant,
@@ -71,9 +50,6 @@ export function toMembraneMessage(msg: ParticipantMessage): NormalizedMessage {
   return result;
 }
 
-/**
- * Convert membrane NormalizedMessage to chapterx ParticipantMessage
- */
 export function fromMembraneMessage(msg: NormalizedMessage): ParticipantMessage {
   return {
     participant: msg.participant,
@@ -86,50 +62,33 @@ export function fromMembraneMessage(msg: NormalizedMessage): ParticipantMessage 
 
 /** Drops trailing empty messages: membrane handles prefill internally. */
 export function toMembraneMessages(messages: ParticipantMessage[]): NormalizedMessage[] {
-  // Filter out trailing empty assistant messages (chapterx prefill placeholder)
-  // These are messages with empty text content used to start bot completion
   let filteredMessages = messages;
 
   while (filteredMessages.length > 0) {
     const lastMsg = filteredMessages[filteredMessages.length - 1];
     if (!lastMsg) break;
 
-    // Check if it's an empty message (only text blocks with empty/whitespace text)
     const isEmptyMessage = lastMsg.content.every(block => {
       if (block.type === 'text') {
         return !block.text || block.text.trim() === '';
       }
-      return false; // Non-text blocks are not "empty"
+      return false;
     });
 
     if (isEmptyMessage && lastMsg.content.length > 0) {
-      // Remove trailing empty message
       filteredMessages = filteredMessages.slice(0, -1);
     } else {
-      break; // Stop when we hit a non-empty message
+      break;
     }
   }
 
   return filteredMessages.map(toMembraneMessage);
 }
 
-/**
- * Convert array of membrane messages to chapterx format
- */
 export function fromMembraneMessages(messages: NormalizedMessage[]): ParticipantMessage[] {
   return messages.map(fromMembraneMessage);
 }
 
-// ============================================================================
-// Content Block Conversion
-// ============================================================================
-
-/**
- * Convert chapterx ContentBlock to membrane ContentBlock
- * 
- * Key differences:
- * - Image source.media_type → source.mediaType
- */
 export function toMembraneContentBlock(block: ContentBlock): MembraneContentBlock {
   switch (block.type) {
     case 'text':
@@ -190,14 +149,10 @@ export function toMembraneContentBlock(block: ContentBlock): MembraneContentBloc
       return { ...block } as unknown as MembraneContentBlock;
 
     default:
-      // Pass through unknown block types
       return block as unknown as MembraneContentBlock;
   }
 }
 
-/**
- * Convert membrane ContentBlock to chapterx ContentBlock
- */
 export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBlock {
   switch (block.type) {
     case 'text':
@@ -252,7 +207,6 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
     }
     
     case 'generated_image': {
-      // Convert membrane generated_image to chapterx image format
       const genImg = block as any;
       return {
         type: 'image',
@@ -265,9 +219,6 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
     }
 
     case 'thinking': {
-      // Preserve as a structured thinking block (with signature) so it can be
-      // persisted and round-tripped for reasoning continuity. Consumers that
-      // want display text read block.thinking directly.
       const tb = block as { thinking?: string; signature?: string };
       return {
         type: 'thinking',
@@ -280,14 +231,9 @@ export function fromMembraneContentBlock(block: MembraneContentBlock): ContentBl
       return { ...(block as unknown as Record<string, unknown>) } as unknown as ContentBlock;
 
     default:
-      // Pass through unknown block types
       return block as unknown as ContentBlock;
   }
 }
-
-// ============================================================================
-// Request Conversion
-// ============================================================================
 
 /**
  * Membrane's auto tool mode picks native tools for a native formatter or an
@@ -299,14 +245,10 @@ export function resolveToolModeForModel(
   modelName: string,
   mode?: 'chat' | 'prefill' | 'base-model'
 ): ToolMode {
-  // Config mode takes precedence when explicitly set
   if (mode === 'chat') return 'native';
   if (mode === 'prefill') return 'xml';
   if (mode === 'base-model') return 'native';
 
-  // Fall back to model-name heuristics when mode is not set
-
-  // Check per-model formatter routes first (e.g., claude-opus-4-6 → native)
   const formatterOverride = getFormatterForModel(modelName);
   if (formatterOverride === 'native') {
     return 'native';
@@ -326,13 +268,9 @@ export function resolveToolModeForModel(
     return 'xml';
   }
 
-  // Default to native for unknown models (safer for non-Claude models)
   return 'native';
 }
 
-/**
- * Convert chapterx LLMRequest to membrane NormalizedRequest
- */
 export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
   const config: GenerationConfig = {
     model: request.config.model,
@@ -352,8 +290,8 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
   if (enableApiThinking) {
     config.thinking = {
       enabled: true,
-      budgetTokens: request.config.thinking_budget || 10000,  // Default budget for extended thinking
-      type: request.config.thinking_type,  // 'enabled' (default) or 'adaptive' (e.g. Fable 5)
+      budgetTokens: request.config.thinking_budget || 10000,
+      type: request.config.thinking_type,
       // Adaptive-thinking models (Fable 5, Opus 4.7+) default to display:'omitted'
       // (empty thinking field, signature only). debug_thinking means we want to SEE
       // the reasoning — request the summarized form explicitly.
@@ -368,16 +306,11 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     system: request.system_prompt,
     config,
     tools: request.tools?.map(toMembraneToolDefinition),
-    // Explicitly set tool mode based on model to work around RoutingAdapter issue
-    // Membrane's auto-detection checks adapter.name which is 'routing' for RoutingAdapter
     toolMode: resolveToolModeForModel(request.config.model, request.config.mode),
     // Membrane: 0 disables participant stop sequences; undefined takes its default.
     maxParticipantsForStop: request.config.participant_stop_sequences ? undefined : 0,
-    // Prompt caching control - when false, cache_control markers are not added to requests
     promptCaching: request.config.prompt_caching,
-    // Pass through cache TTL for Anthropic extended caching (1h vs default 5m)
     cacheTtl: request.config.cache_ttl,
-    // Context prefix for simulacrum seeding (injected as first assistant message)
     contextPrefix: request.context_prefix,
     // Custom prefill user message (replaces '[Start]' synthetic user message)
     prefillUserMessage: request.prefill_user_message,
@@ -387,18 +320,14 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
     streaming: request.config.streaming,
   };
 
-  // Set assistant participant name so membrane can identify bot messages vs user messages
-  // Critical for native tool mode — without this, all messages become role: user
   if (request.config.botName) {
     (normalizedRequest as any).assistantParticipant = request.config.botName;
   }
 
-  // Handle stop sequences
   if (request.stop_sequences && request.stop_sequences.length > 0) {
     normalizedRequest.stopSequences = request.stop_sequences;
   }
 
-  // Pass through provider-specific params (e.g., reasoning config for OpenRouter)
   if (request.config.provider_params) {
     normalizedRequest.providerParams = { ...request.config.provider_params };
   }
@@ -416,10 +345,6 @@ export function toMembraneRequest(request: LLMRequest): NormalizedRequest {
   return normalizedRequest;
 }
 
-/**
- * Convert membrane NormalizedRequest back to chapterx LLMRequest
- * (Used mainly for testing/debugging)
- */
 export function fromMembraneRequest(request: NormalizedRequest, botName: string): LLMRequest {
   return {
     messages: fromMembraneMessages(request.messages),
@@ -442,13 +367,6 @@ export function fromMembraneRequest(request: NormalizedRequest, botName: string)
   };
 }
 
-// ============================================================================
-// Response Conversion
-// ============================================================================
-
-/**
- * Convert membrane NormalizedResponse to chapterx LLMCompletion
- */
 export function fromMembraneResponse(response: NormalizedResponse): LLMCompletion {
   return {
     content: (response.content ?? []).map(fromMembraneContentBlock),
@@ -464,9 +382,6 @@ export function fromMembraneResponse(response: NormalizedResponse): LLMCompletio
   };
 }
 
-/**
- * Map membrane stop reason to chapterx stop reason
- */
 function mapStopReason(reason: MembraneStopReason): StopReason {
   switch (reason) {
     case 'end_turn':
@@ -480,20 +395,12 @@ function mapStopReason(reason: MembraneStopReason): StopReason {
     case 'refusal':
       return 'refusal';
     case 'abort':
-      // Map abort to end_turn as chapterx doesn't have abort
       return 'end_turn';
     default:
       return 'end_turn';
   }
 }
 
-// ============================================================================
-// Tool Definition Conversion
-// ============================================================================
-
-/**
- * Convert chapterx ToolDefinition to membrane ToolDefinition
- */
 export function toMembraneToolDefinition(tool: ToolDefinition): MembraneToolDefinition {
   return {
     name: tool.name,
@@ -506,9 +413,6 @@ export function toMembraneToolDefinition(tool: ToolDefinition): MembraneToolDefi
   };
 }
 
-/**
- * Convert membrane ToolDefinition to chapterx ToolDefinition
- */
 export function fromMembraneToolDefinition(tool: MembraneToolDefinition): ToolDefinition {
   return {
     name: tool.name,
@@ -521,16 +425,6 @@ export function fromMembraneToolDefinition(tool: MembraneToolDefinition): ToolDe
   };
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/**
- * Build membrane MessageMetadata from chapterx message fields
- * 
- * Note: cacheControl is no longer handled here - cache markers now use
- * cacheBreakpoint directly on the message (set by applyChapterXCacheMarker).
- */
 function buildMessageMetadata(msg: ParticipantMessage): MessageMetadata | undefined {
   const hasMetadata = msg.timestamp || msg.messageId;
   
@@ -543,10 +437,6 @@ function buildMessageMetadata(msg: ParticipantMessage): MessageMetadata | undefi
     sourceId: msg.messageId,
   };
 }
-
-// ============================================================================
-// Exports for Testing
-// ============================================================================
 
 export const __testing = {
   buildMessageMetadata,

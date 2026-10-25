@@ -1,21 +1,9 @@
-/**
- * Streaming Metrics Collector
- *
- * In-memory accumulator for per-token streaming metrics.
- * One instance per stream() call — zero I/O during streaming.
- * Call finalize() after the stream completes to produce a StreamingMetricsEntry.
- */
-
 import type {
   StreamingChunkRecord,
   StreamingBlockRecord,
   StreamingMetricsEntry,
   StreamingTimingStats,
 } from './streaming-types.js'
-
-// ============================================================================
-// ChunkMeta mirror (avoid importing from provider to prevent circular deps)
-// ============================================================================
 
 interface ChunkMeta {
   blockIndex: number
@@ -30,10 +18,6 @@ interface BlockEvent {
   index: number
   block: { type: string; content?: string }
 }
-
-// ============================================================================
-// Collector
-// ============================================================================
 
 export class StreamingMetricsCollector {
   private readonly startedAt: number
@@ -52,9 +36,6 @@ export class StreamingMetricsCollector {
     this.lastChunkAt = this.startedAt
   }
 
-  /**
-   * Record a chunk from the onChunk callback. O(1).
-   */
   recordChunk(text: string, meta?: ChunkMeta): void {
     const now = Date.now()
     const offsetMs = now - this.startedAt
@@ -78,9 +59,6 @@ export class StreamingMetricsCollector {
     this.lastChunkAt = now
   }
 
-  /**
-   * Record a block event from the onBlock callback. O(1).
-   */
   recordBlock(event?: BlockEvent): void {
     if (!event) return
 
@@ -94,10 +72,6 @@ export class StreamingMetricsCollector {
     })
   }
 
-  /**
-   * Finalize and return the complete metrics entry.
-   * Call once after the stream completes. O(n log n) for percentile computation.
-   */
   finalize(options: {
     usage?: {
       inputTokens: number
@@ -133,13 +107,7 @@ export class StreamingMetricsCollector {
     }
   }
 
-  /**
-   * Compute inter-chunk timing percentiles from deltaMs values.
-   * Returns null if fewer than 2 chunks (need at least one delta).
-   */
   private computeTimingStats(): StreamingTimingStats | null {
-    // First chunk's deltaMs is time-from-start, not inter-chunk.
-    // Use deltaMs from chunk index 1 onward for inter-chunk timing.
     if (this.chunks.length < 2) return null
 
     const deltas = this.chunks.slice(1).map(c => c.deltaMs)
@@ -159,9 +127,6 @@ export class StreamingMetricsCollector {
   }
 }
 
-/**
- * Compute a percentile from a sorted array using nearest-rank method.
- */
 function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0
   if (sorted.length === 1) return sorted[0]!

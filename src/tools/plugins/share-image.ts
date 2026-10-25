@@ -1,18 +1,3 @@
-/**
- * Share Image Plugin
- *
- * Allows bots to share images from their context to Discord.
- * Images are referenced by index (1 = most recent).
- *
- * This includes:
- * - Images from Discord messages in context
- * - Images from MCP tool results (which are normally hidden)
- *
- * Tools:
- * - share_image: Share an image by index to the current channel
- * - list_visible_images: List all images the bot can see
- */
-
 import { ToolPlugin, PluginTool, PluginContext } from './types.js'
 import { createLogger } from '../../utils/logger.js'
 
@@ -68,16 +53,13 @@ const shareImageTool: PluginTool = {
     }
 
     try {
-      // Convert base64 to buffer
       const buffer = Buffer.from(image.data, 'base64')
       
-      // Generate filename based on source
       const ext = getExtensionFromMime(image.mimeType)
       const filename = image.source === 'discord' 
         ? `shared_image_${index}${ext}`
         : `${image.sourceDetail}_image_${index}${ext}`
       
-      // Build caption with source info if not provided
       const fullCaption = caption || `Image ${index} (from ${image.source === 'discord' ? image.sourceDetail : `${image.sourceDetail} tool`})`
       
       await context.uploadFile(buffer, filename, image.mimeType, fullCaption)
@@ -111,7 +93,7 @@ const listVisibleImagesTool: PluginTool = {
         ? `Discord (${img.sourceDetail})`
         : `MCP tool: ${img.sourceDetail}`
       const desc = img.description ? ` - ${img.description}` : ''
-      const approxDecodedKB = Math.round(img.data.length * 0.75 / 1024) // Approximate decoded size in KB
+      const approxDecodedKB = Math.round(img.data.length * 0.75 / 1024)
       return `${idx}. [${img.mimeType}] ${source}${desc} (~${approxDecodedKB}KB)`
     })
 

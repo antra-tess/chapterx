@@ -1,16 +1,8 @@
-/**
- * MCP Resources Plugin
- *
- * Provides tools to list and read MCP server resources.
- * Resources are read-only data exposed by MCP servers (e.g., robot state, sensor data).
- */
-
 import { ToolPlugin, PluginTool, PluginContext } from './types.js'
 import { createLogger } from '../../utils/logger.js'
 
 const logger = createLogger({ plugin: 'mcp-resources' })
 
-// This will be set by the agent loop when setting up plugin context
 let resourceAccessor: {
   getMcpResources: () => Array<{ server: string; uri: string; name: string; description?: string }>
   readMcpResource: (uri: string) => Promise<{ content: string; mimeType?: string } | null>

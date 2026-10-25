@@ -1,9 +1,3 @@
-/**
- * Config Plugin
- * 
- * Tools for bots to view and request changes to their own config.
- */
-
 import { ToolPlugin } from './types.js'
 
 const plugin: ToolPlugin = {
@@ -26,7 +20,6 @@ const plugin: ToolPlugin = {
         const { filter } = input
         const config = context.config
         
-        // Get config entries, optionally filtered
         let entries = Object.entries(config)
         if (filter) {
           entries = entries.filter(([key]) => 
@@ -42,12 +35,10 @@ const plugin: ToolPlugin = {
             key.toLowerCase().includes(sk.toLowerCase())
           )
           
-          // Redact sensitive values
           let displayValue = value
           if (isSensitive && typeof value === 'string') {
             displayValue = value.slice(0, 4) + '...[redacted]'
           } else if (typeof value === 'object') {
-            // For objects, recursively redact
             displayValue = JSON.stringify(value, (k, v) => {
               if (sensitiveKeys.some(sk => k.toLowerCase().includes(sk.toLowerCase())) && typeof v === 'string') {
                 return v.slice(0, 4) + '...[redacted]'
@@ -89,29 +80,23 @@ const plugin: ToolPlugin = {
             return 'Error: key and value are required'
           }
           
-          // Validate that key is not sensitive
           const forbiddenKeys = ['api_key', 'token', 'secret', 'password', 'mcp_servers', 'tool_plugins']
           if (forbiddenKeys.some(fk => key.toLowerCase().includes(fk.toLowerCase()))) {
             return `Error: Cannot change sensitive key: ${key}`
           }
           
-          // Check if sendMessage exists
           if (!context.sendMessage) {
             return 'Error: sendMessage not available in this context'
           }
           
-          // Format value for YAML - use block scalar for multiline
           let yamlValue = value
           if (typeof value === 'string' && value.includes('\n')) {
-            // Multiline: use YAML block scalar
             const indented = value.split('\n').map(line => `  ${line}`).join('\n')
             yamlValue = `|\n${indented}`
           }
           
-          // Format as .config message (chapter2 format: .config TARGET\n---\nyaml)
           const configMessage = `.config ${context.botId}\n---\n${key}: ${yamlValue}`
           
-          // Send and pin the config message
           const messageIds = await context.sendMessage(configMessage)
           if (messageIds.length > 0 && context.pinMessage) {
             await context.pinMessage(messageIds[0]!)

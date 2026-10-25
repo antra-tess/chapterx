@@ -133,7 +133,6 @@ describe('ToolSystem cache message coverage', () => {
     expect(cached.map((entry) => entry.call.id)).toEqual(['nothing', 'after'])
   })
 
-  // Persists one round of a native activation: its prose covers its own message.
   async function persistRound(toolSystem: ToolSystem, trigger: string, round: number, messages: string[]) {
     const call: ToolCall = {
       id: `${trigger}-call-${round}`,

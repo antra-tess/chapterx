@@ -12,15 +12,11 @@ import { logger } from '../utils/logger.js'
 const UNKNOWN_MEMBER = 10007
 const UNKNOWN_USER = 10013
 
-/** Which authors' labels use display names, as the bot's config sets them
- *  (`use_display_names_bots` and `use_display_names_humans`). */
 export interface DisplayNameClasses {
   bots: boolean
   humans: boolean
 }
 
-/** The classes a config labels by display name, with the defaults the
- *  context builder uses: bots by display name, humans by username. */
 export function displayNameClasses(config: {
   use_display_names?: boolean
   use_display_names_bots?: boolean
@@ -33,17 +29,9 @@ export function displayNameClasses(config: {
 }
 
 export interface AuthorMembersTiming {
-  /** How long an author's fetch is waited for, from when it starts, by every
-   *  context that needs it. A fetch still running then carries on, and its
-   *  member is cached for later contexts. */
   waitMs: number
-  /** How long an author Discord says isn't a member is left before being
-   *  asked for again, since they may join. */
   notMemberRetryMs: number
-  /** How long an author whose fetch failed otherwise is left, since the
-   *  failure may pass. */
   failureRetryMs: number
-  /** A clock that doesn't step with the wall clock. */
   now: () => number
 }
 
@@ -56,20 +44,12 @@ const DEFAULT_TIMING: AuthorMembersTiming = {
 
 interface PendingFetch {
   done: Promise<void>
-  /** When contexts stop waiting for it. */
   waitUntil: number
 }
 
-/**
- * Fetches the guild members of a context's authors, so their labels can carry
- * server nicknames. One per connector: it remembers whose fetch failed, and
- * shares a fetch in progress between contexts.
- */
 export class AuthorMembers {
   private readonly timing: AuthorMembersTiming
-  /** guildId:userId → when to ask again, for an author whose fetch failed. */
   private readonly retryAt = new Map<string, number>()
-  /** guildId:userId → the fetch in progress. */
   private readonly pending = new Map<string, PendingFetch>()
 
   constructor(timing: Partial<AuthorMembersTiming> = {}) {

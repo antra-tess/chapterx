@@ -1,10 +1,3 @@
-/**
- * Activation Store
- * 
- * Persists activation logs to disk, organized by bot/channel.
- * Similar structure to tool cache but for complete activation records.
- */
-
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { logger } from '../utils/logger.js'
@@ -20,7 +13,6 @@ import {
 export class ActivationStore {
   private activationDir: string
   
-  // In-memory cache of active (incomplete) activations
   private activeActivations = new Map<string, Activation>()
   
   constructor(cacheDir: string) {
@@ -30,9 +22,6 @@ export class ActivationStore {
     }
   }
   
-  /**
-   * Start a new activation
-   */
   startActivation(
     botId: string,
     channelId: string,
@@ -48,7 +37,6 @@ export class ActivationStore {
       startedAt: new Date(),
     }
     
-    // Store in active map
     this.activeActivations.set(activation.id, activation)
     
     logger.debug({ 
@@ -62,9 +50,6 @@ export class ActivationStore {
     return activation
   }
   
-  /**
-   * Add a completion to an active activation
-   */
   addCompletion(
     activationId: string,
     text: string,
@@ -98,10 +83,6 @@ export class ActivationStore {
     return completion
   }
   
-  /**
-   * Update sent message IDs for the last completion
-   * (called after messages are actually sent to Discord)
-   */
   updateLastCompletionMessageIds(activationId: string, messageIds: string[]): void {
     const activation = this.activeActivations.get(activationId)
     if (!activation || activation.completions.length === 0) {
@@ -118,11 +99,6 @@ export class ActivationStore {
     }, 'Updated completion message IDs')
   }
   
-  /**
-   * Set the invisible context (prefix/suffix) for a specific message
-   * prefix: invisible content before this message's visible text
-   * suffix: invisible content after (typically only for last message)
-   */
   setMessageContext(activationId: string, messageId: string, context: MessageContext): void {
     const activation = this.activeActivations.get(activationId)
     if (!activation) {
@@ -141,10 +117,6 @@ export class ActivationStore {
     }, 'Set message context')
   }
   
-  /**
-   * Set message contexts for multiple messages atomically
-   * Used by sendWithContext to record all chunk contexts at once
-   */
   setMessageContexts(activationId: string, contexts: Record<string, MessageContext>): void {
     const activation = this.activeActivations.get(activationId)
     if (!activation) {
@@ -163,9 +135,6 @@ export class ActivationStore {
   }
   
   
-  /**
-   * Complete and persist an activation
-   */
   async completeActivation(activationId: string): Promise<void> {
     const activation = this.activeActivations.get(activationId)
     if (!activation) {
@@ -175,10 +144,8 @@ export class ActivationStore {
     
     activation.endedAt = new Date()
     
-    // Persist to disk
     await this.persistActivation(activation)
     
-    // Remove from active map
     this.activeActivations.delete(activationId)
     
     logger.debug({
@@ -188,16 +155,10 @@ export class ActivationStore {
     }, 'Completed and persisted activation')
   }
   
-  /**
-   * Get an active activation by ID
-   */
   getActiveActivation(activationId: string): Activation | undefined {
     return this.activeActivations.get(activationId)
   }
   
-  /**
-   * Load activations for a channel that have surviving messages
-   */
   async loadActivationsForChannel(
     botId: string,
     channelId: string,
@@ -219,26 +180,18 @@ export class ActivationStore {
         const content = readFileSync(filePath, 'utf-8')
         const stored: StoredActivation = JSON.parse(content)
         
-        // Check if this activation is anchored (any sent message still exists)
         const allSentIds = stored.completions.flatMap(c => c.sentMessageIds)
         const hasAnchor = allSentIds.some(id => existingMessageIds.has(id))
         
         if (!hasAnchor && allSentIds.length > 0) {
-          // This activation's messages were all deleted - skip it
           filteredCount++
           continue
         }
         
-        // Note: We no longer skip activations just because the anchor message is deleted.
-        // If bot messages still exist, we want to inject thinking into them.
-        // The anchor is only used for phantom placement, which will fall back gracefully.
-        
-        // Handle legacy messageContexts format (string -> MessageContext)
         const messageContexts: Record<string, MessageContext> = {}
         if (stored.messageContexts) {
           for (const [msgId, ctx] of Object.entries(stored.messageContexts)) {
             if (typeof ctx === 'string') {
-              // Legacy format: full context string -> treat as prefix
               messageContexts[msgId] = { prefix: ctx }
             } else {
               messageContexts[msgId] = ctx as MessageContext
@@ -267,9 +220,6 @@ export class ActivationStore {
     return activations
   }
   
-  /**
-   * Build a map of messageId -> completion for context building
-   */
   buildCompletionMap(activations: Activation[]): Map<string, { activation: Activation; completion: Completion }> {
     const map = new Map<string, { activation: Activation; completion: Completion }>()
     
@@ -284,17 +234,11 @@ export class ActivationStore {
     return map
   }
   
-  /**
-   * Build a unified map of messageId -> context from all activations
-   * Each message gets its own prefix/suffix for reconstruction
-   * Handles legacy format (string) by converting to { prefix: string }
-   */
   buildMessageContextMap(activations: Activation[]): Map<string, MessageContext> {
     const map = new Map<string, MessageContext>()
     
     for (const activation of activations) {
       for (const [messageId, context] of Object.entries(activation.messageContexts)) {
-        // Handle legacy format: string -> { prefix: string }
         if (typeof context === 'string') {
           map.set(messageId, { prefix: context })
         } else {
@@ -306,10 +250,6 @@ export class ActivationStore {
     return map
   }
   
-  /**
-   * Get phantom completions that need to be inserted
-   * Returns: Map of anchorMessageId -> completions to insert after it
-   */
   getPhantomInsertions(
     activations: Activation[],
     existingMessageIds: Set<string>
@@ -321,12 +261,10 @@ export class ActivationStore {
       
       for (const completion of activation.completions) {
         if (completion.sentMessageIds.length === 0) {
-          // This is a phantom - insert after current anchor
           const existing = insertions.get(currentAnchor) || []
           existing.push(completion)
           insertions.set(currentAnchor, existing)
         } else {
-          // Find the last sent message that still exists as the new anchor
           for (const msgId of completion.sentMessageIds) {
             if (existingMessageIds.has(msgId)) {
               currentAnchor = msgId
@@ -339,9 +277,6 @@ export class ActivationStore {
     return insertions
   }
   
-  /**
-   * Remove activations associated with a deleted message
-   */
   async removeActivationsForMessage(botId: string, channelId: string, messageId: string): Promise<void> {
     const dirPath = join(this.activationDir, botId, channelId)
     
@@ -358,13 +293,11 @@ export class ActivationStore {
         const content = readFileSync(filePath, 'utf-8')
         const stored: StoredActivation = JSON.parse(content)
         
-        // Check if any completion sent this message
         const hasMsgId = stored.completions.some(c => 
           c.sentMessageIds.includes(messageId)
         )
         
         if (hasMsgId) {
-          // Remove the message ID from completions
           let modified = false
           for (const completion of stored.completions) {
             const idx = completion.sentMessageIds.indexOf(messageId)
@@ -374,14 +307,11 @@ export class ActivationStore {
             }
           }
           
-          // Check if activation is now orphaned (no messages left)
           const allSentIds = stored.completions.flatMap(c => c.sentMessageIds)
           if (allSentIds.length === 0) {
-            // Delete the file
             await fs.unlink(filePath)
             logger.debug({ filePath, messageId }, 'Deleted orphaned activation file')
           } else if (modified) {
-            // Update the file
             writeFileSync(filePath, JSON.stringify(stored, null, 2))
             logger.debug({ filePath, messageId }, 'Updated activation file after message deletion')
           }
@@ -391,8 +321,6 @@ export class ActivationStore {
       }
     }
   }
-  
-  // --- Private helpers ---
   
   private generateActivationId(): string {
     return Math.random().toString(36).substring(2, 10)
@@ -405,7 +333,6 @@ export class ActivationStore {
       mkdirSync(dirPath, { recursive: true })
     }
     
-    // Use date-based filename for sorting
     const dateStr = activation.startedAt.toISOString().replace(/[:.]/g, '-')
     const fileName = `${dateStr}-${activation.id}.json`
     const filePath = join(dirPath, fileName)

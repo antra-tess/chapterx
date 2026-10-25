@@ -1,8 +1,3 @@
-/**
- * Image processing utilities for preparing images before LLM API submission.
- * Handles dimension enforcement, metadata stripping, and size reduction.
- */
-
 import sharp from 'sharp'
 
 // Anthropic's per-image base64 limit on Amazon Bedrock (the Claude API's own is 10 MB)
@@ -17,12 +12,6 @@ export interface ProcessedImage {
   height: number
 }
 
-/**
- * Prepare an image for API submission: strip problematic metadata
- * (EXIF, ICC profiles, XMP) and enforce the provider's max dimension
- * limit to prevent "image dimensions exceed max" API errors.
- * Returns the processed buffer, media type, and actual dimensions.
- */
 export async function prepareImage(
   data: Buffer,
   mediaType: string
@@ -32,9 +21,6 @@ export async function prepareImage(
   const origHeight = metadata.height || 1024
   const hasAlpha = metadata.hasAlpha || mediaType === 'image/png'
 
-  // Always run through resize pipeline — withoutEnlargement makes it a
-  // no-op for images already under the limit, but guarantees we cap
-  // dimensions even when metadata read failed and we're using fallback values.
   const pipeline = sharp(data).resize(MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION, {
     fit: 'inside',
     withoutEnlargement: true,
@@ -50,7 +36,6 @@ export async function prepareImage(
     outMediaType = 'image/jpeg'
   }
 
-  // Get actual output dimensions from sharp (authoritative, not calculated)
   const outMeta = await sharp(output).metadata()
   const outWidth = outMeta.width || origWidth
   const outHeight = outMeta.height || origHeight
@@ -58,12 +43,6 @@ export async function prepareImage(
   return { data: output, mediaType: outMediaType, width: outWidth, height: outHeight }
 }
 
-/**
- * Resample an image to fit within the target base64 size limit.
- * Also enforces the max dimension constraint as defense-in-depth.
- * Uses progressive quality reduction then dimension reduction.
- * Returns processed buffer, media type, and actual dimensions.
- */
 export async function resampleImage(
   data: Buffer,
   maxBase64Bytes: number
@@ -73,7 +52,6 @@ export async function resampleImage(
 
   const metadata = await sharp(data).metadata()
 
-  // Start with original dimensions, clamped to API max
   let width = metadata.width || 1920
   let height = metadata.height || 1080
   if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
@@ -83,12 +61,10 @@ export async function resampleImage(
   }
   let quality = 85
 
-  // Convert to JPEG for better compression (unless it's a PNG with transparency)
   const hasAlpha = metadata.hasAlpha
   const outputFormat = hasAlpha ? 'png' : 'jpeg'
   const outMediaType = outputFormat === 'jpeg' ? 'image/jpeg' : 'image/png'
 
-  // Iteratively reduce size until under limit
   for (let attempt = 0; attempt < 5; attempt++) {
     const pipeline = sharp(data).resize(width, height, { fit: 'inside', withoutEnlargement: true })
 
@@ -100,7 +76,6 @@ export async function resampleImage(
       return { data: output, mediaType: outMediaType, width, height }
     }
 
-    // Reduce quality first, then dimensions
     if (quality > 50) {
       quality -= 15
     } else {
@@ -110,7 +85,6 @@ export async function resampleImage(
     }
   }
 
-  // Final attempt: aggressive resize
   const finalWidth = Math.floor(width * 0.5)
   const finalHeight = Math.floor(height * 0.5)
   const finalPipeline = sharp(data)

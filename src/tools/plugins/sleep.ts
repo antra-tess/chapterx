@@ -1,22 +1,9 @@
-/**
- * Sleep Plugin
- *
- * Exposes a tool that lets the bot put itself to sleep in a channel.
- * The tool sends a visible `.sleep` dot-command message, pins it, and
- * reacts with a sleep emoji — reusing the existing pinned-sleep machinery.
- */
-
 import type { ToolPlugin, PluginContext } from './types.js'
 import { logger } from '../../utils/logger.js'
 
-/**
- * Parse a human-friendly duration string into seconds.
- * Accepts: "30m", "2h", "1h30m", "90s", "1d", "45", plain number (minutes).
- */
 function parseDuration(input: string): number | null {
   const s = input.trim().toLowerCase()
 
-  // Compound: "1h30m", "2h15m"
   const compound = s.match(/^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/)
   if (compound && (compound[1] || compound[2] || compound[3] || compound[4])) {
     const days = parseInt(compound[1] || '0')
@@ -26,7 +13,6 @@ function parseDuration(input: string): number | null {
     return days * 86400 + hours * 3600 + minutes * 60 + seconds
   }
 
-  // Plain number → treat as minutes
   if (/^\d+(\.\d+)?$/.test(s)) {
     const num = parseFloat(s)
     if (num > 0) return Math.round(num * 60)
@@ -43,7 +29,7 @@ function formatDuration(seconds: number): string {
   return m > 0 ? `${h}h${m}m` : `${h}h`
 }
 
-const MAX_DURATION_SECONDS = 7 * 24 * 3600  // 1 week
+const MAX_DURATION_SECONDS = 7 * 24 * 3600
 
 const sleepPlugin: ToolPlugin = {
   name: 'sleep',
@@ -82,7 +68,6 @@ const sleepPlugin: ToolPlugin = {
         const now = new Date()
         const wakeAt = new Date(now.getTime() + seconds * 1000)
 
-        // Build the .sleep message
         const yamlLines = [
           `started_at: ${now.toISOString()}`,
           `duration_seconds: ${seconds}`,
@@ -95,7 +80,6 @@ const sleepPlugin: ToolPlugin = {
         const botName = context.config?.name || context.botId
         const message = `.sleep ${botName}\n---\n${yamlLines.join('\n')}`
 
-        // Send the .sleep message
         let messageIds: string[]
         try {
           messageIds = await context.sendMessage(message)
@@ -109,7 +93,6 @@ const sleepPlugin: ToolPlugin = {
 
         const sleepMsgId = messageIds[0]!
 
-        // Pin it — this is what activates the sleep machinery
         try {
           await context.pinMessage(sleepMsgId)
         } catch (error) {
@@ -117,7 +100,6 @@ const sleepPlugin: ToolPlugin = {
           return `Error: .sleep message sent but could not pin it (channel may have hit the 50-pin limit). Sleep is NOT active.`
         }
 
-        // React — purely cosmetic, don't fail the whole operation
         try {
           await context.addReaction(sleepMsgId, '😴')
         } catch (error) {

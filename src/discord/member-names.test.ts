@@ -1,10 +1,3 @@
-/**
- * Tests for fetching the members of a context's authors, so labels that use
- * display names can carry server nicknames.
- *
- * Run with: npx vitest run member-names
- */
-
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import type { Message } from 'discord.js'
 import { AuthorMembers, displayNameClasses } from './member-names.js'
@@ -31,7 +24,6 @@ function guild(outcomes: Record<string, Outcome> = {}) {
         calls.push(userId)
         const outcome = outcomes[userId] ?? 'found'
         if (outcome === 'hang') return new Promise(() => {})
-        // A round trip; a late one settles after a context's 3-second wait.
         const late = outcome === 'late' || outcome === 'late-error'
         await new Promise((resolve) => setTimeout(resolve, late ? 5_000 : 1))
         if (outcome === 'not-member') throw Object.assign(new Error('Unknown Member'), { code: 10007 })
@@ -87,7 +79,6 @@ describe('AuthorMembers', () => {
     await new AuthorMembers().cacheFor([m], humans)
     expect(m.member?.nickname).toBe('Nick 1')
 
-    // Cached now, so a later context asks for nothing.
     await new AuthorMembers().cacheFor([msg('1', g)], humans)
     expect(g.calls).toEqual(['1'])
   })
@@ -115,7 +106,6 @@ describe('AuthorMembers', () => {
 
     await members.cacheFor(messages, humans)
     expect(g.calls.sort()).toEqual(['1', '2', '3'])
-    // Discord's not-a-member answers are debug lines; any other failure is a warning.
     expect(debug.mock.calls.map(([context]) => (context as { userId: string }).userId).sort()).toEqual(['1', '2'])
     expect(warn).toHaveBeenCalledTimes(1)
     // Under err, which pino serializes with the error's message.
@@ -129,8 +119,6 @@ describe('AuthorMembers', () => {
     await members.cacheFor(messages, humans)
     expect(g.calls.sort()).toEqual(['1', '2', '3', '3'])
 
-    // Just before the non-members' 30 minutes, only the author that keeps
-    // failing otherwise is asked again.
     now = 1_000 + 30 * 60_000 - 1
     await members.cacheFor(messages, humans)
     expect(g.calls.sort()).toEqual(['1', '2', '3', '3', '3'])
@@ -167,7 +155,6 @@ describe('AuthorMembers', () => {
         later = true
       })
       await vi.advanceTimersByTimeAsync(0)
-      // Past its 3 seconds, a context that joins the fetch doesn't wait for it.
       expect(later).toBe(true)
       expect(g.calls.sort()).toEqual(['1', '2'])
     })
@@ -195,7 +182,6 @@ describe('AuthorMembers', () => {
       void m.cacheFor([msg('1', g)], humans)
       await vi.advanceTimersByTimeAsync(2_900)
 
-      // Joins 1's fetch 100 ms from its end, and starts 2's, which settles at once.
       let done = false
       void m.cacheFor([msg('1', g), msg('2', g)], humans).then(() => {
         done = true
@@ -238,7 +224,6 @@ describe('AuthorMembers', () => {
       await first
       await vi.advanceTimersByTimeAsync(2_000)
 
-      // A minute from the failure, not from the context that asked.
       await m.cacheFor([msg('1', g)], humans)
       expect(g.calls).toEqual(['1'])
       await vi.advanceTimersByTimeAsync(59_999)

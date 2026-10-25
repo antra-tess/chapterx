@@ -1,8 +1,3 @@
-/**
- * Chapter3 - Discord Bot Framework
- * Main entry point
- */
-
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import { EventQueue } from './agent/event-queue.js'
@@ -21,33 +16,23 @@ async function main() {
   try {
     logger.info('Starting Chapter3 bot framework')
 
-    // Support chapter2 EMS layout: EMS_PATH + BOT_NAME
-    // e.g., EMS_PATH=/opt/chapter2/ems BOT_NAME=StrangeSonnet4.5
-    // This loads:
-    //   - Shared config from <EMS_PATH>/config.yaml
-    //   - Bot config from <EMS_PATH>/<BOT_NAME>/config.yaml
-    //   - Discord token from <EMS_PATH>/<BOT_NAME>/discord_token
     const emsPath = process.env.EMS_PATH
     const botNameOverride = process.env.BOT_NAME
 
-    // Get configuration paths
     let configPath: string
     let tokenFilePath: string
     
     if (emsPath && botNameOverride) {
-      // Chapter2 EMS layout
-      configPath = emsPath  // ConfigSystem will handle the structure
+      configPath = emsPath
       tokenFilePath = join(emsPath, botNameOverride, 'discord_token')
       logger.info({ emsPath, botName: botNameOverride }, 'Using chapter2 EMS layout')
     } else if (botNameOverride) {
-      // Local dev with BOT_NAME override
       configPath = process.env.CONFIG_PATH || './config'
       tokenFilePath = process.env.DISCORD_TOKEN_FILE 
         ? join(process.cwd(), process.env.DISCORD_TOKEN_FILE)
         : join(configPath, 'bots', `${botNameOverride}_discord_token`)
       logger.info({ botName: botNameOverride }, 'Using local dev layout with BOT_NAME')
     } else {
-      // Default chapterx layout
       configPath = process.env.CONFIG_PATH || './config'
       tokenFilePath = process.env.DISCORD_TOKEN_FILE 
         ? join(process.cwd(), process.env.DISCORD_TOKEN_FILE)
@@ -57,7 +42,6 @@ async function main() {
     const toolsPath = process.env.TOOLS_PATH || './tools'
     const cachePath = process.env.CACHE_PATH || './cache'
 
-    // Read Discord token from file
     let discordToken: string
     
     try {
@@ -74,15 +58,12 @@ async function main() {
 
     logger.info({ configPath, toolsPath, cachePath, emsMode: !!emsPath }, 'Configuration loaded')
 
-    // Initialize components
     const queue = new EventQueue()
     const stateManager = new ChannelStateManager()
     const configSystem = new ConfigSystem(configPath)
 
-    // Initialize timer scheduler (for self-activation)
     const timerScheduler = createTimerScheduler(cachePath)
     await timerScheduler.initialize((event) => {
-      // Push timer events to the queue for processing
       queue.push(event)
       logger.info({
         type: event.type,
@@ -93,13 +74,8 @@ async function main() {
     const contextBuilder = new ContextBuilder()
     const toolSystem = new ToolSystem(toolsPath)
 
-    // Load vendor configs for membrane initialization
     const vendorConfigs = configSystem.loadVendors()
 
-    // Note: MCP servers are initialized on first bot activation
-    // They are configured in bot config and can be overridden per-guild/channel
-
-    // Initialize Discord connector
     const connector = new DiscordConnector(queue, {
       token: discordToken,
       cacheDir: cachePath + '/images',
@@ -108,7 +84,6 @@ async function main() {
 
     await connector.start()
 
-    // Get bot's Discord identity
     const botUserId = connector.getBotUserId()
     const botUsername = connector.getBotUsername()
     
@@ -116,19 +91,16 @@ async function main() {
       throw new Error('Failed to get bot identity from Discord')
     }
 
-    // Use BOT_NAME override (for EMS mode) or Discord username for config loading
     const botName = botNameOverride || botUsername
     logger.info({ botUsername, botUserId, botName, emsMode: !!emsPath }, 'Bot identity established')
 
-    // Generate and log the bot invite URL
     const inviteUrl = connector.generateInviteUrl()
     if (inviteUrl) {
       logger.info({ inviteUrl }, 'Bot invite URL (add to server)')
     }
 
-    // Create and start agent loop
     const agentLoop = new AgentLoop(
-      botName,  // Bot name from BOT_NAME env var (EMS mode) or Discord username
+      botName,
       queue,
       connector,
       stateManager,
@@ -137,20 +109,16 @@ async function main() {
       toolSystem
     )
 
-    // Set bot's Discord user ID for mention detection
     agentLoop.setBotUserId(botUserId)
 
-    // Initialize steering: probe catalog directory + vendor configs for /v1/encode calls
     const { initCatalogDir } = await import('./steering/index.js')
     initCatalogDir(configPath + '/probes')
     agentLoop.setVendorConfigs(vendorConfigs)
     logger.info({ catalogDir: configPath + '/probes' }, 'Steering probe catalog initialized')
 
-    // Load bot config early to get the display name for membrane
     const botConfigOnly = configSystem.loadBotConfigOnly(botName)
     const membraneAssistantName = botConfigOnly.name || botName
 
-    // Initialize membrane (required for LLM calls)
     if (process.env.MOCK_LLM) {
       const { MockMembrane } = await import('./llm/membrane/mock.js')
       agentLoop.setMembrane(new MockMembrane() as any)
@@ -163,7 +131,6 @@ async function main() {
       logger.info({ assistantName: membraneAssistantName }, 'Membrane initialized for agent loop')
     }
 
-    // Initialize TTS relay if configured in bot config
     if (botConfigOnly.tts_relay?.enabled) {
       try {
         await agentLoop.setTTSRelay({
@@ -180,7 +147,6 @@ async function main() {
       }
     }
 
-    // Start API server if configured
     let apiServer: ApiServer | null = null
     const apiPort = process.env.API_PORT ? parseInt(process.env.API_PORT) : 3000
     const apiBearerToken = process.env.API_BEARER_TOKEN
@@ -198,7 +164,6 @@ async function main() {
       logger.info('API server disabled (no API_BEARER_TOKEN set)')
     }
 
-    // Handle shutdown
     const shutdown = async (signal: string) => {
       logger.info({ signal }, 'Shutting down')
 
@@ -216,7 +181,6 @@ async function main() {
     process.on('SIGINT', () => shutdown('SIGINT'))
     process.on('SIGTERM', () => shutdown('SIGTERM'))
 
-    // Start the loop
     await agentLoop.run()
 
   } catch (error) {
@@ -225,7 +189,6 @@ async function main() {
   }
 }
 
-// Run
 main().catch((error) => {
   console.error('Unhandled error:', error)
   process.exit(1)

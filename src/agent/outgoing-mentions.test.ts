@@ -1,9 +1,3 @@
-/**
- * Tests for turning the model's mentions back into Discord mentions by id.
- *
- * Run with: npx vitest run outgoing-mentions
- */
-
 import { describe, it, expect } from 'vitest'
 import { mentionsToIds, type MentionAuthor } from './outgoing-mentions.js'
 
@@ -54,7 +48,6 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('@Jackson is someone else', [jack], byDisplayName)).toBe('@Jackson is someone else')
     const ren: MentionAuthor = { id: '777', username: 'ren', displayName: 'Ren', bot: false }
     expect(mentionsToIds('@René, not @Ren!', [ren], byDisplayName)).toBe('@René, not <@777>!')
-    // A longer name the conversation doesn't hold can't be known, so its start is read.
     const sam: MentionAuthor = { id: '888', username: 'sam_k', displayName: 'Sam', bot: false }
     expect(mentionsToIds('@Sam Altman', [sam], byDisplayName)).toBe('<@888> Altman')
   })
@@ -73,7 +66,6 @@ describe('mentionsToIds', () => {
   })
 
   it("reads as code what the splitter or Discord reads as code: a span nothing closes, a ``` mid-line in a block, and a span opened in a ~~~ block", () => {
-    // The splitter closes the span at the end of the message, so Discord shows it as code.
     expect(mentionsToIds('Example: `x @Jack', [jack], byDisplayName)).toBe('Example: `x @Jack')
     // Discord ends this block at the ``` mid-line, the splitter at its closer line.
     expect(mentionsToIds('```\n@Jack\n``` then @Jack', [jack], byDisplayName)).toBe('```\n@Jack\n``` then @Jack')
@@ -82,13 +74,10 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds(twoBlocks, [jack], byDisplayName)).toBe(twoBlocks)
     // Discord has no ~~~ blocks, so a span can open inside one the splitter reads and end after it.
     expect(mentionsToIds('~~~\n`x\n~~~\n@Jack`', [jack], byDisplayName)).toBe('~~~\n`x\n~~~\n@Jack`')
-    // Read whole, the ``` a span holds is a block too, as a later message shows it once a cut inside the ~~~ block leaves the span's opener behind.
     const hidden = '~~~\n`' + 'a'.repeat(1800) + ' ```b`\n~~~\n@Jack\n```'
     expect(mentionsToIds(hidden, [jack], byDisplayName)).toBe(hidden)
-    // And a carried span's fused reopener is read as the splitter's parse reads it, to the end, as a later message can pair what's left.
     const fused = '`x\n~~~\n' + 'a'.repeat(1800) + '`\n~~~\n@Jack`'
     expect(mentionsToIds(fused, [jack], byDisplayName, [{ kind: 'inlineCode', opener: '`', closer: '`' }])).toBe(fused)
-    // Read from left to right, a span holds a ``` and the next ``` opens a block, or a block ends at a run's first three and its last backtick opens a span.
     const spanThenBlock = '~~~\n`x ``` b`\n```\n~~~\n@Jack\n````'
     expect(mentionsToIds(spanThenBlock, [jack], byDisplayName)).toBe(spanThenBlock)
     const blockThenSpan = '~~~\n```a````b `` c\n~~~\n@Jack`'
@@ -124,7 +113,6 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('<@Slash\\>`<@jack_h4ndle>`', [slash, jack], byDisplayName)).toBe('@Slash\\\\`<@jack_h4ndle>`')
     const even: MentionAuthor = { id: 'w2', username: 'Even\\\\', displayName: 'Even\\\\', bot: false, webhook: true }
     expect(mentionsToIds('<@Even\\\\> hi', [even], byDisplayName)).toBe('@Even\\\\ hi')
-    // A <@ in the name is escaped, so no > after it makes a mention of it.
     const nested: MentionAuthor = { id: 'w3', username: 'X<@Jack\\', displayName: 'X<@Jack\\', bot: false, webhook: true }
     expect(mentionsToIds('<@X<@Jack\\>>', [nested], byDisplayName)).toBe('@X<\\@Jack\\\\>')
   })
@@ -134,7 +122,6 @@ describe('mentionsToIds', () => {
     const bob: MentionAuthor = { id: '444', username: 'bob', displayName: 'bob', bot: false }
     const config = { mention_format: '[{name}]\\', use_display_names_humans: true }
     expect(mentionsToIds('[Jack\\]\\` <@bob> `', [slash, bob], config)).toBe('[Jack\\]\\` <@444> `')
-    // The suffix's backslash alone, after a name that has none.
     const plain: MentionAuthor = { id: '555', username: 'jack_h4ndle', displayName: 'Jack', bot: false }
     expect(mentionsToIds('[Jack]\\` <@bob> `', [plain, bob], config)).toBe('[Jack]\\` <@444> `')
   })
@@ -144,10 +131,8 @@ describe('mentionsToIds', () => {
     const bob: MentionAuthor = { id: '444', username: 'bob', displayName: 'bob', bot: false }
     const config = { mention_format: '[{name}]\\', use_display_names_humans: true }
     expect(mentionsToIds('[X <@bob>]\\', [tagged, bob], config)).toBe('[X <\\@bob>]\\')
-    // A bot's @Name, left as written, each <@ in it.
     const bot: MentionAuthor = { id: '777', username: 'botty', displayName: 'Helper <@alice> <@bob>', bot: true }
     expect(mentionsToIds('ask @Helper <@alice> <@bob>', [bot, bob], byDisplayName)).toBe('ask @Helper <\\@alice> <\\@bob>')
-    // A mention left as written because part of it is code, outside the code.
     const coded: MentionAuthor = { id: 'w5', username: 'X `y` <@bob>', displayName: 'X `y` <@bob>', bot: false, webhook: true }
     expect(mentionsToIds('<@X `y` <@bob>>', [coded, bob], byDisplayName)).toBe('<\\@X `y` <\\@bob>>')
   })
@@ -158,16 +143,12 @@ describe('mentionsToIds', () => {
     expect(mentionsToIds('<<@Sam>>', [sam1, sam2], byDisplayName)).toBe('<\\@Sam>')
     const lt: MentionAuthor = { id: 'w4', username: 'X<', displayName: 'X<', bot: false, webhook: true }
     expect(mentionsToIds('<@X<>@&111111111111111111>', [lt], byDisplayName)).toBe('@X<\\@&111111111111111111>')
-    // Right after another mention written as plain text, it reads that mention's text as its edge.
     expect(mentionsToIds('<@X<><@Sam>>', [lt, sam1, sam2], byDisplayName)).toBe('@X<\\@Sam>')
-    // With text between, it reads the text.
     expect(mentionsToIds('<@X<> <@Sam>', [lt, sam1, sam2], byDisplayName)).toBe('@X< @Sam')
-    // A name left as written that ends in < before an @.
     const botLt: MentionAuthor = { id: '901', username: 'xbot', displayName: 'X<', bot: true }
     expect(mentionsToIds('@X<@Sam>', [botLt, sam1, sam2], byDisplayName)).toBe('@X<\\@Sam>')
     // In code too, where Discord shows the backslash: what's read as code here reaches past what Discord shows as code.
     expect(mentionsToIds('```\n@X<@Sam>\n```', [botLt, sam1, sam2], byDisplayName)).toBe('```\n@X<\\@Sam>\n```')
-    // A mention written as <@id> after a < keeps its <@.
     expect(mentionsToIds('<<@Jack>>', [jack], byDisplayName)).toBe('<<@111>>')
   })
 
@@ -186,16 +167,13 @@ describe('mentionsToIds', () => {
     const bangShaped: MentionAuthor = { id: '444444444444444444', username: 'bang_h4ndle', displayName: '!555555555555555555', bot: false }
     const numbered: MentionAuthor = { id: '666666666666666666', username: 'num', displayName: '777777777777777777', bot: false }
     const people = [roleShaped, bangShaped, numbered]
-    // Outside code, each name goes to the person shown by it, and a mention by id stays as written.
     expect(mentionsToIds('<@&222222222222222222> <@!555555555555555555> <@777777777777777777>', people, byDisplayName))
       .toBe('<@333333333333333333> <@444444444444444444> <@777777777777777777>')
     // Here the block read on its own reads them as code, where Discord reads prose.
     expect(mentionsToIds('Use `x ```y` <@&222222222222222222> <@!555555555555555555> <@777777777777777777> ```', people, byDisplayName))
       .toBe('Use `x ```y` <\\@&222222222222222222> <\\@!555555555555555555> <@777777777777777777> ```')
-    // Only what follows each <@ itself is read: a mention by id stays as written before a role's mention too.
     expect(mentionsToIds('Use `x ```y` <@777777777777777777> <@&222222222222222222> ```', people, byDisplayName))
       .toBe('Use `x ```y` <@777777777777777777> <\\@&222222222222222222> ```')
-    // A mention by id that starts the text, inside a span carried open, stays as written too.
     const span = [{ kind: 'inlineCode' as const, opener: '`', closer: '`' }]
     expect(mentionsToIds('<@777777777777777777> x` y', people, byDisplayName, span)).toBe('<@777777777777777777> x` y')
   })
@@ -206,7 +184,6 @@ describe('mentionsToIds', () => {
     const numbered: MentionAuthor = { id: '444444444444444444', username: 'num', displayName: '555555555555555555', bot: false }
     const bang = { use_display_names_humans: true, mention_format: '<@!{name}>' }
     expect(mentionsToIds('<@!555555555555555555> x', [numbered], bang)).toBe('<@444444444444444444> x')
-    // Text that begins inside a carried span.
     const span = [{ kind: 'inlineCode' as const, opener: '`', closer: '`' }]
     expect(mentionsToIds('<@!555555555555555555> x` y', [numbered], bang, span)).toBe('<\\@!555555555555555555> x` y')
   })
@@ -277,8 +254,6 @@ describe('mentionsToIds', () => {
 
   it('pings a bot in the conversation only through <@Name>, by its id, and leaves a name the conversation doesn\'t hold to the connector', () => {
     expect(mentionsToIds('@Helper <@Helper>', [otherBot], byDisplayName)).toBe('@Helper <@333>')
-    // Its username too, though the context shows it by its display name, so
-    // the connector's lookup, which prefers a person, doesn't get it.
     expect(mentionsToIds('<@helperbot>', [otherBot], byDisplayName)).toBe('<@333>')
     expect(mentionsToIds('<@helperbot>', [otherBot], { use_display_names_bots: false })).toBe('<@333>')
     expect(mentionsToIds('<@somebot>', [otherBot], byDisplayName)).toBe('<@somebot>')
@@ -307,7 +282,6 @@ describe('mentionsToIds', () => {
   it("under username labels, reads <@Name> as a person's username before a bot's display name, as main did", () => {
     const helperPerson: MentionAuthor = { id: '125', username: 'helper', displayName: 'Helper Person', bot: false }
     expect(mentionsToIds('<@Helper>', [otherBot, helperPerson], byUsername)).toBe('<@125>')
-    // A bot whose display name is its username is written <@helper> too, so the two share that form.
     const helperBot: MentionAuthor = { id: '334', username: 'helper', displayName: 'helper', bot: true }
     expect(mentionsToIds('<@helper>', [helperBot, helperPerson], byUsername)).toBe('@helper')
   })
@@ -330,14 +304,11 @@ describe('mentionsToIds', () => {
     const named = (config: object) => ({ name: 'Claude', ...config })
     expect(mentionsToIds('@Claude and <@Claude>', [claude], named(byDisplayName))).toBe('@Claude and @Claude')
     expect(mentionsToIds('<@Claude> <@claude_fan>', [claude], named(byUsername))).toBe('@Claude <@444>')
-    // A person whose username is the bot's name, labelled by username as by default.
     const claudeUser: MentionAuthor = { id: '445', username: 'claude', displayName: 'Claude', bot: false }
     expect(mentionsToIds('<@claude>', [claudeUser], named(byUsername))).toBe('@claude')
     expect(mentionsToIds('[Claude]', [claude], named({ ...byDisplayName, mention_format: '[{name}]' }))).toBe('[Claude]')
     expect(mentionsToIds('<@Claude>', [claude], named({ ...byDisplayName, mention_format: '<@{name}>' }))).toBe('@Claude')
-    // With no one else of that name, <@config.name> still isn't left to the connector's lookup.
     expect(mentionsToIds('<@Claude>', [jack], named(byDisplayName))).toBe('@Claude')
-    // Without config.name, the person is pinged.
     expect(mentionsToIds('@Claude', [claude], byDisplayName)).toBe('<@444>')
   })
 
@@ -359,9 +330,7 @@ describe('mentionsToIds', () => {
   it('reads a name starting with İ, whose lowercase the regex flags would not fold back', () => {
     const ilayda: MentionAuthor = { id: '221', username: 'ilayda_k', displayName: 'İlayda', bot: false }
     expect(mentionsToIds('@İlayda and <@İlayda>', [ilayda], byDisplayName)).toBe('<@221> and <@221>')
-    // Its lowercase, as the model might write it: i and a combining dot.
     expect(mentionsToIds('@i\u0307layda', [ilayda], byDisplayName)).toBe('<@221>')
-    // The same name in the <@Name> form the context writes under a <@{name}> template.
     expect(mentionsToIds('<@İlayda>', [ilayda], { ...byDisplayName, mention_format: '<@{name}>' })).toBe('<@221>')
   })
 

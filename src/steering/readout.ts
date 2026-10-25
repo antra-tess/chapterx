@@ -15,13 +15,9 @@
 
 import type { ChannelSteering } from './types.js'
 
-// ---------------------------------------------------------------------------
-// vLLM response shape (subset relevant to readouts)
-// ---------------------------------------------------------------------------
-
 interface VLLMReadoutData {
-  token_probes: Record<string, number[][]>  // setName → (n_tokens × n_labels)
-  probe_names: Record<string, string[]>     // setName → label names
+  token_probes: Record<string, number[][]>
+  probe_names: Record<string, string[]>
   response_tokens?: string[]
   probe_status?: string
   generation_mode?: string
@@ -35,16 +31,11 @@ interface VLLMReadoutData {
   response_token_ids?: number[]
 }
 
-/**
- * Extract readout data from a raw vLLM response.
- * Returns null if no readout data is present.
- */
 export function extractReadout(rawResponse: unknown): VLLMReadoutData | null {
   if (!rawResponse || typeof rawResponse !== 'object') return null
 
   const resp = rawResponse as Record<string, unknown>
 
-  // Check for token_probes at top level (non-streaming or final chunk data)
   const tokenProbes = resp.token_probes as Record<string, number[][]> | undefined
   const probeNames = resp.probe_names as Record<string, string[]> | undefined
 
@@ -60,7 +51,6 @@ export function extractReadout(rawResponse: unknown): VLLMReadoutData | null {
     }
   }
 
-  // May also have intervention_applied even without probes
   if (resp.intervention_applied && Array.isArray(resp.intervention_applied)) {
     return {
       token_probes: {},
@@ -75,23 +65,17 @@ export function extractReadout(rawResponse: unknown): VLLMReadoutData | null {
   return null
 }
 
-/**
- * Format readout data into a markdown string for a file embed.
- * Returns null if there's nothing meaningful to display.
- */
 export function formatReadout(
   rawResponse: unknown,
   steering: ChannelSteering,
 ): string | null {
   const readout = extractReadout(rawResponse)
 
-  // Show readout if we have probe data or active interventions
   const hasProbes = readout && Object.keys(readout.token_probes).length > 0
   if (!hasProbes && steering.interventions.length === 0) return null
 
   const lines: string[] = []
 
-  // Header
   lines.push(`# Steering Readout`)
   lines.push(`Model: \`${steering.model}\` | Set by: <@${steering.set_by}> | ${steering.updated_at}`)
   if (readout?.generation_mode) {
@@ -99,7 +83,6 @@ export function formatReadout(
   }
   lines.push('')
 
-  // Active interventions summary (from our config or from vLLM's confirmation)
   const applied = readout?.intervention_applied
   if (applied && applied.length > 0) {
     lines.push('## Interventions Applied (confirmed by vLLM)')
@@ -119,7 +102,6 @@ export function formatReadout(
     lines.push('')
   }
 
-  // Probe projection tables
   if (hasProbes) {
     lines.push('## Probe Projections')
 
@@ -129,13 +111,11 @@ export function formatReadout(
       const labels = readout.probe_names[setName] || []
       const nTokens = projections.length
 
-      // Compute per-label aggregates across tokens
       const nLabels = projections[0]?.length || 0
       if (nLabels === 0) continue
 
       lines.push(`### ${setName} (${nTokens} tokens, ${nLabels} labels)`)
 
-      // For large label sets, show top-N by absolute mean
       const labelStats: Array<{ label: string; mean: number; min: number; max: number }> = []
       for (let j = 0; j < nLabels; j++) {
         const values = projections.map(row => row[j] ?? 0)
@@ -150,7 +130,6 @@ export function formatReadout(
         })
       }
 
-      // Sort by absolute mean descending, show top 20
       labelStats.sort((a, b) => Math.abs(b.mean) - Math.abs(a.mean))
       const shown = labelStats.slice(0, 20)
 
@@ -169,7 +148,6 @@ export function formatReadout(
     lines.push('')
   }
 
-  // Token count
   if (readout?.response_token_ids) {
     lines.push(`Response tokens: ${readout.response_token_ids.length}`)
   }

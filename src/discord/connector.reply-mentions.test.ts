@@ -35,7 +35,6 @@ function makeConnector() {
   return { connector, channel, cleanup: () => rmSync(tmpCache, { recursive: true, force: true }) }
 }
 
-/** The allowed_mentions discord.js sends for the options the connector gave channel.send. */
 function allowedMentionsSent(options: Record<string, unknown>): unknown {
   const target = {
     client: { options: { allowedMentions: undefined, jsonTransformer: (x: unknown) => x } },

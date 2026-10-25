@@ -1,12 +1,3 @@
-/**
- * Timer Scheduler
- *
- * Core component that manages scheduled wake timers.
- * - Persists timers to disk (survives restarts)
- * - Runs background check for due timers
- * - Fires self_activation events when timers trigger
- */
-
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { join, dirname } from 'path'
 import { existsSync } from 'fs'
@@ -18,8 +9,8 @@ export interface ScheduledTimer {
   botId: string
   channelId: string
   guildId: string
-  triggerAt: number  // Unix timestamp ms
-  contextNote: string  // What the bot wanted to remember
+  triggerAt: number
+  contextNote: string
   createdAt: number
   createdByMessageId: string
 }
@@ -35,23 +26,17 @@ export class TimerScheduler {
   private storePath: string
   private onTimerFire: ((event: Event) => void) | null = null
 
-  // Check interval in ms (3 seconds for responsive short timers)
   private static readonly CHECK_INTERVAL_MS = 3_000
 
   constructor(cacheDir: string = './cache') {
     this.storePath = join(cacheDir, 'timers.json')
   }
 
-  /**
-   * Initialize the scheduler - load timers and start background checker
-   */
   async initialize(onTimerFire: (event: Event) => void): Promise<void> {
     this.onTimerFire = onTimerFire
 
-    // Load persisted timers
     await this.loadTimers()
 
-    // Start background check
     this.startChecker()
 
     logger.info({
@@ -60,9 +45,6 @@ export class TimerScheduler {
     }, 'Timer scheduler initialized')
   }
 
-  /**
-   * Schedule a wake timer
-   */
   async scheduleTimer(params: {
     botId: string
     channelId: string
@@ -97,9 +79,6 @@ export class TimerScheduler {
     return timer
   }
 
-  /**
-   * Cancel a timer by ID
-   */
   async cancelTimer(timerId: string): Promise<boolean> {
     const timer = this.timers.get(timerId)
     if (!timer) {
@@ -113,9 +92,6 @@ export class TimerScheduler {
     return true
   }
 
-  /**
-   * Get all timers for a bot/channel
-   */
   getTimers(botId: string, channelId?: string): ScheduledTimer[] {
     const timers: ScheduledTimer[] = []
     for (const timer of this.timers.values()) {
@@ -128,9 +104,6 @@ export class TimerScheduler {
     return timers.sort((a, b) => a.triggerAt - b.triggerAt)
   }
 
-  /**
-   * Stop the scheduler
-   */
   stop(): void {
     if (this.checkInterval) {
       clearInterval(this.checkInterval)
@@ -138,10 +111,6 @@ export class TimerScheduler {
     }
     logger.info('Timer scheduler stopped')
   }
-
-  // ============================================================================
-  // Private methods
-  // ============================================================================
 
   private startChecker(): void {
     this.checkInterval = setInterval(() => {
@@ -165,13 +134,11 @@ export class TimerScheduler {
 
     logger.debug({ dueCount: dueTimers.length }, 'Found due timers')
 
-    // Fire events for each due timer
     for (const timer of dueTimers) {
       this.fireTimer(timer)
       this.timers.delete(timer.id)
     }
 
-    // Save after removing fired timers
     await this.saveTimers()
   }
 
@@ -215,7 +182,6 @@ export class TimerScheduler {
       const data = await readFile(this.storePath, 'utf-8')
       const store: TimerStore = JSON.parse(data)
 
-      // Filter out expired timers on load
       const now = Date.now()
       let expiredCount = 0
 
@@ -224,7 +190,6 @@ export class TimerScheduler {
           this.timers.set(timer.id, timer)
         } else {
           expiredCount++
-          // Fire expired timers that were missed (e.g., during downtime)
           logger.info({
             timerId: timer.id,
             missedBy: Math.round((now - timer.triggerAt) / 1000),
@@ -245,7 +210,6 @@ export class TimerScheduler {
 
   private async saveTimers(): Promise<void> {
     try {
-      // Ensure directory exists
       const dir = dirname(this.storePath)
       if (!existsSync(dir)) {
         await mkdir(dir, { recursive: true })
@@ -265,7 +229,6 @@ export class TimerScheduler {
   }
 }
 
-// Singleton instance
 let schedulerInstance: TimerScheduler | null = null
 
 export function getTimerScheduler(): TimerScheduler | null {

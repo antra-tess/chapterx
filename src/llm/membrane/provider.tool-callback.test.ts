@@ -1,16 +1,7 @@
-/**
- * What MembraneProvider.stream hands membrane's stream().
- *
- * Run with: npx vitest run provider.tool-callback
- */
-
 import { describe, it, expect, vi } from 'vitest'
 import { Membrane } from '@animalabs/membrane'
 import { MembraneProvider } from './provider.js'
 
-// The provider writes each request and response, and its streaming metrics,
-// to files under ./logs. Keep those files off the disk. The logger's own
-// logs/activations/general.log is written as in the repository's other tests.
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>()
   return { ...actual, writeFileSync: () => undefined, appendFileSync: () => undefined }
@@ -43,7 +34,6 @@ function membraneFrom0581() {
   return { handed, provider: new MembraneProvider(membrane as any) }
 }
 
-/** A ChapterX request on the native path, with streaming and tools as given. */
 function request(streaming: boolean | undefined, tools?: unknown[]): any {
   return {
     messages: [{ participant: 'alice', content: [{ type: 'text', text: 'What time is it?' }] }],
@@ -88,8 +78,6 @@ describe('MembraneProvider.stream', () => {
     expect(handed).toEqual([{ streaming: false, tools: 1, onToolCalls }])
   })
 
-  // A caller that gives no callback, as the inline tool path doesn't, must not
-  // meet the refusal either.
   it('hands membrane no tool callback when its caller gives none', async () => {
     for (const streaming of [false, undefined]) {
       const { handed, provider } = membraneFrom0581()

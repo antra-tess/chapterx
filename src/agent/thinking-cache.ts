@@ -19,25 +19,15 @@ import { logger } from '../utils/logger.js'
 
 export type ThinkingBlock = ThinkingContent | RedactedThinkingContent
 
-/** Thinking blocks re-attached to one bot message */
 export interface ThinkingGroup {
   blocks: ThinkingBlock[]
-  /** True when all blocks come from one API response. False only for entries
-   *  persisted before final-step-only persistence that hold several blocks —
-   *  those may be several tool-loop responses flattened together. */
   singleResponse: boolean
 }
 
 export interface ThinkingCacheEntry {
-  /** The bot's sent Discord message IDs for the activation that produced these blocks */
   botMessageIds: string[]
-  /** Thinking blocks exactly as received from the API (verbatim round-trip) */
   blocks: ThinkingBlock[]
-  /** Set on entries whose blocks all come from one API response (the final
-   *  step of the activation). Absent on entries written before that rule. */
   singleResponse?: boolean
-  /** Model that produced the blocks — blocks are model-bound and must be
-   *  stripped when the bot's model changes (per Anthropic docs) */
   model?: string
   timestamp: string
 }
@@ -63,11 +53,6 @@ export function finalStepThinkingBlocks(content: ReadonlyArray<{ type: string }>
   return content.slice(start).filter(isThinkingBlock)
 }
 
-/**
- * Persist thinking blocks for an activation. `blocks` must come from ONE API
- * response (use finalStepThinkingBlocks for tool loops). No-op when there are
- * no blocks or no sent messages to anchor them to (phantom activations).
- */
 export function persistThinkingBlocks(
   cacheDir: string,
   botId: string,
@@ -103,11 +88,6 @@ export function persistThinkingBlocks(
   }
 }
 
-/**
- * Load thinking blocks for a channel, keyed by the FIRST sent bot message ID
- * of each activation (the anchor message the blocks get prepended to).
- * Entries whose anchor message no longer exists in context are dropped.
- */
 export function loadThinkingBlocks(
   cacheDir: string,
   botId: string,
@@ -137,10 +117,6 @@ export function loadThinkingBlocks(
           filtered++
           continue
         }
-        // Note: entries record the producing model (metadata only). Blocks are
-        // model-bound per Anthropic docs, but continuation models don't change
-        // in practice — no load-time filtering on model.
-        // Last write wins per anchor (re-generations replace earlier blocks)
         result.set(anchor, {
           blocks: entry.blocks,
           singleResponse: entry.singleResponse === true || entry.blocks.length === 1,
@@ -157,10 +133,6 @@ export function loadThinkingBlocks(
   return result
 }
 
-/**
- * Prepend cached thinking blocks to the bot's corresponding messages.
- * Must run BEFORE consecutive-message merging so anchors resolve by messageId.
- */
 export function attachThinkingBlocks(
   messages: Array<{ messageId?: string; isBot?: boolean; content: ContentBlock[] }>,
   thinkingByMessageId: Map<string, ThinkingGroup>
@@ -177,17 +149,6 @@ export function attachThinkingBlocks(
   return attached
 }
 
-/**
- * Make every turn's thinking acceptable to the API: each maximal run of
- * adjacent thinking blocks must be exactly one single-response group, in
- * order. Any other run is dropped — in practice a cache entry written before
- * final-step-only persistence, whose tool-loop responses were flattened
- * together. Runs separated by other content are checked independently.
- *
- * Run after merging and limits, on the final message list. Identifies groups
- * by block identity, so `groups` must be the same objects that were attached.
- * Returns the number of blocks dropped.
- */
 export function sanitizeThinkingRuns(
   messages: Array<{ content: ContentBlock[] }>,
   groups: Iterable<ThinkingGroup>

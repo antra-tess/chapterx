@@ -17,9 +17,6 @@ afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()!()
 })
 
-/** A connector whose channel holds one message from each of `authors`. A
- *  member fetch answers from `notMembers`, else finds the member with the
- *  nickname `Nick <id>`, caching it as discord.js does. */
 function harness(authors: string[], notMembers: string[] = [], webhooks: Record<string, string> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'connector-member-names-test-'))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
@@ -34,7 +31,7 @@ function harness(authors: string[], notMembers: string[] = [], webhooks: Record<
       resolve: (user: { id: string }) => memberCache.get(user.id) ?? null,
       fetch: async (userId: string) => {
         calls.push(userId)
-        await new Promise((resolve) => setTimeout(resolve, 5))  // a round trip
+        await new Promise((resolve) => setTimeout(resolve, 5))
         if (notMembers.includes(userId)) throw Object.assign(new Error('Unknown Member'), { code: 10007 })
         const member = { id: userId, nickname: `Nick ${userId}`, roles: { cache: new Map() } }
         memberCache.set(userId, member)

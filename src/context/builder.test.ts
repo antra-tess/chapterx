@@ -1,15 +1,3 @@
-/**
- * Regression tests for ContextBuilder
- *
- * Covers:
- * - Each pipeline stage (private methods via `any` cast — pre-refactoring scaffolds)
- * - Full buildContext() integration with representative scenarios
- * - Cache marker stability through transformations
- * - Message ID survival across filtering/merging/injection
- *
- * Run with: npx vitest run builder
- */
-
 import { describe, it, expect, beforeEach } from 'vitest'
 import { ContextBuilder, type BuildContextParams } from './builder.js'
 import {
@@ -44,10 +32,6 @@ import type {
 } from '../types.js'
 import type { Activation, Completion, MessageContext } from '../activation/index.js'
 import type { ContextInjection } from '../tools/plugins/types.js'
-
-// ============================================================================
-// Fixture factories
-// ============================================================================
 
 let msgCounter = 0
 
@@ -172,11 +156,6 @@ function makeContextInjection(overrides: Partial<ContextInjection> = {}): Contex
   }
 }
 
-// ============================================================================
-// Test helpers
-// ============================================================================
-
-/** Extract text from participant messages (ignoring images) */
 function textOf(msg: ParticipantMessage): string {
   return msg.content
     .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
@@ -184,19 +163,13 @@ function textOf(msg: ParticipantMessage): string {
     .join('')
 }
 
-/** Get all participant names from message array */
 function participants(msgs: ParticipantMessage[]): string[] {
   return msgs.map(m => m.participant)
 }
 
-/** Get all message IDs from message array */
 function messageIds(msgs: ParticipantMessage[]): (string | undefined)[] {
   return msgs.map(m => m.messageId)
 }
-
-// ============================================================================
-// Unit tests: mergeConsecutiveBotMessages
-// ============================================================================
 
 describe('mergeConsecutiveBotMessages', () => {
   let builder: ContextBuilder
@@ -215,7 +188,7 @@ describe('mergeConsecutiveBotMessages', () => {
 
     expect(result).toHaveLength(1)
     expect(result[0].content).toBe('first part second part')
-    expect(result[0].id).toBe('b1') // keeps first message's ID
+    expect(result[0].id).toBe('b1')
   })
 
   it('does not merge non-consecutive bot messages', () => {
@@ -273,7 +246,6 @@ describe('mergeConsecutiveBotMessages', () => {
     ]
     const result = mergeConsecutiveBotMessages(messages, 'TestBot')
 
-    // The reply-prefixed dot message should not merge
     expect(result).toHaveLength(2)
   })
 
@@ -291,14 +263,9 @@ describe('mergeConsecutiveBotMessages', () => {
     mergeConsecutiveBotMessages(messages, 'TestBot')
 
     expect(messages).toHaveLength(2)
-    // Original content not mutated in the source array
     expect(messages[0]!.content).toBe(original[0]!.content)
   })
 })
-
-// ============================================================================
-// Unit tests: filterDotMessages
-// ============================================================================
 
 describe('filterDotMessages', () => {
   let builder: ContextBuilder
@@ -308,13 +275,11 @@ describe('filterDotMessages', () => {
     builder = new ContextBuilder()
   })
 
-  // Helper: assert which IDs survived the filter, in order.
   const expectKept = (input: DiscordMessage[], steerVisible: boolean, keptIds: string[]) => {
     const result = filterDotMessages(input, steerVisible)
     expect(result.map(m => m.id)).toEqual(keptIds)
   }
 
-  // ── Classic dot commands (dot + letter) ──
   it('filters classic dot commands: .config, .history', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '.config something' }),
@@ -333,7 +298,6 @@ describe('filterDotMessages', () => {
     expectKept(messages, true, ['u3'])
   })
 
-  // ── Hide-markers (dot + non-letter): the regression that prompted this ──
   it('filters dot + space ("hide prefix")', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '. they can see this' }),
@@ -387,7 +351,6 @@ describe('filterDotMessages', () => {
     expectKept(messages, true, ['u3'])
   })
 
-  // ── Ellipsis preservation ──
   it('preserves ellipsis patterns', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '...' }),
@@ -399,7 +362,6 @@ describe('filterDotMessages', () => {
     expectKept(messages, true, ['u1', 'u2', 'u3', 'u4', 'u5'])
   })
 
-  // ── Reply-prefix stripping ──
   it('filters a dot command sitting behind a reply prefix', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '<reply:@bot> .m continue' }),
@@ -417,7 +379,6 @@ describe('filterDotMessages', () => {
     expectKept(messages, true, ['u1', 'u2'])
   })
 
-  // ── Mention-prefix stripping (the asymmetry fix) ──
   it('filters a dot command behind a leading user mention', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '<@alice> .config foo' }),
@@ -445,8 +406,6 @@ describe('filterDotMessages', () => {
   })
 
   it('filters a dot command behind a resolved role mention (@name form)', () => {
-    // convertMessage now resolves <@&id> → @rolename (portal- stripped), so the
-    // leading-mention strip must handle the bare @name form too.
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '@glm52 .config foo' }),
       makeDiscordMessage({ id: 'u2', content: '@nemotron-3-ultra @Fugu .history clear' }),
@@ -471,7 +430,6 @@ describe('filterDotMessages', () => {
     expectKept(messages, true, ['u1', 'u2'])
   })
 
-  // ── .steer interaction ──
   it('preserves .steer when steerVisible=true', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '.steer be helpful' }),
@@ -495,7 +453,6 @@ describe('filterDotMessages', () => {
   })
 
   it('treats ". steer" (dot-space) as a hide-marker, not as .steer', () => {
-    // steer preservation requires the dot and word to be contiguous.
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '. steer probe' }),
     ]
@@ -509,7 +466,6 @@ describe('filterDotMessages', () => {
     expectKept(messages, true, [])
   })
 
-  // ── Reaction filtering ──
   it('filters messages with the 🫥 (dotted_line_face) reaction', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: 'hide me', reactions: [{ emoji: '🫥', count: 1 }] }),
@@ -527,7 +483,6 @@ describe('filterDotMessages', () => {
     expectKept(messages, true, ['u2'])
   })
 
-  // ── 👁️‍🗨️ reaction override (unhide) ──
   it('👁️‍🗨️ reaction keeps a dotted message visible', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: '.hidden command' }),
@@ -562,7 +517,6 @@ describe('filterDotMessages', () => {
     expectKept(messages, true, ['u1'])
   })
 
-  // ── Negative cases (should survive) ──
   it('does not filter messages that merely contain a dot mid-sentence', () => {
     const messages = [
       makeDiscordMessage({ id: 'u1', content: 'check out www.example.com' }),
@@ -576,10 +530,6 @@ describe('filterDotMessages', () => {
     expect(filterDotMessages([], true)).toEqual([])
   })
 })
-
-// ============================================================================
-// Unit tests: mergeConsecutiveParticipantMessages
-// ============================================================================
 
 describe('mergeConsecutiveParticipantMessages', () => {
   let builder: ContextBuilder
@@ -652,9 +602,6 @@ describe('mergeConsecutiveParticipantMessages', () => {
     const result = mergeConsecutiveParticipantMessages(messages)
 
     expect(result).toHaveLength(1)
-    // The merge joins the last text block of msg1 with the first text block of msg2,
-    // so: [text("look at this pretty cool right"), image] — the image stays in place
-    // and the text blocks get merged around it.
     expect(result[0].content).toHaveLength(2)
     expect(result[0].content[0].type).toBe('text')
     expect(result[0].content[0].text).toContain('look at this')
@@ -667,10 +614,6 @@ describe('mergeConsecutiveParticipantMessages', () => {
     expect(result).toHaveLength(0)
   })
 })
-
-// ============================================================================
-// Unit tests: collectCoveredToolMessageIds
-// ============================================================================
 
 describe('collectCoveredToolMessageIds', () => {
   it('covers every bot message of an entry written before coverage was recorded', () => {
@@ -738,10 +681,6 @@ describe('collectCoveredToolMessageIds', () => {
   })
 })
 
-// ============================================================================
-// Unit tests: formatToolUseWithResults
-// ============================================================================
-
 describe('formatToolUseWithResults', () => {
   let builder: ContextBuilder
 
@@ -760,10 +699,8 @@ describe('formatToolUseWithResults', () => {
     const result = formatToolUseWithResults(toolCache, 'TestBot')
 
     expect(result).toHaveLength(2)
-    // First: bot's completion text
     expect(result[0].participant).toBe('TestBot')
     expect(textOf(result[0])).toBe('searching...')
-    // Second: system tool result
     expect(result[1].participant).toBe('System<[search]')
     expect(textOf(result[1])).toBe('found 3 results')
   })
@@ -780,7 +717,6 @@ describe('formatToolUseWithResults', () => {
     ]
     const result = formatToolUseWithResults(toolCache, 'TestBot')
 
-    // Tool result should have text + image
     const toolResult = result[1]
     expect(toolResult.content).toHaveLength(2)
     expect(toolResult.content[0].type).toBe('text')
@@ -942,10 +878,6 @@ describe('formatToolUseWithResults', () => {
   })
 })
 
-// ============================================================================
-// Unit tests: buildStopSequences
-// ============================================================================
-
 describe('buildStopSequences', () => {
   let builder: ContextBuilder
 
@@ -1050,10 +982,6 @@ describe('buildStopSequences', () => {
   })
 })
 
-// ============================================================================
-// Unit tests: extractModelConfig
-// ============================================================================
-
 describe('extractModelConfig', () => {
   let builder: ContextBuilder
 
@@ -1101,10 +1029,6 @@ describe('extractModelConfig', () => {
     expect(result.streaming).toBe(true)
   })
 })
-
-// ============================================================================
-// Unit tests: injectActivationCompletions
-// ============================================================================
 
 describe('injectActivationCompletions', () => {
   let builder: ContextBuilder
@@ -1212,7 +1136,7 @@ describe('injectActivationCompletions', () => {
           {
             index: 0,
             text: 'phantom visible text here',
-            sentMessageIds: [], // phantom — no sent messages
+            sentMessageIds: [],
             toolCalls: [],
             toolResults: [],
           },
@@ -1229,11 +1153,10 @@ describe('injectActivationCompletions', () => {
     ]
     injectActivationCompletions(messages, activations, 'TestBot')
 
-    // Phantom should be inserted after anchor (u1)
     expect(messages).toHaveLength(3)
     expect(messages[1].participant).toBe('TestBot')
     expect(textOf(messages[1])).toBe('phantom visible text here')
-    expect(messages[1].messageId).toBeUndefined() // phantom has no messageId
+    expect(messages[1].messageId).toBeUndefined()
   })
 
   it('skips thinking-only phantoms', () => {
@@ -1255,7 +1178,6 @@ describe('injectActivationCompletions', () => {
     ]
     injectActivationCompletions(messages, activations, 'TestBot')
 
-    // Should NOT insert the thinking-only phantom
     expect(messages).toHaveLength(1)
   })
 
@@ -1274,7 +1196,6 @@ describe('injectActivationCompletions', () => {
     ]
     injectActivationCompletions(messages, activations, 'TestBot')
 
-    // Should merge b1 and b2 since they're from the same activation
     expect(messages).toHaveLength(1)
     expect(textOf(messages[0])).toBe('prefix1-part1prefix2-part2')
   })
@@ -1290,14 +1211,9 @@ describe('injectActivationCompletions', () => {
     ]
     injectActivationCompletions(messages, activations, 'TestBot')
 
-    // alice's message should be untouched
     expect(textOf(messages[0])).toBe('user text')
   })
 })
-
-// ============================================================================
-// Unit tests: insertPluginInjections
-// ============================================================================
 
 describe('insertPluginInjections', () => {
   let builder: ContextBuilder
@@ -1324,7 +1240,6 @@ describe('insertPluginInjections', () => {
 
     insertPluginInjections(messages, [injection], discordMessages)
 
-    // Depth 2 = 2 messages from end = index 2 (before m3)
     expect(messages).toHaveLength(5)
     expect(messages[2].participant).toMatch(/System/)
     expect(textOf(messages[2])).toBe('injected context')
@@ -1341,7 +1256,7 @@ describe('insertPluginInjections', () => {
       makeDiscordMessage({ id: 'm2' }),
       makeDiscordMessage({ id: 'm3' }),
     ]
-    const injection = makeContextInjection({ targetDepth: -1 }) // position 0
+    const injection = makeContextInjection({ targetDepth: -1 })
 
     insertPluginInjections(messages, [injection], discordMessages)
 
@@ -1380,8 +1295,6 @@ describe('insertPluginInjections', () => {
       makeDiscordMessage({ id: 'm4' }),
       makeDiscordMessage({ id: 'm5' }),
     ]
-    // Modified at m3 (index 2), targetDepth 10, but only 2 messages since (m4, m5)
-    // So currentDepth = min(2, 10) = 2
     const injection = makeContextInjection({
       targetDepth: 10,
       lastModifiedAt: 'm3',
@@ -1389,7 +1302,6 @@ describe('insertPluginInjections', () => {
 
     insertPluginInjections(messages, [injection], discordMessages)
 
-    // Depth 2 from end = inserted before m4 (index 3)
     expect(messages).toHaveLength(6)
     expect(messages[3].participant).toMatch(/System/)
   })
@@ -1403,10 +1315,6 @@ describe('insertPluginInjections', () => {
     expect(messages).toHaveLength(1)
   })
 })
-
-// ============================================================================
-// Unit tests: applyLimits
-// ============================================================================
 
 describe('applyLimits', () => {
   let builder: ContextBuilder
@@ -1424,19 +1332,17 @@ describe('applyLimits', () => {
     const result = applyLimits(messages, 0, config)
 
     expect(result.didTruncate).toBe(false)
-    expect(result.messages).toBe(messages) // same reference = no copy
+    expect(result.messages).toBe(messages)
   })
 
   it('truncates when character limit exceeded during roll', () => {
-    // Create messages that exceed the character limit
     const longText = 'x'.repeat(5000)
     const messages: ParticipantMessage[] = Array.from({ length: 10 }, (_, i) =>
       makeParticipantMessage({ content: [{ type: 'text', text: longText }], messageId: `m${i}` })
     )
-    // 10 messages * 5000 chars = 50000 chars, limit = 10000
     const config = makeConfig({
       recency_window_characters: 10000,
-      rolling_threshold: 1, // force roll
+      rolling_threshold: 1,
     })
     const result = applyLimits(messages, 100, config)
 
@@ -1450,7 +1356,7 @@ describe('applyLimits', () => {
     )
     const config = makeConfig({
       recency_window_messages: 5,
-      recency_window_characters: 1000000, // high char limit so only message count triggers
+      recency_window_characters: 1000000,
       rolling_threshold: 1,
     })
     const result = applyLimits(messages, 100, config)
@@ -1467,17 +1373,13 @@ describe('applyLimits', () => {
     const config = makeConfig({
       hard_max_characters: 500000,
       recency_window_characters: 200000,
-      rolling_threshold: 999, // would not normally roll
+      rolling_threshold: 999,
     })
     const result = applyLimits(messages, 1, config)
 
     expect(result.didTruncate).toBe(true)
   })
 })
-
-// ============================================================================
-// Integration: buildContext full pipeline
-// ============================================================================
 
 describe('buildContext (integration)', () => {
   let builder: ContextBuilder
@@ -1505,12 +1407,11 @@ describe('buildContext (integration)', () => {
     })
 
     const pMsgs = result.request.messages
-    // Should have 3 conversation messages + 1 empty completion
     expect(pMsgs).toHaveLength(4)
     expect(pMsgs[0].participant).toBe('alice')
-    expect(pMsgs[1].participant).toBe('Claude') // bot normalized to config.name
+    expect(pMsgs[1].participant).toBe('Claude')
     expect(pMsgs[2].participant).toBe('alice')
-    expect(pMsgs[3].participant).toBe('Claude') // empty completion
+    expect(pMsgs[3].participant).toBe('Claude')
     expect(textOf(pMsgs[3])).toBe('')
   })
 
@@ -1530,7 +1431,6 @@ describe('buildContext (integration)', () => {
       config,
     })
 
-    // Only the normal message + empty completion
     expect(result.request.messages).toHaveLength(2)
     expect(textOf(result.request.messages[0])).toBe('normal message')
   })
@@ -1553,7 +1453,6 @@ describe('buildContext (integration)', () => {
       botDiscordUsername: 'BotUser',
     })
 
-    // u1, merged bot message, empty completion
     expect(result.request.messages).toHaveLength(3)
     expect(textOf(result.request.messages[1])).toContain('Once upon a time')
     expect(textOf(result.request.messages[1])).toContain('the end')
@@ -1586,11 +1485,9 @@ describe('buildContext (integration)', () => {
       botDiscordUsername: 'BotUser',
     })
 
-    // u1, tool_call, tool_result, b1, u2, empty completion
     const pMsgs = result.request.messages
     expect(pMsgs.length).toBeGreaterThanOrEqual(5)
 
-    // Tool call should appear after the triggering message
     const toolCallIdx = pMsgs.findIndex(m => m.participant === 'SearchBot' && textOf(m).includes('searching'))
     const toolResultIdx = pMsgs.findIndex(m => m.participant === 'System<[web_search]')
     expect(toolCallIdx).toBeGreaterThan(0)
@@ -1605,8 +1502,6 @@ describe('buildContext (integration)', () => {
       makeBotMessage('BotUser', 'Found it.', { id: 'final' }),
     ]
     const botMessageIds = [...rounds.map((round) => `b${round}`), 'final']
-    // As the cache loads it: the five-result window keeps rounds 3 to 7 with
-    // their results, and rounds 1 and 2 with their prose alone.
     const toolCache = rounds.map((round) => ({
       call: makeToolCall({
         id: `call-${round}`,
@@ -1668,7 +1563,6 @@ describe('buildContext (integration)', () => {
       botDiscordUsername: 'BotUser',
     })
 
-    // No System<[ messages — tools not interleaved
     const systemToolMsgs = result.request.messages.filter(m => m.participant.startsWith('System<['))
     expect(systemToolMsgs).toHaveLength(0)
   })
@@ -1680,8 +1574,6 @@ describe('buildContext (integration)', () => {
         content: 'hey <@BotUser> what do you think?',
       }),
     ]
-    // Pin display-name flags off so this exercises the angle-bracket normalization
-    // path specifically (bots now default to display names, which renders @Name).
     const config = makeConfig({ name: 'Claude', use_display_names: false })
 
     const result = await builder.buildContext({
@@ -1693,7 +1585,6 @@ describe('buildContext (integration)', () => {
       botDiscordUsername: 'BotUser',
     })
 
-    // Mention should be rewritten from BotUser to Claude
     expect(textOf(result.request.messages[0])).toContain('<@Claude>')
     expect(textOf(result.request.messages[0])).not.toContain('<@BotUser>')
   })
@@ -1797,10 +1688,6 @@ describe('buildContext (integration)', () => {
   })
 })
 
-// ============================================================================
-// Integration: cache marker stability
-// ============================================================================
-
 describe('cache marker stability', () => {
   let builder: ContextBuilder
 
@@ -1810,7 +1697,6 @@ describe('cache marker stability', () => {
   })
 
   it('returns a cache marker for conversations with enough messages', async () => {
-    // Need > 20 messages (buffer) for a marker to be placed
     const messages = Array.from({ length: 30 }, (_, i) =>
       makeDiscordMessage({
         id: `msg-${i}`,
@@ -1841,7 +1727,6 @@ describe('cache marker stability', () => {
     )
     const config = makeConfig()
 
-    // First call to establish marker
     const result1 = await builder.buildContext({
       discordContext: makeDiscordContext(messages),
       toolCacheWithResults: [],
@@ -1850,7 +1735,6 @@ describe('cache marker stability', () => {
       config,
     })
 
-    // Second call with the established marker
     const result2 = await builder.buildContext({
       discordContext: makeDiscordContext(messages),
       toolCacheWithResults: [],
@@ -1859,7 +1743,6 @@ describe('cache marker stability', () => {
       config,
     })
 
-    // Marker should be stable (same or valid)
     expect(result2.cacheMarker).not.toBeNull()
   })
 
@@ -1882,7 +1765,6 @@ describe('cache marker stability', () => {
     })
 
     if (result.cacheMarker) {
-      // The message with the cache marker should have cacheBreakpoint set
       const markerMsg = result.request.messages.find(m => m.messageId === result.cacheMarker)
       if (markerMsg) {
         expect(markerMsg.cacheBreakpoint).toBe(true)
@@ -1890,10 +1772,6 @@ describe('cache marker stability', () => {
     }
   })
 })
-
-// ============================================================================
-// Integration: message ID survival
-// ============================================================================
 
 describe('message ID survival', () => {
   let builder: ContextBuilder
@@ -1946,14 +1824,10 @@ describe('message ID survival', () => {
     })
 
     const ids = messageIds(result.request.messages).filter(Boolean)
-    expect(ids).toContain('b1') // first merged message ID survives
-    expect(ids).not.toContain('b2') // second was merged away
+    expect(ids).toContain('b1')
+    expect(ids).not.toContain('b2')
   })
 })
-
-// ============================================================================
-// Integration: display names
-// ============================================================================
 
 describe('display names mode', () => {
   let builder: ContextBuilder
@@ -2005,10 +1879,6 @@ describe('display names mode', () => {
     expect(result.request.messages[0].participant).toBe('alice.smith')
   })
 })
-
-// ============================================================================
-// Integration tests: character override prefix (~Name: ...)
-// ============================================================================
 
 describe('character override prefix', () => {
   let builder: ContextBuilder
@@ -2063,8 +1933,6 @@ describe('character override prefix', () => {
   })
 
   it('applies override when a reply tag precedes the ~ (regression)', async () => {
-    // Replying to the bot makes the connector prepend `<reply:@Bot> `, which
-    // used to defeat the ^~ anchor and leak the tilde + real author.
     const messages = [
       makeDiscordMessage({
         id: 'u1',
@@ -2136,10 +2004,6 @@ describe('character override prefix', () => {
     expect(result.request.stop_sequences).not.toContain('\nbowie knife99:')
   })
 })
-
-// ============================================================================
-// Unit tests: applyMentionFormat
-// ============================================================================
 
 describe('applyMentionFormat', () => {
   it('formats mentions with @ prefix (no angle brackets)', () => {
@@ -2283,10 +2147,6 @@ describe('mention_format integration', () => {
   })
 })
 
-// ============================================================================
-// Integration: plugin injections through full pipeline
-// ============================================================================
-
 describe('plugin injections (full pipeline)', () => {
   let builder: ContextBuilder
 
@@ -2318,10 +2178,6 @@ describe('plugin injections (full pipeline)', () => {
   })
 })
 
-// ============================================================================
-// Integration: traceInfo
-// ============================================================================
-
 describe('traceInfo', () => {
   let builder: ContextBuilder
 
@@ -2348,8 +2204,6 @@ describe('traceInfo', () => {
 
     expect(result.traceInfo).toBeDefined()
     expect(result.traceInfo!.messagesConsidered).toBe(3)
-    // After filtering .config, 2 alice messages survive.
-    // User messages are no longer merged (only bot messages merge).
     expect(result.traceInfo!.messagesIncluded).toBe(2)
   })
 })

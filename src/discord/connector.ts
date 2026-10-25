@@ -1,8 +1,3 @@
-/**
- * Discord Connector
- * Handles all Discord API interactions
- */
-
 import { Attachment, Client, Collection, GatewayIntentBits, Message, MessageFlags, Partials, PermissionFlagsBits, OAuth2Scopes, TextChannel, type MessageMentionOptions } from 'discord.js'
 import { pinAddressesBot } from '../agent/pin-target.js'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'fs'
@@ -32,23 +27,15 @@ export interface ConnectorOptions {
   maxBackoffMs: number
 }
 
-/**
- * A pinned message tracked via gateway events.
- * Holds the minimal set of fields needed to resolve .config / .steer / .sleep
- * without calling the Discord /pins endpoint after the initial bootstrap.
- */
 export interface TrackedPin {
   id: string
   content: string
   authorId: string
   authorBot: boolean
-  /** Relay-resolved persona ids addressed by this pin (portal backend only). */
   mentionedPersonaIds?: string[]
-  /** Discord role ids mentioned in this pin (for `<@&roleId>` targeting). */
   mentionedRoleIds?: string[]
 }
 
-/** A pinned `.steer` message with its resolved mention context. */
 export interface PinnedSteer {
   content: string
   authorId: string
@@ -56,7 +43,6 @@ export interface PinnedSteer {
   mentionedRoleIds?: string[]
 }
 
-/** Extract mentioned role ids from a discord.js-ish message `mentions` object. */
 function extractMentionedRoleIds(
   mentions?: { roles?: { values(): IterableIterator<{ id: string }> } } | null,
 ): string[] | undefined {
@@ -66,11 +52,10 @@ function extractMentionedRoleIds(
   return ids.length ? ids : undefined
 }
 
-const MAX_TEXT_ATTACHMENT_BYTES = 200_000  // ~200 KB of inline text per attachment
+const MAX_TEXT_ATTACHMENT_BYTES = 200_000
 const DISCORD_MESSAGE_LIMIT = 2000
 export const HISTORY_AND_FILTER_BUFFER = 100
 
-/** Extract a Unix timestamp (ms) from a Discord snowflake ID */
 function snowflakeToTimestamp(id: string): number {
   const DISCORD_EPOCH = 1420070400000
   return Number(BigInt(id) >> 22n) + DISCORD_EPOCH
@@ -78,28 +63,22 @@ function snowflakeToTimestamp(id: string): number {
 
 export interface FetchContextParams {
   channelId: string
-  depth: number  // Max messages
-  targetMessageId?: string  // Optional: Fetch backward from this message ID (for API range queries)
-  firstMessageId?: string  // Optional: Stop when this message is encountered
+  depth: number
+  targetMessageId?: string
+  firstMessageId?: string
   authorized_roles?: string[]
-  pinnedConfigs?: string[]  // Optional: Pre-fetched pinned configs (skips fetchPinned call)
-  maxImages?: number  // Optional: Cap image fetching to avoid RAM bloat (default: unlimited)
-  ignoreHistory?: boolean  // Optional: Skip .history command processing (raw fetch)
-  // Optional: whose labels use display names. Their members missing from the
-  // cache are fetched first, so a label can carry the server nickname.
+  pinnedConfigs?: string[]
+  maxImages?: number
+  ignoreHistory?: boolean
   displayNames?: DisplayNameClasses
 }
 
-/** A sent Discord message plus the synthetic markdown bridge strings injected
- *  into it (so the caller can record them for later context stripping). */
 export interface SentMessageChunk {
   id: string
   bridgeOpen?: string
   bridgeClose?: string
 }
 
-/** The author id convertMessage gives a message that has no author: a
- *  placeholder, not anyone in the conversation. */
 export const SYSTEM_PLACEHOLDER_ID = 'system'
 
 /** Once a message carries allowed_mentions, Discord pings only what that
@@ -112,32 +91,21 @@ function replyAllowedMentions(): MessageMentionOptions {
 
 export class DiscordConnector {
   private client: Client
-  // The typing timers, one per channel. Invariant, and the whole argument
-  // against the start/stop races: a typing timer exists if and only if it is
-  // in this map. Both startTyping and stopTyping mutate it SYNCHRONOUSLY, so
-  // there is no window in which a stop can be missed or a start can register
-  // behind one. `closed` refuses any start once close() has begun.
   private typingIntervals = new Map<string, NodeJS.Timeout>()
   private closed = false
-  // Server nicknames for display-name labels (member-names.ts)
   private authorMembers = new AuthorMembers()
   private imageCache = new Map<string, CachedImage>()
-  private urlToFilename = new Map<string, string>()  // URL -> filename for disk cache lookup
-  private urlMapPath: string  // Path to URL map file
+  private urlToFilename = new Map<string, string>()
+  private urlMapPath: string
 
-  // Push-based caches (populated from gateway events, avoids API fetches)
-  private messageCache = new Map<string, (Message | null)[]>()  // channelId → messages (chronological, nulls are tombstones)
-  private messageCacheIndex = new Map<string, Map<string, number>>()  // channelId → (messageId → array index)
-  private messageCachePopulated = new Set<string>()  // channels that had initial API fetch
+  private messageCache = new Map<string, (Message | null)[]>()
+  private messageCacheIndex = new Map<string, Map<string, number>>()
+  private messageCachePopulated = new Set<string>()
 
-  // Canonical pin cache: channelId -> (messageId -> TrackedPin).
-  // Maintained entirely from gateway events after a one-time bootstrap per channel.
-  // .config / .steer reads are filter-views over this map.
   private pinnedByChannel = new Map<string, Map<string, TrackedPin>>()
-  private pinCacheDir: string | null = null  // <cacheDir>/pins, set in constructor
+  private pinCacheDir: string | null = null
   private pinPersistTimers = new Map<string, NodeJS.Timeout>()
 
-  // Cache observability and maintenance
   private cacheStats = { hits: 0, misses: 0, apiCalls: 0, evictions: 0 }
   private cacheStatsInterval?: NodeJS.Timeout
   private evictionInterval?: NodeJS.Timeout
@@ -158,32 +126,19 @@ export class DiscordConnector {
 
     this.setupEventHandlers()
 
-    // Ensure cache directory exists
     if (!existsSync(options.cacheDir)) {
       mkdirSync(options.cacheDir, { recursive: true })
     }
     
-    // Load URL to filename map for persistent disk cache
     this.urlMapPath = join(options.cacheDir, 'url-map.json')
     this.loadUrlMap()
 
-    // Event-driven tracked-pin cache. Supersedes the legacy pin/steer caches
-    // (those dirs — <cachePath>/pins and <cachePath>/steer-pins — are orphaned
-    // and can be deleted by ops; first cold-miss bootstraps the new format).
     this.pinCacheDir = join(options.cacheDir, 'pins')
     if (!existsSync(this.pinCacheDir)) {
       mkdirSync(this.pinCacheDir, { recursive: true })
     }
     this.loadTrackedPinsFromDisk()
   }
-
-  // ────────────────────────────────────────────────────────────────────
-  // Event-driven pin tracking
-  //
-  // Canonical in-memory map is `pinnedByChannel`; maintained by
-  // messageCreate / messageUpdate / messageDelete handlers. A cold-miss
-  // bootstrap fetches once from the API and then events keep the map live.
-  // ────────────────────────────────────────────────────────────────────
 
   private getOrCreateChannelPinMap(channelId: string): Map<string, TrackedPin> {
     let m = this.pinnedByChannel.get(channelId)
@@ -215,7 +170,7 @@ export class DiscordConnector {
     const timer = setTimeout(() => {
       this.pinPersistTimers.delete(channelId)
       this.persistTrackedPins(channelId)
-    }, 1000)  // 1s debounce: collapses bursts of mutations in one channel
+    }, 1000)
     this.pinPersistTimers.set(channelId, timer)
   }
 
@@ -249,7 +204,6 @@ export class DiscordConnector {
           this.pinnedByChannel.set(channelId, map)
           loaded++
         } catch {
-          // skip corrupt file
         }
       }
       if (loaded > 0) {
@@ -260,12 +214,6 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * One-time bootstrap: fetches the pins endpoint for a channel we have
-   * never seen, then lets event handlers maintain the map from then on.
-   * On failure, installs an empty map so further reads don't re-trigger
-   * the bootstrap; events will still fill it in as pins mutate.
-   */
   private async bootstrapChannelPins(channelId: string): Promise<void> {
     try {
       const channel = await this.client.channels.fetch(channelId) as TextChannel | null
@@ -297,12 +245,6 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Filters tracked pins for `.config` messages and applies the same
-   * `.config [target]\n---\n<yaml>` → `target: <t>\n<yaml>` parse as
-   * extractConfigs(Message[]). Sort order matches the legacy path
-   * (ascending message ID, so newer pins override older in merge).
-   */
   private extractConfigsFromTrackedPins(pins: Map<string, TrackedPin>, channelId: string): string[] {
     const sorted = [...pins.values()].sort((a, b) => a.id.localeCompare(b.id))
     return this.extractConfigs(sorted, channelId)
@@ -324,19 +266,11 @@ export class DiscordConnector {
     return out
   }
 
-  /**
-   * Filters tracked pins for `.sleep` messages. Returns full TrackedPin records
-   * (not just content) because the sleep-state counters key on pin id.
-   * Note: no authorBot filter — sleeps may be authored by soma (a bot).
-   */
   private extractSleepsFromTrackedPins(pins: Map<string, TrackedPin>): TrackedPin[] {
     const sorted = [...pins.values()].sort((a, b) => a.id.localeCompare(b.id))
     return sorted.filter((p) => p.content.startsWith('.sleep'))
   }
 
-  /**
-   * Load URL to filename mapping from disk (enables persistent image cache)
-   */
   private loadUrlMap(): void {
     try {
       if (existsSync(this.urlMapPath)) {
@@ -352,9 +286,6 @@ export class DiscordConnector {
     }
   }
   
-  /**
-   * Save URL to filename mapping to disk
-   */
   private saveUrlMap(): void {
     try {
       const map: Record<string, string> = {}
@@ -367,15 +298,11 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Start the Discord client
-   */
   async start(): Promise<void> {
     try {
       await this.client.login(this.options.token)
       logger.info({ userId: this.client.user?.id, tag: this.client.user?.tag }, 'Discord connector started')
 
-      // Periodic cache stats logging
       this.cacheStatsInterval = setInterval(() => {
         if (this.cacheStats.hits + this.cacheStats.misses > 0) {
           const hitRate = this.cacheStats.hits / (this.cacheStats.hits + this.cacheStats.misses)
@@ -388,7 +315,6 @@ export class DiscordConnector {
         }
       }, 5 * 60 * 1000)
 
-      // Periodic cache eviction (compact tombstones, cap per-channel size)
       this.evictionInterval = setInterval(() => this.evictStaleMessages(), 5 * 60 * 1000)
     } catch (error) {
       logger.error({ error }, 'Failed to start Discord connector')
@@ -396,43 +322,23 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Get bot's Discord user ID
-   */
   getBotUserId(): string | undefined {
     return this.client.user?.id
   }
 
-  /**
-   * Get bot's Discord username
-   */
   getBotUsername(): string | undefined {
     return this.client.user?.username
   }
 
-  /**
-   * Generate a bot invite URL with required permissions
-   * 
-   * Default permissions include everything needed for a typical ChapterX bot:
-   * - View channels, read message history, send messages
-   * - Manage messages (for editing own messages, deleting in some cases)
-   * - Add reactions, use external emojis
-   * - Attach files, embed links
-   * - Use slash commands
-   */
   generateInviteUrl(options?: {
-    /** Override default permissions (bigint or array of permission flags) */
     permissions?: bigint | (keyof typeof PermissionFlagsBits)[];
-    /** Pre-select a specific guild */
     guildId?: string;
-    /** Disable guild selection (only works with guildId) */
     disableGuildSelect?: boolean;
   }): string | undefined {
     if (!this.client.user) {
       return undefined
     }
 
-    // Default permissions for ChapterX bots
     const defaultPermissions = [
       PermissionFlagsBits.ViewChannel,
       PermissionFlagsBits.SendMessages,
@@ -445,13 +351,11 @@ export class DiscordConnector {
       PermissionFlagsBits.EmbedLinks,
     ].reduce((acc, perm) => acc | perm, 0n)
 
-    // Calculate permissions
     let permissions: bigint
     if (options?.permissions) {
       if (typeof options.permissions === 'bigint') {
         permissions = options.permissions
       } else {
-        // Array of permission names
         permissions = options.permissions.reduce(
           (acc, name) => acc | PermissionFlagsBits[name],
           0n
@@ -469,9 +373,6 @@ export class DiscordConnector {
     })
   }
 
-  /**
-   * Get channel name by ID (for display purposes)
-   */
   async getChannelName(channelId: string): Promise<string | undefined> {
     try {
       const channel = await this.client.channels.fetch(channelId) as TextChannel
@@ -496,15 +397,9 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Fetch just pinned configs from a channel (fast - single API call)
-   * Used to load config BEFORE determining fetch depth.
-   * Falls back to disk cache if API call fails (e.g. Cloudflare 429).
-   */
   async fetchPinnedConfigs(channelId: string): Promise<string[]> {
     let pins = this.pinnedByChannel.get(channelId)
     if (!pins) {
-      // Cold miss: bootstrap from the API once, then let events maintain it.
       await this.bootstrapChannelPins(channelId)
       pins = this.pinnedByChannel.get(channelId)
     }
@@ -512,11 +407,6 @@ export class DiscordConnector {
     return this.extractConfigsFromTrackedPins(pins, channelId)
   }
 
-  /**
-   * Fetch pinned .steer messages from a channel (cached, mirrors fetchPinnedConfigs).
-   * Returns array of { content, authorId } for each pinned .steer message.
-   * Falls back to disk cache if API call fails (e.g. Cloudflare 429).
-   */
   async fetchPinnedSteerMessages(channelId: string): Promise<PinnedSteer[]> {
     let pins = this.pinnedByChannel.get(channelId)
     if (!pins) {
@@ -527,11 +417,6 @@ export class DiscordConnector {
     return this.extractSteersFromTrackedPins(pins)
   }
 
-  /**
-   * Fetch pinned `.sleep` messages from a channel (cached, mirrors fetchPinnedConfigs).
-   * Returns full TrackedPin records because the sleep-state counters key on pin id.
-   * Bootstraps from the API on cold miss.
-   */
   async fetchPinnedSleeps(channelId: string): Promise<TrackedPin[]> {
     let pins = this.pinnedByChannel.get(channelId)
     if (!pins) {
@@ -542,16 +427,12 @@ export class DiscordConnector {
     return this.extractSleepsFromTrackedPins(pins)
   }
 
-  /**
-   * Build the FetchDeps adapter that bridges the push cache to context-fetch functions.
-   */
   private buildFetchDeps(): FetchDeps {
     return {
       fetchBatch: async (ch: TextChannel, opts: { before?: string; limit: number }): Promise<Message[]> => {
         try {
           const fetched = await this.cachedFetchMessages(ch, opts)
           if (!fetched || (fetched as any).size === 0) return []
-          // Normalize to Message[] — fetchChannelMessages handles sorting
           return Array.from((fetched as any).values()) as Message[]
         } catch (error) {
           logger.warn({ error, channelId: ch.id, opts }, 'fetchBatch failed — returning empty batch')
@@ -578,13 +459,9 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Fetch context from Discord (messages, configs, images)
-   */
   async fetchContext(params: FetchContextParams): Promise<DiscordContext> {
     const { channelId, depth, targetMessageId, firstMessageId, authorized_roles, maxImages, ignoreHistory } = params
 
-    // Profiling helper
     const timings: Record<string, number> = {}
     const startProfile = (name: string) => {
       timings[`_start_${name}`] = Date.now()
@@ -608,7 +485,6 @@ export class DiscordConnector {
 
       const deps = this.buildFetchDeps()
 
-      // ── Stage 1: Fetch channel messages with .history resolution ──
       logger.debug({
         channelId: channel.id,
         targetMessageId,
@@ -621,7 +497,7 @@ export class DiscordConnector {
       const fetchResult = await fetchChannelMessages(
         channel,
         targetMessageId,
-        undefined,  // Let .history commands define their own boundaries
+        undefined,
         depth,
         authorized_roles ?? [],
         ignoreHistory ?? false,
@@ -632,9 +508,6 @@ export class DiscordConnector {
       let historyOriginChannelId = fetchResult.originChannelId
       endProfile('messagesFetch')
 
-      // ── Stage 2: Thread parent assembly ──
-      // For threads: implicitly fetch parent channel context up to the branching point
-      // Skip if .history explicitly cleared context in the thread
       let threadParentChannel: TextChannel | undefined = undefined
       let threadStartMessageId: string | undefined = undefined
 
@@ -642,7 +515,7 @@ export class DiscordConnector {
         logger.debug('Skipping parent context fetch — .history cleared context')
       } else if (channel.isThread()) {
         startProfile('threadParentFetch')
-        const thread = channel as any  // Discord.js ThreadChannel
+        const thread = channel as any
         threadParentChannel = thread.parent as TextChannel
         threadStartMessageId = thread.id  // A thread started from a message shares that message's id
 
@@ -655,13 +528,11 @@ export class DiscordConnector {
             remainingDepth: depth - messages.length
           }, 'Thread detected, fetching parent channel context')
 
-          // Completely independent call — parent's .history only affects parent messages.
-          // No shared mutable state between thread and parent fetches.
           const parentResult = await fetchChannelMessages(
             threadParentChannel,
-            threadStartMessageId,  // Fetch backward from the thread's starting message
+            threadStartMessageId,
             undefined,
-            Math.max(0, depth - messages.length),  // Remaining message budget
+            Math.max(0, depth - messages.length),
             authorized_roles ?? [],
             ignoreHistory ?? false,
             deps,
@@ -675,9 +546,6 @@ export class DiscordConnector {
             parentDidClear: parentResult.didClear,
           }, 'Fetched parent context for thread')
 
-          // Ensure thread starter message is included.
-          // fetchChannelMessages includes startFromId, but if the starter is the very first
-          // message in the channel, it may not appear in the backward fetch results.
           if (threadStartMessageId && !parentMessages.some(m => m.id === threadStartMessageId)) {
             try {
               const starterMsg = await deps.fetchSingle(threadParentChannel, threadStartMessageId)
@@ -690,10 +558,8 @@ export class DiscordConnector {
             }
           }
 
-          // Prepend parent messages (they're older than thread messages)
           messages = [...parentMessages, ...messages]
 
-          // Propagate parent's .history origin for plugin state inheritance
           if (parentResult.originChannelId && !historyOriginChannelId) {
             historyOriginChannelId = parentResult.originChannelId
           }
@@ -708,11 +574,8 @@ export class DiscordConnector {
         endProfile('threadParentFetch')
       }
 
-      // ── Stage 3: Cache stability ──
-      // Extend or trim the fetch window to maintain prompt cache anchor stability.
-      // Consolidated from the old split between fetchContext + handleActivation.
       let cacheAnchorTrimmed = false
-      let activeFirstMessageId = firstMessageId  // Mutable — may be cleared by temporal check
+      let activeFirstMessageId = firstMessageId
       if (activeFirstMessageId && !historyDidClear) {
         logger.debug({
           currentMessageCount: messages.length,
@@ -722,14 +585,11 @@ export class DiscordConnector {
         let firstIndex = messages.findIndex(m => m.id === activeFirstMessageId)
         const oldestMessage = messages[0]
 
-        // Temporal sanity check: if the anchor is much older than the natural
-        // fetch window, don't extend — it's from a different conversation era
-        // and would create a feedback loop with hard-limit truncation.
         if (firstIndex < 0 && oldestMessage) {
           const anchorTs = snowflakeToTimestamp(activeFirstMessageId)
           const oldestTs = snowflakeToTimestamp(oldestMessage.id)
           const gapMs = oldestTs - anchorTs
-          const MAX_ANCHOR_GAP_MS = 24 * 60 * 60 * 1000  // 24 hours
+          const MAX_ANCHOR_GAP_MS = 24 * 60 * 60 * 1000
 
           if (gapMs > MAX_ANCHOR_GAP_MS) {
             logger.warn({
@@ -741,13 +601,11 @@ export class DiscordConnector {
           }
         }
 
-        // Extend backward if anchor not found
         if (firstIndex < 0 && oldestMessage && activeFirstMessageId) {
           const maxExtend = 500
           let extended = 0
           let currentBefore = oldestMessage.id
 
-          // For threads: extend from parent channel if oldest message is from parent
           const isOldestFromParent = threadStartMessageId && oldestMessage.id < threadStartMessageId
           const extensionChannel = (isOldestFromParent && threadParentChannel) ? threadParentChannel : channel
 
@@ -785,20 +643,14 @@ export class DiscordConnector {
           }
         }
 
-        // Trim overshoot: if anchor is found but not at index 0, trim older messages
-        // for cache stability. Only when NO .history was used (overshoot from batch fetching).
-        // NOTE: historyWasUsed is false for bare `.history` clears (originChannelId is null),
-        // but that's safe because historyDidClear already short-circuits this entire Stage 3 block above.
         const historyWasUsed = !!historyOriginChannelId
         if (firstIndex > 0 && historyWasUsed) {
-          // .history brought in older context — expand anchor (expected behavior)
           logger.debug({
             cacheAnchor: activeFirstMessageId,
             olderMessagesIncluded: firstIndex,
             historyOrigin: historyOriginChannelId,
           }, 'Expanding cache window to include .history context')
         } else if (firstIndex > 0 && !historyWasUsed) {
-          // Batch fetch overshot — trim to anchor for stability
           logger.debug({
             cacheAnchor: activeFirstMessageId,
             trimmingCount: firstIndex,
@@ -823,7 +675,6 @@ export class DiscordConnector {
       }
 
       startProfile('messageConvert')
-      // Convert to our format (with reply username lookup)
       const messageMap = new Map(messages.map(m => [m.id, m]))
       const discordMessages: DiscordMessage[] = messages
         .map((msg) => this.convertMessage(msg, messageMap))
@@ -831,37 +682,30 @@ export class DiscordConnector {
       endProfile('messageConvert')
 
       startProfile('pinnedFetch')
-      // Use pre-fetched pinned configs if provided, otherwise resolve via tracked-pin cache.
       let pinnedConfigs: string[]
       if (params.pinnedConfigs) {
         pinnedConfigs = params.pinnedConfigs
         logger.debug({ pinnedCount: pinnedConfigs.length }, 'Using pre-fetched pinned configs')
       } else {
-        // Fallback path — routes through the event-driven cache (bootstraps once on cold miss).
         pinnedConfigs = await this.fetchPinnedConfigs(channelId)
         logger.debug({ pinnedCount: pinnedConfigs.length }, 'Resolved pinned configs from tracked-pin cache')
       }
       endProfile('pinnedFetch')
 
       startProfile('attachmentProcessing')
-      // Download/cache images and fetch text attachments
       const images: CachedImage[] = []
       const documents: CachedDocument[] = []
       let newImagesDownloaded = 0
       logger.debug({ messageCount: messages.length, maxImages }, 'Checking messages for attachments')
       
-      // Track whether we've hit the image cap to avoid unnecessary processing
       const imageLimitReached = () => maxImages !== undefined && images.length >= maxImages
       
-      // Iterate newest-first so image cap keeps recent images (context builder wants recent ones)
-      // Messages array is chronological (oldest-first), so we reverse for image fetching
       for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i]!
         const attachments = Array.from(msg.attachments.values())
         
         for (const attachment of attachments) {
           if (attachment.contentType?.startsWith('image/')) {
-            // Skip image fetching if we've already hit the cap
             if (imageLimitReached()) {
               continue
             }
@@ -890,7 +734,6 @@ export class DiscordConnector {
       
       logger.debug({ totalImages: images.length, totalDocuments: documents.length }, 'Attachment processing complete')
 
-      // Build inheritance info for plugin state
       const inheritanceInfo: DiscordContext['inheritanceInfo'] = {}
       if (channel.isThread()) {
         const thread = channel as any
@@ -906,7 +749,6 @@ export class DiscordConnector {
         inheritanceInfo.cacheAnchorTrimmed = true
       }
 
-      // Log fetch timings
         logger.info({
         ...timings,
         messageCount: discordMessages.length,
@@ -926,17 +768,12 @@ export class DiscordConnector {
     }, this.options.maxBackoffMs)
   }
 
-  /**
-   * Fetch a range of messages between first and last URLs
-   * Public for API access
-   */
   async fetchHistoryRange(
     channel: TextChannel,
     firstUrl: string | undefined,
     lastUrl: string,
     maxMessages: number = 1000
   ): Promise<Message[]> {
-    // Parse message IDs from URLs
     const lastMessageId = this.extractMessageIdFromUrl(lastUrl)
     if (!lastMessageId) {
       logger.warn({ lastUrl }, 'Failed to parse last message URL')
@@ -945,11 +782,8 @@ export class DiscordConnector {
 
     const firstMessageId = firstUrl ? this.extractMessageIdFromUrl(firstUrl) : undefined
 
-    // Fetch messages efficiently using bulk fetch
-    // We need to fetch from first (or oldest available) to last
     const allMessages: Message[] = []
     
-    // First, fetch the last message
     try {
       const lastMsg = await this.cachedFetchMessages(channel, lastMessageId)
       allMessages.push(lastMsg)
@@ -958,14 +792,12 @@ export class DiscordConnector {
       return []
     }
 
-    // Then fetch older messages in batches until we reach first (or limit)
     let currentBefore = lastMessageId
     let foundFirst = false
 
     const maxBatches = Math.ceil(maxMessages / 100)
 
     for (let batch = 0; batch < maxBatches && !foundFirst; batch++) {
-      // Stop if we've already fetched enough
       if (allMessages.length >= maxMessages) {
         break
       }
@@ -982,10 +814,8 @@ export class DiscordConnector {
         // Discord returns messages newest-first, so reverse for chronological order
         const batchMessages = Array.from(fetched.values()).reverse() as Message[]
 
-        // Add to beginning (older messages go before newer ones)
         allMessages.unshift(...batchMessages)
 
-        // Check if we found the first message
         if (firstMessageId) {
           if (batchMessages.some((m: Message) => m.id === firstMessageId)) {
             foundFirst = true
@@ -993,15 +823,13 @@ export class DiscordConnector {
           }
         }
 
-        // Continue from oldest message in this batch
-        currentBefore = batchMessages[0]!.id  // Oldest (already reversed)
+        currentBefore = batchMessages[0]!.id
       } catch (error) {
         logger.warn({ error, batch }, 'Failed to fetch history batch')
         break
       }
     }
 
-    // Trim to first message if specified
     if (firstMessageId) {
       const firstIndex = allMessages.findIndex(m => m.id === firstMessageId)
       if (firstIndex >= 0) {
@@ -1013,10 +841,6 @@ export class DiscordConnector {
     return allMessages
   }
 
-  /**
-   * Resolve the parent channel ID for a given thread.
-   * Returns undefined for regular text channels.
-   */
   async getParentChannelId(channelId: string): Promise<string | undefined> {
     try {
       const channel: any = await this.client.channels.fetch(channelId)
@@ -1037,11 +861,6 @@ export class DiscordConnector {
 
   /** A mention in code is left as written, since Discord shows it raw there. */
   private async resolveMentions(content: string, channelId: string, startCarry: MarkdownCarry = []): Promise<string> {
-    // Find all <@username> patterns (not already numeric IDs), outside code.
-    // A name holds no '<': so a '<@' left open in code doesn't run on to a
-    // mention after it and take it out with it, and '<@<@name>' reads the
-    // mention inside. It holds no line end either, since no member's name
-    // has one, which spares a lookup that could find no one.
     const mentionPattern = /<@([^>0-9<\n][^><\n]*)>/g
     const code = codeRanges(content, startCarry)
     const matches = [...content.matchAll(mentionPattern)].filter(
@@ -1052,7 +871,6 @@ export class DiscordConnector {
       return content
     }
 
-    // Get the guild for user lookups
     const channel = await this.client.channels.fetch(channelId) as TextChannel
     if (!channel?.guild) {
       return content
@@ -1063,24 +881,17 @@ export class DiscordConnector {
       const username = match[1]
       if (!username) continue
 
-      // Try to find user by username in guild members
       try {
-        // Search guild members (fetches if not cached)
         const members = await channel.guild.members.fetch({ query: username, limit: 10 })
         
-        // Filter to exact matches only
         const exactMatches = members.filter(m => 
           m.user.username.toLowerCase() === username.toLowerCase() ||
           m.displayName.toLowerCase() === username.toLowerCase()
         )
         
         if (exactMatches.size > 0) {
-          // Prefer non-bot users over bots (humans are more likely to be mentioned)
-          // Also prefer users who have recently been active (not deleted accounts)
           const sortedMatches = [...exactMatches.values()].sort((a, b) => {
-            // Non-bots first
             if (a.user.bot !== b.user.bot) return a.user.bot ? 1 : -1
-            // Then by join date (more recent = likely more active)
             const aJoined = a.joinedAt?.getTime() || 0
             const bJoined = b.joinedAt?.getTime() || 0
             return bJoined - aJoined
@@ -1102,8 +913,6 @@ export class DiscordConnector {
       }
     }
 
-    // Each mention is replaced where it was found, so the same text in code
-    // stays as written.
     let result = ''
     let from = 0
     for (const match of matches) {
@@ -1115,15 +924,11 @@ export class DiscordConnector {
     return result + content.slice(from)
   }
 
-  /**
-   * Resolve :emoji_name: shortcodes to Discord's <:name:id> format using guild emoji cache.
-   * This reverses the conversion done in convertMessage (incoming: <:name:id> → :name:)
-   */
   private resolveEmojis(content: string, guild: import('discord.js').Guild): string {
     // Match :word: patterns — Discord custom emoji names are alphanumeric + underscores, 2-32 chars
     return content.replace(/:(\w{2,32}):/g, (match, name) => {
       const emoji = guild.emojis.cache.find(e => e.name === name)
-      if (!emoji) return match // not a guild emoji, leave as-is
+      if (!emoji) return match
       return emoji.animated ? `<a:${emoji.name}:${emoji.id}>` : `<:${emoji.name}:${emoji.id}>`
     })
   }
@@ -1144,10 +949,6 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Send a message to a channel (auto-splits if > 1800 chars)
-   * Returns array of message IDs
-   */
   async sendMessage(channelId: string, content: string, replyToMessageId?: string): Promise<string[]> {
     return retryDiscord(async () => {
       const channel = await this.client.channels.fetch(channelId) as TextChannel
@@ -1156,15 +957,12 @@ export class DiscordConnector {
         throw new DiscordError(`Channel ${channelId} not found`)
       }
 
-      // Resolve <@username> mentions to <@USER_ID> format
       let resolvedContent = await this.resolveMentions(content, channelId)
 
-      // Resolve :emoji_name: shortcodes to <:name:id> format
       if (channel.guild) {
         resolvedContent = this.resolveEmojis(resolvedContent, channel.guild)
       }
 
-      // Split message if too long
       const chunks = this.splitMessage(resolvedContent, 1800)
       const messageIds: string[] = []
       for (let i = 0; i < chunks.length; i++) {
@@ -1176,14 +974,6 @@ export class DiscordConnector {
     }, this.options.maxBackoffMs)
   }
 
-  /**
-   * Send a response segment as one or more Discord messages, splitting it
-   * markdown-aware AFTER mention/emoji resolution — so resolution can never push
-   * a chunk past the limit and trigger an unrecorded re-split. Returns one
-   * record per sent message (with the synthetic bridge strings injected into it)
-   * plus the open-construct carry after the last message. `startCarry` continues
-   * a construct inherited from a previous send. Used by AgentLoop.sendSegments.
-   */
   async sendSegmentChunks(
     channelId: string,
     content: string,
@@ -1220,12 +1010,7 @@ export class DiscordConnector {
     return { chunks: sent, endCarry }
   }
 
-  /** Send a single pre-sized chunk, replying to a target if given (falling back
-   *  to a plain send if the target was deleted). Returns the sent message ID. */
   private async sendChunk(channel: TextChannel, content: string, replyToMessageId?: string): Promise<string> {
-    // Splitting targets 1800 chars; a chunk over Discord's 2000 hard limit means
-    // the markdown splitter hit its pathological escape (closers alone exceed the
-    // budget). Surface it rather than let the send 400 silently.
     if (content.length > DISCORD_MESSAGE_LIMIT) {
       logger.warn({ channelId: channel.id, length: content.length }, 'Chunk exceeds Discord message limit')
     }
@@ -1240,8 +1025,6 @@ export class DiscordConnector {
       } catch (error: any) {
         if (error.code === 10008 || error.message?.includes('Unknown message')) {
           logger.warn({ replyToMessageId, channelId: channel.id }, 'Reply target deleted, sending without reply')
-          // It keeps the reply's allowedMentions, as the attachment senders'
-          // fallbacks do, so its text pings no role and no @everyone.
           const sent = await channel.send({ content, allowedMentions: replyAllowedMentions() })
           return sent.id
         }
@@ -1252,10 +1035,6 @@ export class DiscordConnector {
     return sent.id
   }
 
-  /**
-   * Send a message with a text file attachment
-   * Used for long content that shouldn't be split
-   */
   async sendMessageWithAttachment(
     channelId: string, 
     content: string, 
@@ -1269,10 +1048,8 @@ export class DiscordConnector {
         throw new DiscordError(`Channel ${channelId} not found`)
       }
 
-      // Resolve <@username> mentions to <@USER_ID> format
       let resolvedContent = await this.resolveMentions(content, channelId)
 
-      // Resolve :emoji_name: shortcodes to <:name:id> format
       if (channel.guild) {
         resolvedContent = this.resolveEmojis(resolvedContent, channel.guild)
       }
@@ -1293,7 +1070,6 @@ export class DiscordConnector {
           logger.debug({ channelId, attachmentName: attachment.name, replyTo: replyToMessageId }, 'Sent message with attachment')
           return [sent.id]
         } catch (error: any) {
-          // If reply fails (message deleted), send without reply
           if (error.code === 10008 || error.message?.includes('Unknown message')) {
             logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
             delete options.reply
@@ -1311,10 +1087,6 @@ export class DiscordConnector {
     }, this.options.maxBackoffMs)
   }
 
-  /**
-   * Send a message with an image attachment (base64 encoded)
-   * Used for image generation model outputs
-   */
   async sendImageAttachment(
     channelId: string,
     imageBase64: string,
@@ -1329,7 +1101,6 @@ export class DiscordConnector {
         throw new DiscordError(`Channel ${channelId} not found`)
       }
 
-      // Determine file extension from media type
       const extMap: Record<string, string> = {
         'image/png': 'png',
         'image/jpeg': 'jpg',
@@ -1356,7 +1127,6 @@ export class DiscordConnector {
           logger.debug({ channelId, filename, replyTo: replyToMessageId }, 'Sent image attachment')
           return [sent.id]
         } catch (error: any) {
-          // If reply fails (message deleted), send without reply
           if (error.code === 10008 || error.message?.includes('Unknown message')) {
             logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
             delete options.reply
@@ -1374,15 +1144,11 @@ export class DiscordConnector {
     }, this.options.maxBackoffMs)
   }
 
-  /**
-   * Send a message with an arbitrary file attachment (from Buffer)
-   * Used for uploading files downloaded from URLs (videos, etc.)
-   */
   async sendFileAttachment(
     channelId: string,
     fileBuffer: Buffer,
     filename: string,
-    _contentType: string,  // Reserved for future use (e.g., content-type headers)
+    _contentType: string,
     caption?: string,
     replyToMessageId?: string
   ): Promise<string[]> {
@@ -1396,7 +1162,6 @@ export class DiscordConnector {
 
       let resolvedCaption = caption ? await this.resolveMentions(caption, channelId) : ''
 
-      // Resolve :emoji_name: shortcodes to <:name:id> format
       if (resolvedCaption && channel.guild) {
         resolvedCaption = this.resolveEmojis(resolvedCaption, channel.guild)
       }
@@ -1417,7 +1182,6 @@ export class DiscordConnector {
           logger.debug({ channelId, filename, size: fileBuffer.length, replyTo: replyToMessageId }, 'Sent file attachment')
           return [sent.id]
         } catch (error: any) {
-          // If reply fails (message deleted), send without reply
           if (error.code === 10008 || error.message?.includes('Unknown message')) {
             logger.warn({ replyToMessageId, channelId }, 'Reply target deleted, sending without reply')
             delete options.reply
@@ -1435,11 +1199,6 @@ export class DiscordConnector {
     }, this.options.maxBackoffMs)
   }
 
-  /**
-   * Send a webhook message
-   * For tool output, creates/reuses a webhook in the channel
-   * Falls back to regular message if webhooks aren't supported (e.g., threads)
-   */
   async sendWebhook(channelId: string, content: string, username: string): Promise<void> {
     return retryDiscord(async () => {
       const channel = await this.client.channels.fetch(channelId) as TextChannel
@@ -1453,7 +1212,6 @@ export class DiscordConnector {
       }
 
       try {
-      // Get or create webhook for this channel
         const webhooks = await (channel as any).fetchWebhooks()
       let webhook = webhooks.find((wh: any) => wh.name === 'Chapter3-Tools')
 
@@ -1465,7 +1223,6 @@ export class DiscordConnector {
         logger.debug({ channelId, webhookId: webhook.id }, 'Created webhook')
       }
 
-      // Send via webhook
       await webhook.send({
         content,
         username,
@@ -1474,17 +1231,12 @@ export class DiscordConnector {
 
       logger.debug({ channelId, username }, 'Sent webhook message')
       } catch (error: any) {
-        // Threads and some channel types don't support webhooks
-        // Fall back to regular message
         logger.warn({ channelId, error: error.message }, 'Webhook failed, falling back to regular message')
         await this.sendMessage(channelId, content)
       }
     }, this.options.maxBackoffMs)
   }
 
-  /**
-   * Pin a message in a channel
-   */
   async pinMessage(channelId: string, messageId: string): Promise<void> {
     return retryDiscord(async () => {
       const channel = await this.client.channels.fetch(channelId) as TextChannel
@@ -1504,16 +1256,10 @@ export class DiscordConnector {
    * through the refresh interval below.
    */
   async startTyping(channelId: string): Promise<void> {
-    // close() runs during shutdown, before the remaining shutdown steps and
-    // process.exit, and an activation that began before the agent loop stopped
-    // can still reach here then. Refuse it, so no typing timer outlives close()
-    // and keeps using the client it destroys.
     if (this.closed) {
       return
     }
 
-    // Replace, never shadow: an interval evicted from the map while still
-    // running can never be reached by stopTyping again.
     this.clearTypingInterval(channelId)
 
     const tick = async (): Promise<void> => {
@@ -1539,12 +1285,6 @@ export class DiscordConnector {
     void tick()
   }
 
-  /**
-   * Stop typing indicator
-   *
-   * Synchronous with respect to the map, so it always wins: no pending start
-   * holds state that could let it register afterwards.
-   */
   async stopTyping(channelId: string): Promise<void> {
     this.clearTypingInterval(channelId)
   }
@@ -1557,16 +1297,12 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Delete a message
-   */
   async deleteMessage(channelId: string, messageId: string): Promise<void> {
     return retryDiscord(async () => {
       try {
         const channel = await this.client.channels.fetch(channelId) as TextChannel
         const message = await channel.messages.fetch(messageId)
 
-        // Check if bot has permission to delete messages
         const permissions = channel.permissionsFor(this.client.user!)
         if (!permissions?.has('ManageMessages')) {
           logger.error({ channelId, messageId }, 'Bot lacks MANAGE_MESSAGES permission to delete message')
@@ -1587,9 +1323,6 @@ export class DiscordConnector {
     }, this.options.maxBackoffMs)
   }
 
-  /**
-   * Edit a message by ID
-   */
   async editMessage(channelId: string, messageId: string, newContent: string): Promise<void> {
     return retryDiscord(async () => {
       try {
@@ -1600,7 +1333,6 @@ export class DiscordConnector {
 
         const message = await channel.messages.fetch(messageId)
 
-        // Can only edit own messages
         if (message.author.id !== this.client.user?.id) {
           throw new DiscordError(`Cannot edit message ${messageId} - not authored by bot`)
         }
@@ -1619,17 +1351,6 @@ export class DiscordConnector {
     }, this.options.maxBackoffMs)
   }
 
-  /**
-   * Find a recent bot message by content prefix and edit it.
-   * Used for TTS interruption - finds the message that starts with the spoken text
-   * and truncates it to only contain what was actually spoken.
-   *
-   * @param channelId - The channel to search in
-   * @param contentPrefix - The content the message should start with
-   * @param newContent - The new content to replace with (usually same as contentPrefix)
-   * @param maxMessages - How many recent messages to search (default: 20)
-   * @returns true if message was found and edited, false otherwise
-   */
   async findAndEditBotMessage(
     channelId: string,
     contentPrefix: string,
@@ -1648,20 +1369,14 @@ export class DiscordConnector {
           throw new DiscordError('Bot user ID not available')
         }
 
-        // Fetch recent messages
         const messages = await channel.messages.fetch({ limit: maxMessages })
 
-        // Find the bot's message that starts with contentPrefix
-        // Trim whitespace and try both exact match and trimmed match
         const trimmedPrefix = contentPrefix.trim()
         const targetMessage = messages.find(msg => {
           if (msg.author.id !== botUserId) return false
           const content = msg.content
-          // Try exact match first
           if (content.startsWith(contentPrefix)) return true
-          // Try trimmed match
           if (content.startsWith(trimmedPrefix)) return true
-          // Try if message content trimmed matches prefix trimmed
           if (content.trim().startsWith(trimmedPrefix)) return true
           return false
         })
@@ -1674,7 +1389,6 @@ export class DiscordConnector {
           return false
         }
 
-        // Edit the message
         await targetMessage.edit(newContent)
         logger.info(
           { channelId, messageId: targetMessage.id, oldLength: targetMessage.content.length, newLength: newContent.length },
@@ -1693,12 +1407,6 @@ export class DiscordConnector {
     }, this.options.maxBackoffMs)
   }
 
-  /**
-   * Get the bot reply chain depth for a message.
-   * Counts consecutive bot messages in the reply chain.
-   * Consecutive messages from the same bot author count as one logical message.
-   * Returns the number of logical bot message groups leading up to this message.
-   */
   async getBotReplyChainDepth(channelId: string, message: any): Promise<number> {
     let depth = 0
     let currentMessage = message
@@ -1721,8 +1429,6 @@ export class DiscordConnector {
 
       if (isBot) {
         const currentBotId = currentMessage.author?.id
-        // Only increment depth if this is a different bot than the previous one
-        // (consecutive messages from the same bot count as one logical message)
         if (currentBotId !== lastBotAuthorId) {
           depth++
           lastBotAuthorId = currentBotId
@@ -1738,7 +1444,6 @@ export class DiscordConnector {
           }, 'Same bot consecutive message, not incrementing depth')
         }
       } else {
-        // Hit a non-bot message, stop counting
         logger.debug({ 
           messageId: currentMessage.id, 
           authorId: currentMessage.author?.id,
@@ -1747,7 +1452,6 @@ export class DiscordConnector {
         break
       }
 
-      // Follow the reply chain
       if (currentMessage.reference?.messageId) {
         try {
           currentMessage = await channel.messages.fetch(currentMessage.reference.messageId)
@@ -1755,7 +1459,6 @@ export class DiscordConnector {
             nextMessageId: currentMessage.id 
           }, 'Following reply reference')
         } catch (error) {
-          // Referenced message not found, stop the chain
           logger.debug({ 
             error, 
             finalDepth: depth 
@@ -1763,7 +1466,6 @@ export class DiscordConnector {
           break
         }
       } else {
-        // No more references, end of chain
         logger.debug({ finalDepth: depth }, 'No more references, chain ended')
         break
       }
@@ -1776,9 +1478,6 @@ export class DiscordConnector {
     return depth
   }
 
-  /**
-   * Add a reaction to a message
-   */
   async addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
     try {
       const channel = await this.client.channels.fetch(channelId) as TextChannel
@@ -1793,10 +1492,6 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Add a reaction to the most recent message in a channel.
-   * Fetches directly from Discord API (no cache) to get the latest message.
-   */
   async reactToLatestMessage(channelId: string, emoji: string): Promise<void> {
     try {
       const channel = await this.client.channels.fetch(channelId) as TextChannel
@@ -1824,30 +1519,18 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Close the Discord client
-   */
   async close(): Promise<void> {
-    // Clear all typing intervals
     for (const interval of this.typingIntervals.values()) {
       clearInterval(interval)
     }
     this.typingIntervals.clear()
-    // A tick still awaiting its channel fetch finds its handle absent and
-    // returns without sending (a send already in flight can't be un-sent),
-    // and the flag refuses any start after this.
     this.closed = true
-    // Clear cache maintenance intervals
     if (this.cacheStatsInterval) clearInterval(this.cacheStatsInterval)
     if (this.evictionInterval) clearInterval(this.evictionInterval)
 
     await this.client.destroy()
     logger.info('Discord connector closed')
   }
-
-  // ===========================================================================
-  // Push-based Message Cache
-  // ===========================================================================
 
   private pushMessageToCache(channelId: string, message: Message): void {
     const cache = this.messageCache.get(channelId)
@@ -1859,10 +1542,8 @@ export class DiscordConnector {
       this.messageCacheIndex.set(channelId, index)
     }
 
-    // Deduplicate: skip if already cached
     if (index.has(message.id)) return
 
-    // Fast path: message is newer than or equal to newest cached (common case for messageCreate events)
     const last = cache[cache.length - 1]
     if (!last || message.id >= (last as Message).id) {
       const idx = cache.push(message) - 1
@@ -1870,13 +1551,10 @@ export class DiscordConnector {
       return
     }
 
-    // Slow path: message is older than newest cached.
-    // Log a warning with stack trace when inserting old messages so we can
-    // diagnose what's poisoning the cache with stale data.
     const oldestCached = cache.find((m): m is Message => m !== null)
     if (oldestCached) {
       const gapMs = oldestCached.createdTimestamp - message.createdTimestamp
-      if (gapMs > 60 * 60 * 1000) {  // >1h older than oldest cached
+      if (gapMs > 60 * 60 * 1000) {
         logger.warn({
           channelId,
           messageId: message.id,
@@ -1889,7 +1567,6 @@ export class DiscordConnector {
       }
     }
 
-    // Insert in chronological position to maintain cache ordering.
     let lo = 0, hi = cache.length
     while (lo < hi) {
       const mid = (lo + hi) >> 1
@@ -1899,7 +1576,6 @@ export class DiscordConnector {
     }
     cache.splice(lo, 0, message)
 
-    // Rebuild index since splice shifted all positions after insertion point
     const newIndex = new Map<string, number>()
     cache.forEach((m, i) => { if (m) newIndex.set((m as Message).id, i) })
     this.messageCacheIndex.set(channelId, newIndex)
@@ -1928,31 +1604,19 @@ export class DiscordConnector {
     if (!index || !cache) return
     const idx = index.get(messageId)
     if (idx !== undefined) {
-      cache[idx] = null  // tombstone — compacted by evictStaleMessages()
+      cache[idx] = null
       index.delete(messageId)
     }
   }
 
-  /**
-   * Cached wrapper around channel.messages.fetch().
-   * After the first API fetch populates the cache, subsequent requests
-   * are served from memory. Push events keep the cache current.
-   *
-   * Supports:
-   *   { limit: N }              → last N messages
-   *   { limit: N, before: id }  → N messages before given ID
-   *   messageId (string)        → single message by ID
-   */
   async cachedFetchMessages(channel: TextChannel, options: any): Promise<any> {
     const channelId = channel.id
 
-    // Bypass cache for debugging
     if (process.env.NO_MSG_CACHE) {
       if (typeof options === 'string') return channel.messages.fetch(options)
       return channel.messages.fetch(options)
     }
 
-    // Single message fetch by ID — O(1) via index
     if (typeof options === 'string') {
       const index = this.messageCacheIndex.get(channelId)
       const cache = this.messageCache.get(channelId)
@@ -1963,50 +1627,35 @@ export class DiscordConnector {
           return cache[idx]
         }
       }
-      // Cache miss for single message - fetch from API.
-      // Do NOT push into the chronological cache — fetchSingle is used for
-      // reply targets and .history references that can be arbitrarily old.
-      // Inserting them shifts the cache window backwards, causing batch
-      // fetches to serve stale context instead of recent messages.
       this.cacheStats.misses++
       this.cacheStats.apiCalls++
       return channel.messages.fetch(options)
     }
 
-    // Batch fetch
     const limit = options.limit || 50
     const before = options.before as string | undefined
     const cache = this.messageCache.get(channelId)
 
     if (cache && this.messageCachePopulated.has(channelId)) {
       if (before) {
-        // Check if query goes beyond the oldest cached message — if so, fall through
-        // to API so pagination can extend backwards into channel history
         const oldestCached = cache.find((m): m is Message => m !== null)
         if (oldestCached && before <= oldestCached.id) {
-          // Beyond cache boundary — fall through to API fetch below
           logger.debug({ channelId, before, oldestCached: oldestCached.id }, 'Cache pagination boundary — falling through to API')
         } else {
-          // Within cache range — serve from cache
           this.cacheStats.hits++
           let filtered: Message[]
           const index = this.messageCacheIndex.get(channelId)
           const beforeIdx = index?.get(before)
           if (beforeIdx !== undefined) {
-            // Fast path: slice up to the known position, filter only tombstones.
-            // Sanity check: verify the message at beforeIdx actually matches the expected ID.
-            // If the cache was corrupted (out-of-order insertion), fall back to comparison.
             const msgAtIdx = cache[beforeIdx]
             if (msgAtIdx && (msgAtIdx as Message).id === before) {
               filtered = cache.slice(0, beforeIdx).filter((m): m is Message => m !== null)
             } else {
-              // Index is stale or cache is out of order — use comparison-based filter
               logger.warn({ channelId, before, beforeIdx, actualId: msgAtIdx ? (msgAtIdx as Message).id : 'null' },
                 'Cache index mismatch — falling back to comparison-based filter')
               filtered = cache.filter((m): m is Message => m !== null && m.id < before)
             }
           } else {
-            // Fallback: before ID not in index (deleted/external), full scan
             filtered = cache.filter((m): m is Message => m !== null && m.id < before)
           }
 
@@ -2017,7 +1666,6 @@ export class DiscordConnector {
           return map
         }
       } else {
-        // No 'before' — return most recent messages from cache
         this.cacheStats.hits++
         const filtered = cache.filter((m): m is Message => m !== null)
         const slice = filtered.slice(-limit).reverse()
@@ -2028,23 +1676,11 @@ export class DiscordConnector {
       }
     }
 
-    // Cache miss or beyond cache boundary - fetch from API
     this.cacheStats.misses++
     this.cacheStats.apiCalls++
     const fetched = await channel.messages.fetch(options) as unknown as Collection<string, Message>
 
     if (!this.messageCachePopulated.has(channelId)) {
-      // First population — only safe if the fetch covers the channel's CURRENT tail.
-      // A `before:` fetch with an old boundary (e.g., thread-parent context fetch
-      // paginating before the thread start message) returns a stale window. Caching
-      // that and marking the channel populated poisons it: later latest-message
-      // requests get served stale history with the gap permanently missing, because
-      // push events only append new messages on top of the stale window.
-      //
-      // Safe cases:
-      //   - No `before` (latest-messages fetch)
-      //   - `before` >= channel.lastMessageId (boundary IS the newest message,
-      //     e.g., activation fetch paginating before the trigger)
       const boundaryMsg = before ? channel.messages.cache.get(before) : undefined
       if (before) {
         const lastId = channel.lastMessageId
@@ -2054,9 +1690,7 @@ export class DiscordConnector {
           return fetched
         }
       }
-      const msgs = Array.from(fetched.values()).reverse()  // chronological order
-      // Include the boundary message itself (e.g., the trigger that arrived via
-      // gateway) so the cache window is complete up to the newest message
+      const msgs = Array.from(fetched.values()).reverse()
       if (boundaryMsg) {
         msgs.push(boundaryMsg)
       }
@@ -2067,11 +1701,6 @@ export class DiscordConnector {
       this.messageCachePopulated.add(channelId)
       logger.debug({ channelId, count: msgs.length }, 'Message cache populated from API')
     } else if (before && cache) {
-      // Extend cache backwards with older messages from API — but only when the
-      // query boundary touches the cache's oldest message (normal pagination).
-      // If `before` is older than the cache window (e.g., thread-parent fetch far
-      // in the past), the fetched batch is DISJOINT from the cache; unshifting it
-      // would create a silent gap in the middle of the cache.
       const oldestCachedMsg = cache.find((m): m is Message => m !== null)
       if (oldestCachedMsg && before === oldestCachedMsg.id) {
         const msgs = Array.from(fetched.values()).reverse()
@@ -2079,7 +1708,6 @@ export class DiscordConnector {
         const newMsgs = msgs.filter(m => !existingIndex.has(m.id))
         if (newMsgs.length > 0) {
           cache.unshift(...newMsgs)
-          // Rebuild index (positions shifted by prepend)
           const newIndex = new Map<string, number>()
           cache.forEach((m, i) => { if (m) newIndex.set(m.id, i) })
           this.messageCacheIndex.set(channelId, newIndex)
@@ -2094,26 +1722,19 @@ export class DiscordConnector {
     return fetched
   }
 
-  /**
-   * Evict stale messages: compact tombstones and cap per-channel size.
-   * Runs periodically via evictionInterval.
-   */
   private evictStaleMessages(): void {
     const maxPerChannel = 2000
     let totalEvicted = 0
 
     for (const [channelId, cache] of this.messageCache) {
-      // Step 1: Compact tombstones (filter out nulls)
       const compacted = cache.filter((m): m is Message => m !== null)
 
-      // Step 2: Evict oldest if over cap
       let evicted = 0
       if (compacted.length > maxPerChannel) {
         evicted = compacted.length - maxPerChannel
-        compacted.splice(0, evicted)  // remove oldest (array is chronological)
+        compacted.splice(0, evicted)
       }
 
-      // Step 3: Rebuild array and index
       this.messageCache.set(channelId, compacted)
       const newIndex = new Map<string, number>()
       compacted.forEach((m, i) => newIndex.set(m.id, i))
@@ -2128,13 +1749,9 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Prefetch channels to warm the message cache on startup.
-   * Called fire-and-forget from the ready handler.
-   */
   private async prefetchChannels(channelIds: string[]): Promise<void> {
     const concurrency = 5
-    const targetMessages = 1000  // Warm cache deep enough for most recency_window_messages configs
+    const targetMessages = 1000
     let fetched = 0
 
     for (let i = 0; i < channelIds.length; i += concurrency) {
@@ -2145,18 +1762,16 @@ export class DiscordConnector {
             const channel = await this.client.channels.fetch(channelId) as TextChannel
             if (!channel?.isTextBased()) return
 
-            // First batch populates the cache
             await this.cachedFetchMessages(channel, { limit: 100 })
             const cache = this.messageCache.get(channelId)
             if (!cache || cache.length === 0) return
 
-            // Paginate backwards to fill cache up to target
             let totalFetched = cache.length
             while (totalFetched < targetMessages) {
               const oldest = cache.find((m): m is Message => m !== null)
               if (!oldest) break
               const older = await this.cachedFetchMessages(channel, { limit: 100, before: oldest.id })
-              if (!older || older.size === 0) break  // Reached beginning of channel
+              if (!older || older.size === 0) break
               totalFetched += older.size
             }
 
@@ -2172,42 +1787,24 @@ export class DiscordConnector {
     logger.info({ requested: channelIds.length, fetched, targetMessages }, 'Channel prefetch complete')
   }
 
-  /**
-   * Synchronous view over the tracked-pin cache for the activation hot path.
-   * Returns null on cold miss (channel never seen) — the caller treats that
-   * as "no channel config" and falls back to base config. NEVER fetches here.
-   */
   getCachedPinnedConfigs(channelId: string): string[] | null {
     const pins = this.pinnedByChannel.get(channelId)
     if (!pins) return null
     return this.extractConfigsFromTrackedPins(pins, channelId)
   }
 
-  /**
-   * Synchronous view over the tracked-pin cache for steer lookups.
-   * Returns null on cold miss.
-   */
   getCachedPinnedSteers(channelId: string): PinnedSteer[] | null {
     const pins = this.pinnedByChannel.get(channelId)
     if (!pins) return null
     return this.extractSteersFromTrackedPins(pins)
   }
 
-  /**
-   * Synchronous view over the tracked-pin cache for `.sleep` lookups.
-   * Returns null on cold miss (caller treats as "no sleeps" — hot path never fetches).
-   */
   getCachedPinnedSleeps(channelId: string): TrackedPin[] | null {
     const pins = this.pinnedByChannel.get(channelId)
     if (!pins) return null
     return this.extractSleepsFromTrackedPins(pins)
   }
 
-  /**
-   * The bot's own role ids in a channel's guild (cache-only, synchronous).
-   * Used for `<@&roleId>` mention-targeting of pinned commands. Returns null
-   * when the guild / own-member isn't cached.
-   */
   getOwnRoleIds(channelId: string): string[] | null {
     const channel: any = this.client.channels.cache.get(channelId)
     const me = channel?.guild?.members?.me
@@ -2215,10 +1812,6 @@ export class DiscordConnector {
     return Array.from(me.roles.cache.values()).map((r: any) => r.id)
   }
 
-  /**
-   * Discord identity of the bot user this connector is logged in as.
-   * Returns empty fields until the `ready` event has fired.
-   */
   getBotDiscordIdentity(): { userId?: string; username?: string; globalName?: string } {
     const u = this.client.user
     if (!u) return {}
@@ -2233,11 +1826,10 @@ export class DiscordConnector {
     this.client.on('ready', () => {
       logger.info({ user: this.client.user?.tag }, 'Discord client ready')
 
-      // Optional: prefetch channels to warm the cache on startup
       const prefetchChannels = process.env.PREFETCH_CHANNELS
       if (prefetchChannels) {
         const channelIds = prefetchChannels.split(',').map(s => s.trim()).filter(Boolean)
-        this.prefetchChannels(channelIds)  // fire-and-forget
+        this.prefetchChannels(channelIds)
       }
     })
 
@@ -2252,7 +1844,6 @@ export class DiscordConnector {
         'Received messageCreate event'
       )
 
-      // Update message cache
       this.pushMessageToCache(message.channelId, message)
 
       // Discord can deliver a message already pinned (rare: webhook-delivered or boosts).
@@ -2272,15 +1863,10 @@ export class DiscordConnector {
     })
 
     this.client.on('messageUpdate', (oldMsg, newMsg) => {
-      // Update message cache — skip partial messages to avoid overwriting
-      // fully-resolved cached data with incomplete gateway payloads.
       if (newMsg.id && newMsg.channelId && !newMsg.partial) {
         this.updateMessageInCache(newMsg.channelId, newMsg as Message)
       }
 
-      // Pin tracking: unified handler for add / remove / content-update.
-      // MESSAGE_UPDATE carries the full payload for pin flips and content edits;
-      // oldMsg may be partial (Partials.Message) so we drive decisions off newMsg only.
       if (newMsg.id && newMsg.channelId) {
         const channelPins = this.getOrCreateChannelPinMap(newMsg.channelId)
         const wasTracked = channelPins.has(newMsg.id)
@@ -2308,7 +1894,6 @@ export class DiscordConnector {
     })
 
     this.client.on('messageDelete', (message) => {
-      // Update message cache
       if (message.id && message.channelId) {
         this.removeMessageFromCache(message.channelId, message.id)
       }
@@ -2341,7 +1926,6 @@ export class DiscordConnector {
           message = await message.fetch()
         } catch (e) {
           logger.debug({ messageId: message.id, error: e }, 'Failed to fetch partial message for reaction')
-          // Still queue the reaction event below even if fetch fails
         }
       }
 
@@ -2349,7 +1933,6 @@ export class DiscordConnector {
         this.updateMessageInCache(message.channelId, message as Message)
       }
 
-      // Queue reaction event for activation processing
       if (reaction.message.channelId && user.id) {
         this.queue.push({
           type: 'reaction',
@@ -2383,14 +1966,9 @@ export class DiscordConnector {
     })
 
     this.client.on('channelPinsUpdate', (channel) => {
-      // Pin state is now maintained event-driven via messageUpdate.
-      // Kept only for observability during rollout; confirm the event fires so
-      // we can correlate with any edge case. No fetchPinned call here.
       logger.debug({ channelId: (channel as any)?.id }, 'channelPinsUpdate seen (no-op)')
     })
 
-    // Shard lifecycle — observability only. Discord's RESUME replays missed events
-    // when the gap is short enough; we accept some drift risk beyond that for v1.
     this.client.on('shardReady', (shardId, unavailableGuilds) => {
       logger.info({ shardId, unavailableGuilds: unavailableGuilds?.size ?? 0 }, 'Shard ready')
     })
@@ -2404,7 +1982,6 @@ export class DiscordConnector {
 
   /** Oblique sends messages through webhooks named `displayname[oblique:various text]`. */
   private extractObliqueUsername(username: string): string | null {
-    // Match pattern: displayname[oblique:...]
     const obliquePattern = /^(.+?)\[oblique:[^\]]*\]$/
     const match = username.match(obliquePattern)
     if (match && match[1]) {
@@ -2413,13 +1990,7 @@ export class DiscordConnector {
     return null
   }
 
-  /**
-   * Convert Discord.js Message to DiscordMessage format
-   * Public for API access
-   */
   convertMessage(msg: Message, messageMap?: Map<string, Message>): DiscordMessage {
-    // Partial or system messages may lack author/content — return a minimal
-    // placeholder that the downstream empty-content filter will discard.
     if (!msg.author) {
       return {
         id: msg.id,
@@ -2443,12 +2014,8 @@ export class DiscordConnector {
       return user?.username ? `<@${user.username}>` : '@unknown-user'
     })
 
-    // Convert custom Discord emojis to readable :name: format
-    // <:EmojiName:123456789> and <a:EmojiName:123456789> → :EmojiName:
     content = content.replace(/<a?:(\w+):\d+>/g, ':$1:')
 
-    // Convert channel mentions to readable #channel-name format
-    // <#123456789> → #channel-name (or #unknown-channel if not in cache)
     content = content.replace(/<#(\d+)>/g, (_match, channelId) => {
       const channel = msg.guild?.channels.cache.get(channelId)
       return channel && 'name' in channel ? `#${channel.name}` : `#unknown-channel`
@@ -2462,7 +2029,6 @@ export class DiscordConnector {
       return `@${role.name.startsWith('portal-') ? role.name.slice('portal-'.length) : role.name}`
     })
     
-    // Defensive: log and skip if author is null (should be caught upstream in context-fetch)
     if (!msg.author) {
       logger.warn({
         messageId: msg.id,
@@ -2473,26 +2039,19 @@ export class DiscordConnector {
       throw new Error(`Message ${msg.id} has null author (partial=${msg.partial}, type=${msg.type}, webhookId=${msg.webhookId})`)
     }
 
-    // Check if this is an oblique bridge message and extract the real username
     const obliqueUsername = this.extractObliqueUsername(msg.author.username)
     const effectiveUsername = obliqueUsername || msg.author.username
     // Oblique messages are from webhooks (technically bots) but should be treated as human messages
     const effectiveBot = obliqueUsername ? false : msg.author.bot
 
-    // Resolve display name: server nickname > global display name > username
-    // For oblique messages, the extracted username IS the display name
     const effectiveDisplayName = obliqueUsername
       || msg.member?.nickname
       || msg.author.globalName
       || msg.author.username
     
-    // If this is a reply, prepend <reply:@username>
-    // For oblique messages, treat as non-bot (they should get reply prefixes)
     if (msg.reference?.messageId && !effectiveBot) {
-      // Look up the referenced message to get the author name
       const referencedMsg = messageMap?.get(msg.reference.messageId)
       if (referencedMsg) {
-        // Also extract oblique username from reply target if applicable
         const replyToObliqueUsername = this.extractObliqueUsername(referencedMsg.author.username)
         const replyToName = replyToObliqueUsername || referencedMsg.author.username
         content = `<reply:@${replyToName}> ${content}`
@@ -2591,7 +2150,6 @@ export class DiscordConnector {
 
         const data = await response.json() as any
 
-        // The /pins endpoint returns an array of message objects
         const rawMessages = Array.isArray(data) ? data : (data?.items?.map((item: any) => item.message) ?? data?.items ?? [])
 
         const messages = new Collection<string, Message>()
@@ -2637,9 +2195,6 @@ export class DiscordConnector {
   ): string[] {
     const configs: string[] = []
 
-    // Identity this connector can resolve a target against: the bot's own
-    // Discord account fields + persona id + its roles in this channel's guild.
-    // (botId / config name are matched downstream in parseChannelConfig.)
     const ident = this.getBotDiscordIdentity()
     const identity = {
       botId: '',
@@ -2650,24 +2205,14 @@ export class DiscordConnector {
     const ownRoleIds = this.getOwnRoleIds(channelId) ?? undefined
 
     for (const pin of pins) {
-      // Look for .config messages
-      // Format: .config [target]
-      //         ---
-      //         yaml content
       if (pin.content.startsWith('.config')) {
         const lines = pin.content.split('\n')
         if (lines.length > 2 && lines[1] === '---') {
-          // Extract target from first line (space-separated after .config)
           const firstLine = lines[0]!
           const target = firstLine.slice('.config'.length).trim() || undefined
 
           const yaml = lines.slice(2).join('\n')
 
-          // If this bot is addressed by a resolved mention (role/persona) or by
-          // a Discord identity the connector knows (username / global name /
-          // user id), strip the target so parseChannelConfig applies it as a
-          // bare config. Otherwise keep the target text for parseChannelConfig
-          // to match against botId / config name (or correctly skip).
           const addressesMe = pinAddressesBot(
             { targetText: target, mentionedPersonaIds: pin.mentionedPersonaIds, mentionedRoleIds: pin.mentionedRoleIds },
             identity,
@@ -2686,29 +2231,21 @@ export class DiscordConnector {
     return configs
   }
 
-  /**
-   * Detect image type from magic bytes
-   */
   private detectImageType(buffer: Buffer): string | null {
-    // Check magic bytes for common image formats
     if (buffer.length < 4) return null
     
-    // PNG: 89 50 4E 47
     if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
       return 'image/png'
     }
     
-    // JPEG: FF D8 FF
     if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
       return 'image/jpeg'
     }
     
-    // GIF: 47 49 46 38
     if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) {
       return 'image/gif'
     }
     
-    // WEBP: 52 49 46 46 ... 57 45 42 50
     if (buffer.length >= 12 &&
         buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
         buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50) {
@@ -2719,12 +2256,10 @@ export class DiscordConnector {
   }
 
   private async cacheImage(url: string, contentType: string): Promise<CachedImage | null> {
-    // 1. Check in-memory cache (fastest)
     if (this.imageCache.has(url)) {
       return this.imageCache.get(url)!
     }
 
-    // 2. Check disk cache using URL map (avoids download)
     const cachedFilename = this.urlToFilename.get(url)
     if (cachedFilename) {
       const filepath = join(this.options.cacheDir, cachedFilename)
@@ -2735,7 +2270,6 @@ export class DiscordConnector {
           const ext = cachedFilename.split('.')[1] || 'jpg'
           const mediaType = `image/${ext}`
           
-          // Get actual image dimensions (stored as-is; builder handles resize)
           let width: number | undefined
           let height: number | undefined
           try {
@@ -2761,18 +2295,15 @@ export class DiscordConnector {
             tokenEstimate,
           }
           
-          // Store in memory for faster subsequent access
           this.imageCache.set(url, cached)
           logger.debug({ url, filename: cachedFilename, tokenEstimate }, 'Loaded image from disk cache')
           return cached
         } catch (error) {
           logger.warn({ error, url, filepath }, 'Failed to read cached image from disk')
-          // Fall through to download
         }
       }
     }
 
-    // 3. Download image (cache miss)
     try {
       const response = await fetch(url)
 
@@ -2799,15 +2330,12 @@ export class DiscordConnector {
       const filename = `${hash}.${ext}`
       const filepath = join(this.options.cacheDir, filename)
 
-      // Save to disk
       if (!existsSync(filepath)) {
         writeFileSync(filepath, buffer)
       }
       
-      // Update URL map (will be persisted by caller after batch)
       this.urlToFilename.set(url, filename)
 
-      // Get actual image dimensions (stored as-is; builder handles resize)
       let width: number | undefined
       let height: number | undefined
       try {
@@ -2851,13 +2379,9 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Check if a file is a text file based on content type or extension
-   */
   private isTextAttachment(attachment: Attachment): boolean {
-    // Common text MIME types
     const textMimeTypes = [
-      'text/',  // text/plain, text/html, text/css, text/javascript, etc.
+      'text/',
       'application/json',
       'application/xml',
       'application/javascript',
@@ -2876,7 +2400,6 @@ export class DiscordConnector {
       }
     }
     
-    // Fall back to extension check
     const textExtensions = [
       '.txt', '.md', '.markdown', '.rst',
       '.py', '.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs',
@@ -2897,9 +2420,6 @@ export class DiscordConnector {
     return textExtensions.some(ext => name.endsWith(ext))
   }
 
-  /**
-   * Fetch text attachment content with truncation support
-   */
   private async fetchTextAttachment(attachment: Attachment, messageId: string): Promise<CachedDocument | null> {
     if (attachment.size && attachment.size > MAX_TEXT_ATTACHMENT_BYTES * 4) {
       logger.warn({ size: attachment.size, url: attachment.url }, 'Skipping oversized text attachment')
@@ -2939,12 +2459,6 @@ export class DiscordConnector {
     }
   }
 
-  /**
-   * Split a message into Discord-sized chunks without breaking markdown.
-   * A per-message safety net: splitPreservingMarkdown closes any fence/inline
-   * code left open in the final chunk, so each chunk renders on its own.
-   * Cross-message continuity is the caller's job (AgentLoop.sendSegments).
-   */
   private splitMessage(content: string, maxLength: number): string[] {
     return splitPreservingMarkdown(content, maxLength).chunks.map((c) => c.text)
   }

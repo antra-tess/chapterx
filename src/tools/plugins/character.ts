@@ -11,18 +11,15 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import type { ToolPlugin, PluginStateContext, ContextInjection } from './types.js'
 
-// Module-level cache: index_path → { vectors, chunks }
 const indexCache = new Map<string, { vectors: Float32Array | Float64Array, chunks: string[], dim: number }>()
 
 function loadIndex(indexPath: string): { vectors: Float32Array | Float64Array, chunks: string[], dim: number } {
   const cached = indexCache.get(indexPath)
   if (cached) return cached
 
-  // Load chunks
   const chunksData = readFileSync(join(indexPath, 'index_chunks.json'), 'utf-8')
   const chunks: string[] = JSON.parse(chunksData)
 
-  // Load numpy .npy file (float64, C-contiguous)
   const npyBuffer = readFileSync(join(indexPath, 'index_vectors.npy'))
   const { data, shape } = parseNpy(npyBuffer)
   const dim = shape[1]!
@@ -34,16 +31,13 @@ function loadIndex(indexPath: string): { vectors: Float32Array | Float64Array, c
 
 /** Handles only 2-D float32 and float64 arrays in numpy .npy format 1.0 with fortran_order=False. */
 function parseNpy(buffer: Buffer): { data: Float32Array | Float64Array, shape: number[] } {
-  // Magic: \x93NUMPY
   const headerLen = buffer.readUInt16LE(8)
   const headerStr = buffer.subarray(10, 10 + headerLen).toString('ascii')
 
-  // Parse dtype from header
   const descrMatch = headerStr.match(/'descr':\s*'([^']+)'/)
   const descr = descrMatch?.[1] || '<f4'
   const isFloat64 = descr === '<f8'
 
-  // Parse shape from header like "{'descr': '<f4', 'fortran_order': False, 'shape': (9187, 1024), }"
   const shapeMatch = headerStr.match(/\((\d+),\s*(\d+)\)/)
   if (!shapeMatch) throw new Error('Cannot parse .npy shape from header: ' + headerStr)
   const shape = [parseInt(shapeMatch[1]!), parseInt(shapeMatch[2]!)]
@@ -62,9 +56,6 @@ function parseNpy(buffer: Buffer): { data: Float32Array | Float64Array, shape: n
   return { data, shape }
 }
 
-/**
- * Query the embed server for a vector embedding.
- */
 async function embedQuery(url: string, model: string, text: string): Promise<Float32Array | Float64Array> {
   const response = await fetch(`${url}/${model}`, {
     method: 'POST',
@@ -92,12 +83,10 @@ function searchTopK(
   const n = indexVecs.length / dim
   const scores = new Float32Array(n)
 
-  // Normalize query
   let qNorm = 0
   for (let i = 0; i < dim; i++) qNorm += queryVec[i]! * queryVec[i]!
   qNorm = Math.sqrt(qNorm)
 
-  // Dot product (index vectors already normalized from numpy)
   for (let row = 0; row < n; row++) {
     let dot = 0
     const offset = row * dim
@@ -107,7 +96,6 @@ function searchTopK(
     scores[row] = dot
   }
 
-  // Top-K via partial sort
   const indices = Array.from({ length: n }, (_, i) => i)
   indices.sort((a, b) => scores[b]! - scores[a]!)
   return indices.slice(0, topK)
@@ -134,25 +122,19 @@ const characterPlugin: ToolPlugin = {
       return []
     }
 
-    // Get recent messages passed from the agent loop
     const recentMessages: string[] | undefined = config._recentMessages
     if (!recentMessages || recentMessages.length === 0) return []
 
     try {
-      // Load index (cached after first call)
       const { vectors, chunks, dim } = loadIndex(config.index_path)
 
-      // Build query from recent messages
       const query = recentMessages.slice(-(config.recent_messages || 7)).join('\n')
 
-      // Embed query
       const queryVec = await embedQuery(config.embed_url, config.embed_model, query)
 
-      // Search
       const topK = config.top_k || 20
       const topIndices = searchTopK(queryVec, vectors, dim, topK)
 
-      // Format results
       const separator = config.separator || '###'
       const resultChunks = topIndices.map(i => chunks[i]!)
       const content = resultChunks.join(`\n${separator}\n`)

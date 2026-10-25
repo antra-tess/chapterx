@@ -1,7 +1,3 @@
-/**
- * Tool cache interleaving and MCP image limiting
- */
-
 import type {
   ParticipantMessage,
   ContentBlock,
@@ -12,13 +8,6 @@ import type {
 import { logger } from '../../utils/logger.js'
 import { toolOutputText } from '../../tools/output-text.js'
 
-/**
- * Find the Discord messages that cached tool-call completion text reconstructs,
- * which the next context shows through the cached exchange instead.
- *
- * Each entry names them in coveredMessageIds. An entry written before that
- * field existed covers all its botMessageIds.
- */
 export function collectCoveredToolMessageIds(
   toolCacheWithResults: Array<{ call: ToolCall; result: any }>,
   discordMessages: DiscordMessage[]
@@ -27,9 +16,6 @@ export function collectCoveredToolMessageIds(
   const messagesById = new Map(discordMessages.map(message => [message.id, message]))
 
   for (const entry of toolCacheWithResults) {
-    // interleaveToolMessages inserts cached exchanges after their triggering
-    // message. If that anchor was deleted, filtered, or fell outside the current
-    // history window, suppressing the surviving Discord response would lose it.
     if (!messagesById.has(entry.call.messageId)) continue
 
     const botMessageIds = new Set(entry.call.botMessageIds || [])
@@ -41,16 +27,6 @@ export function collectCoveredToolMessageIds(
   return covered
 }
 
-/**
- * Format tool cache entries as bot-completion and system-result messages.
- * The tool calls of one model round share its completion, so it is emitted
- * once, followed by each result. A round is known by the messages its
- * completion covers; an entry that covers none, or was written before coverage
- * was recorded, is known by its trigger and text, so adjacent identical
- * completions are emitted once. An entry whose result was left out (an earlier
- * round of an activation the cache's five-result window cuts through) shows
- * its completion alone.
- */
 export function formatToolUseWithResults(
   toolCacheWithResults: Array<{call: ToolCall, result: any, resultOmitted?: boolean}>,
   botName: string
@@ -65,8 +41,6 @@ export function formatToolUseWithResults(
       ? `covers\0${coveredMessageIds.join('\0')}`
       : `${entry.call.messageId}\0${completionText}`
     if (completionText && completionKey !== previousCompletionKey) {
-      // Bot's message with original completion text (includes XML tool call for
-      // inline tools; a native entry holds the prose its round posted).
       messages.push({
         participant: botName,
         content: [{ type: 'text', text: completionText }],
@@ -77,22 +51,17 @@ export function formatToolUseWithResults(
     previousCompletionKey = completionKey
     if (entry.resultOmitted) continue
 
-    // Tool result message from SYSTEM (not bot)
-    // Result can be: string (legacy), { output, images } (new format), or other object
     const resultContent: ContentBlock[] = []
 
     if (typeof entry.result === 'string') {
-      // Legacy string result
       resultContent.push({ type: 'text', text: entry.result })
     } else if (entry.result && typeof entry.result === 'object') {
-      // New format with output and optional images
       const output = entry.result.output
       const outputText = entry.result.error
         ? `Error executing ${entry.call.name}: ${entry.result.error}`
         : toolOutputText(output)
       resultContent.push({ type: 'text', text: outputText })
 
-      // Add MCP images to context
       if (entry.result.images && Array.isArray(entry.result.images)) {
         for (const img of entry.result.images) {
           if (img.data && img.mimeType) {
@@ -122,15 +91,10 @@ export function formatToolUseWithResults(
   return messages
 }
 
-/**
- * Interleave tool messages with participant messages based on messageId.
- * Cached tool messages are inserted after the message that triggered them.
- */
 export function interleaveToolMessages(
   participantMessages: ParticipantMessage[],
   toolMessages: ParticipantMessage[]
 ): ParticipantMessage[] {
-  // Create a map of triggering message ID -> tool messages
   const toolsByMessageId = new Map<string, ParticipantMessage[]>()
   for (const toolMessage of toolMessages) {
     const messageId = toolMessage.messageId || ''
@@ -140,11 +104,9 @@ export function interleaveToolMessages(
     toolsByMessageId.get(messageId)!.push(toolMessage)
   }
 
-  // Interleave tools with messages based on messageId
   const interleavedMessages: ParticipantMessage[] = []
   for (const msg of participantMessages) {
     interleavedMessages.push(msg)
-    // Add any tools triggered by this message
     if (msg.messageId && toolsByMessageId.has(msg.messageId)) {
       interleavedMessages.push(...toolsByMessageId.get(msg.messageId)!)
     }
@@ -153,18 +115,11 @@ export function interleaveToolMessages(
   return interleavedMessages
 }
 
-/**
- * Limit MCP images (from tool results) — keeps the LATEST images.
- * MCP tool results have participant names like "System<[tool_name]".
- * Mutates the messages array in place.
- */
 export function limitMcpImages(messages: ParticipantMessage[], maxMcpImages: number): void {
-  // Collect MCP image positions (from tool result messages)
   const mcpImagePositions: Array<{ msgIndex: number; contentIndex: number }> = []
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i]!
-    // MCP tool results have participant like "System<[tool_name]"
     if (!msg.participant.startsWith('System<[')) continue
 
     for (let j = 0; j < msg.content.length; j++) {
@@ -175,13 +130,11 @@ export function limitMcpImages(messages: ParticipantMessage[], maxMcpImages: num
   }
 
   if (mcpImagePositions.length <= maxMcpImages) {
-    return // Under limit, nothing to do
+    return
   }
 
-  // Remove OLDEST images (keep the latest ones at the end)
   const toRemove = mcpImagePositions.length - maxMcpImages
 
-  // Remove in reverse order of contentIndex within each message to preserve indices
   const removalsByMsg = new Map<number, number[]>()
   for (let i = 0; i < toRemove; i++) {
     const pos = mcpImagePositions[i]!
@@ -191,9 +144,8 @@ export function limitMcpImages(messages: ParticipantMessage[], maxMcpImages: num
     removalsByMsg.get(pos.msgIndex)!.push(pos.contentIndex)
   }
 
-  // Remove in reverse contentIndex order within each message
   for (const [msgIndex, contentIndices] of removalsByMsg) {
-    contentIndices.sort((a, b) => b - a) // Descending order
+    contentIndices.sort((a, b) => b - a)
     for (const contentIndex of contentIndices) {
       messages[msgIndex]!.content.splice(contentIndex, 1)
     }

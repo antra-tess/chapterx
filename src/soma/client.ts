@@ -1,32 +1,16 @@
-/**
- * Soma Client
- * Lightweight client for the Soma credit management API
- * 
- * This is an optional integration - bots can run without Soma enabled.
- * When enabled, users must have sufficient ichor (credits) to trigger bot responses.
- */
-
 import { SomaConfig, SomaCheckResult } from '../types.js'
 import { logger } from '../utils/logger.js'
 
-/**
- * Trigger types that cost ichor
- * - mention: User @mentions the bot
- * - reply: User replies to bot's message  
- * - m_command: User uses "m continue" or similar
- * 
- * Random activations do NOT cost ichor
- */
 export type SomaTriggerType = 'mention' | 'reply' | 'm_command' | 'reaction'
 
 export interface SomaCheckParams {
-  userId: string           // Discord user ID
-  serverId: string         // Discord guild ID
-  channelId: string        // Discord channel ID (for reactions)
-  botId: string            // Bot's Discord ID
-  messageId: string        // Triggering message ID
+  userId: string
+  serverId: string
+  channelId: string
+  botId: string
+  messageId: string
   triggerType: SomaTriggerType
-  userRoles: string[]      // User's role IDs for cost multipliers
+  userRoles: string[]
 }
 
 /** @deprecated Soma's bot handles these reactions; ChapterX no longer uses it. */
@@ -35,10 +19,6 @@ export const INSUFFICIENT_FUNDS_EMOJI = '💸'
 /** @deprecated Soma's bot handles these reactions; ChapterX no longer uses it. */
 export const DM_FAILED_EMOJI = '📭'
 
-/**
- * Emoji for bot not configured in Soma
- * ChapterX adds this reaction since Soma can't handle unconfigured bots
- */
 export const BOT_NOT_CONFIGURED_EMOJI = '⚙️'
 
 export class SomaClient {
@@ -46,7 +26,7 @@ export class SomaClient {
   private token: string
 
   constructor(config: SomaConfig) {
-    this.baseUrl = config.url.replace(/\/$/, '')  // Remove trailing slash
+    this.baseUrl = config.url.replace(/\/$/, '')
     this.token = config.token || process.env.SOMA_TOKEN || ''
     
     if (!this.token) {
@@ -79,15 +59,12 @@ export class SomaClient {
       if (!response.ok) {
         const errorText = await response.text()
         
-        // Try to parse error response
         let errorData: { error?: string } = {}
         try {
           errorData = JSON.parse(errorText)
         } catch {
-          // Not JSON, that's fine
         }
 
-        // BOT_NOT_CONFIGURED = block activation, let ChapterX add ⚙️ reaction
         if (errorData.error === 'BOT_NOT_CONFIGURED') {
           logger.warn({ 
             status: response.status, 
@@ -108,8 +85,6 @@ export class SomaClient {
           url 
         }, 'Soma API request failed')
         
-        // On other API errors, allow the activation (fail open)
-        // This prevents Soma outages from blocking all bot usage
         return {
           allowed: true,
           cost: 0,
@@ -131,7 +106,6 @@ export class SomaClient {
     } catch (error) {
       logger.error({ error, url }, 'Soma API request failed')
       
-      // On network error, allow the activation (fail open)
       return {
         allowed: true,
         cost: 0,
@@ -141,10 +115,6 @@ export class SomaClient {
     }
   }
 
-  /**
-   * Refund a previous transaction (e.g., when inference fails)
-   * Returns the credits to the user
-   */
   async refund(params: SomaRefundParams): Promise<SomaRefundResult | null> {
     const url = `${this.baseUrl}/refund`
     
@@ -188,10 +158,6 @@ export class SomaClient {
     }
   }
 
-  /**
-   * Track a bot response message for reaction rewards/tips
-   * Call this after sending a bot response to enable rewards on that message
-   */
   async trackMessage(params: SomaTrackMessageParams): Promise<SomaTrackMessageResult | null> {
     const url = `${this.baseUrl}/track-message`
     
@@ -273,10 +239,6 @@ export class SomaClient {
   }
 }
 
-/**
- * Check if a trigger type should be charged
- * Random activations are free, direct triggers cost ichor
- */
 export function shouldChargeTrigger(triggerType: string): triggerType is SomaTriggerType {
   return ['mention', 'reply', 'm_command', 'reaction'].includes(triggerType)
 }
@@ -294,16 +256,16 @@ export interface SomaRefundResult {
 }
 
 export interface SomaTrackMessageParams {
-  messageId: string         // Discord message ID (bot's response)
-  channelId: string         // Discord channel ID
-  serverId: string          // Discord guild ID
-  botId: string             // Bot's Discord ID
-  triggerUserId: string     // Discord user ID who triggered the bot
-  triggerMessageId?: string // Discord message ID of user's triggering message (for rewards on the ping)
+  messageId: string
+  channelId: string
+  serverId: string
+  botId: string
+  triggerUserId: string
+  triggerMessageId?: string
 }
 
 export interface SomaTrackMessageResult {
   success: boolean
-  expiresAt: string      // ISO timestamp when tracking expires
+  expiresAt: string
 }
 
