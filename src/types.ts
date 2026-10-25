@@ -256,7 +256,7 @@ export interface TTSRelayConfig {
   enabled: boolean
   url: string  // WebSocket URL (e.g., "ws://localhost:8800/bot")
   token: string  // Authentication token
-  reconnect_interval_ms?: number  // Reconnect delay in ms
+  reconnect_interval_ms?: number  // Reconnect delay in ms. Default: 5000
 }
 
 export interface VendorConfig {
