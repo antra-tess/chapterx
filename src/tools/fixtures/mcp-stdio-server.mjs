@@ -10,7 +10,7 @@ server.registerTool(
   async ({ text }) => ({
     content: [
       { type: 'text', text: `echo: ${text}` },
-      { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' },
+      { type: 'image', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', mimeType: 'image/png' },
     ],
   }),
 )

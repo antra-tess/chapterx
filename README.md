@@ -290,7 +290,7 @@ git ls-remote https://github.com/antra-tess/membrane.git refs/heads/main | cut -
 
 ## Requirements
 
-- Node.js 20.10+
+- Node.js 20.10+ (running the tests needs 20.19+, 22.12+ or 24+)
 - TypeScript 5.3+
 - Discord bot token (in `discord_token` file)
 - LLM API keys (Anthropic, OpenAI, etc.) (in config files)

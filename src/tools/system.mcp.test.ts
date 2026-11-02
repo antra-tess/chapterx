@@ -35,7 +35,8 @@ describe('ToolSystem with a stdio MCP server', () => {
     const echo = system.getAvailableTools().find((tool) => tool.name === 'echo')
     expect(echo).toMatchObject({ serverName: 'fixture', description: 'Echoes its text, with a one-pixel image' })
     expect(echo?.inputSchema).toMatchObject({ type: 'object', properties: { text: { type: 'string' } }, required: ['text'] })
-    expect(system.getToolNames()).toEqual(expect.arrayContaining(['echo', 'fail']))
+    const fail = system.getAvailableTools().find((tool) => tool.name === 'fail')
+    expect(fail).toMatchObject({ serverName: 'fixture', description: 'Always throws', inputSchema: { type: 'object' } })
     expect(system.getMcpResources()).toEqual([
       expect.objectContaining({ server: 'fixture', uri: 'fixture://notes', name: 'notes', description: 'A short text resource' }),
     ])
@@ -46,7 +47,7 @@ describe('ToolSystem with a stdio MCP server', () => {
     const result = await system.executeTool(call('echo', { text: 'hi' }))
     expect(result.error).toBeUndefined()
     expect(result.output).toBe('echo: hi')
-    expect(result.images).toEqual([{ data: 'iVBORw0KGgo=', mimeType: 'image/png' }])
+    expect(result.images).toEqual([{ data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', mimeType: 'image/png' }])
   })
 
   it('returns what a failing tool says, and the server still answers the next call', async () => {

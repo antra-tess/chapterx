@@ -17,14 +17,17 @@ const connector = {
   client: {
     users: { fetch: async (id: string) => (id === user.id ? user : Promise.reject(Object.assign(new Error('Unknown User'), { code: 10013 }))) },
     guilds: {
-      fetch: async () => ({
-        members: {
-          fetch: async () => ({
-            displayName: 'Alice in g1',
-            roles: { cache: [{ name: '@everyone' }, { name: 'mod' }] },
-          }),
-        },
-      }),
+      fetch: async (guildId: string) => {
+        if (guildId !== 'g1') throw Object.assign(new Error('Unknown Guild'), { code: 10004 })
+        return {
+          members: {
+            fetch: async (userId: string) => {
+              if (userId !== 'u1') throw Object.assign(new Error('Unknown Member'), { code: 10007 })
+              return { displayName: 'Alice in g1', roles: { cache: [{ name: '@everyone' }, { name: 'mod' }] } }
+            },
+          },
+        }
+      },
     },
   },
 } as unknown as DiscordConnector
