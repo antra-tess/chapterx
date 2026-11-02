@@ -998,7 +998,7 @@ Claude:`
 ## Technology Stack
 
 ### Core
-- **Runtime**: Node.js 20.9+
+- **Runtime**: Node.js 20.10+
 - **Language**: TypeScript 5.3+
 - **Package Manager**: npm or pnpm
 
