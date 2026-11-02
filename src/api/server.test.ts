@@ -59,15 +59,19 @@ describe('ApiServer over HTTP', () => {
     expect((await fetch(`${base}/api/users/u1`, { headers: { authorization: 'Bearer wrong' } })).status).toBe(403)
   })
 
-  it('reads a JSON body, refusing an export request that names no last message', async () => {
+  it('reads a JSON body: an export request names its last message, and that URL is checked', async () => {
     const base = await start()
-    const response = await fetch(`${base}/api/messages/export`, {
+    const exportRequest = (body: unknown) => fetch(`${base}/api/messages/export`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ first: 'x' }),
+      body: JSON.stringify(body),
     })
-    expect(response.status).toBe(400)
-    expect(await response.json()).toMatchObject({ message: 'Missing required parameter: last' })
+    const missing = await exportRequest({ first: 'x' })
+    expect(missing.status).toBe(400)
+    expect(await missing.json()).toMatchObject({ message: 'Missing required parameter: last' })
+    const notDiscord = await exportRequest({ last: 'https://example.com/not-a-message' })
+    expect(notDiscord.status).toBe(400)
+    expect(await notDiscord.json()).toMatchObject({ message: 'Invalid Discord message URL format' })
   })
 
   it('takes the user from the path and the guild from the query', async () => {
