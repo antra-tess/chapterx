@@ -998,7 +998,7 @@ Claude:`
 ## Technology Stack
 
 ### Core
-- **Runtime**: Node.js 20+
+- **Runtime**: Node.js 20.10+
 - **Language**: TypeScript 5.3+
 - **Package Manager**: npm or pnpm
 
@@ -1007,7 +1007,6 @@ Claude:`
 - **@modelcontextprotocol/sdk** - MCP client
 - **@anthropic-ai/sdk** - Anthropic API
 - **@aws-sdk/client-bedrock-runtime** - AWS Bedrock
-- **openai** - OpenAI and compatible APIs
 - **@google/generative-ai** - Google Gemini API
 
 ### Utilities
