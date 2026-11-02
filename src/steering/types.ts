@@ -36,7 +36,7 @@ export interface ParsedSteerMessage {
 
 export const steeringDirectiveSchema = z.record(
   z.string(),
-  z.number({ invalid_type_error: 'Steering strength must be a number' })
+  z.number({ error: 'Steering strength must be a number' })
 )
 
 export const channelSteeringSchema = z.object({
